@@ -3,7 +3,7 @@ import { Badge, Button, Checkbox, Input, Spinner, Switch } from '@ui'
 import { formatTime, shared, toast } from './accounts-shared'
 import { t } from '../i18n'
 import {
-  getCheckinStore, setKeepaliveDraft, setTravelAuto, submitKeepaliveModels, subscribeCheckinStore,
+  getCheckinStore, setClaimAuto, setKeepaliveDraft, setTravelAuto, submitKeepaliveModels, subscribeCheckinStore,
   type CheckinStore,
 } from './checkin-state'
 import {
@@ -308,34 +308,36 @@ function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: Sched
   )
 }
 
-/* ─── 自动派猫猫旅行开关卡 ──────────────────── */
+/* ─── WorkBuddy 成长任务（自动派猫猫旅行 + 到期自动领取）──── */
 
 /**
- * 自动派猫猫旅行开关卡（挂在「定时签到」页的定时签到面板下方）。
+ * WorkBuddy 成长中心的自动开关卡（挂在「定时签到」页的定时签到面板下方）。
  *
- * ── 为什么与自动签到分开 ────────────────────────────────────
- * 两者周期语义不同：签到是「每天定点跑一轮」，旅行是「每 2 小时轮一次、
- * 到点才领」。混进同一张卡会让用户以为勾了旅行就跟着签到的时刻跑。
+ * ── 两颗开关、各自独立 ──────────────────────────────────────
+ * ① 「自动派猫猫旅行」：后台每 2 小时派 / 领猫猫旅行（会真花掉每日次数）；
+ * ② 「到期前自动领取任务」：把快到期（今天 ≥ 到期日 − 1 天）的成长任务领回来
+ *    （已完成直接领；未完成先点亮再领）。两者风险不同、开关分开。
  *
  * ── 数据 ────────────────────────────────────────────────────
- * 开关读数取签到中心快照的 `travel.enabled`（后端 `travelAuto` 配置键），
- * 写走 `setTravelAuto`（POST /api/travel/auto，起停后端独立轮询）。
+ * 开关读数取签到中心快照的 `travel.enabled` / `travel.claimEnabled`，写走
+ * `setTravelAuto` / `setClaimAuto`（POST /api/travel/auto，起停后端轮询）。
  * 仅 WorkBuddy 国内版有成长中心：没有 travel 段（无国内版账号）时整卡不渲染。
  */
 function TravelAutoCard({ store }: { store: CheckinStore }) {
   const enabled = store.snapshot?.travel?.enabled === true
+  const claimEnabled = store.snapshot?.travel?.claimEnabled === true
   return (
-    <section className='panel'>
+    <section className='panel ck-growth-card'>
       <div className='panel-head'>
-        <h2>{t('自动派猫猫旅行')}</h2>
-        <span className='tip-q' data-tip={t('开启后后台每 2 小时检查一次：空闲的账号自动派出、到点的自动领回积分（仅 WorkBuddy 国内版）。每个账号当天领回一次后当天不再派，次日自动恢复。会真花掉账号的每日旅行次数，请确认后再开。')}></span>
-        <Badge className='ml-auto' variant={enabled ? 'success' : 'outline'}>
-          {enabled ? t('已开启') : t('已关闭')}
+        <h2>{t('WorkBuddy 成长任务')}</h2>
+        <span className='tip-q' data-tip={t('后台每 2 小时检查一次：空闲的账号自动派出猫猫旅行、到点自动领回积分；另可开启「到期前自动领取」，把快过期的成长任务领回来（仅 WorkBuddy 国内版）。两项各自独立，会真发起写请求，请确认后再开。')}></span>
+        <Badge className='ml-auto' variant={enabled || claimEnabled ? 'success' : 'outline'}>
+          {enabled || claimEnabled ? t('已开启') : t('已关闭')}
         </Badge>
       </div>
       <div className='p-4'>
         <div className='ck-set-line'>
-          <span className='ck-set-k'>{t('开关')}</span>
+          <span className='ck-set-k'>{t('自动派猫猫旅行')}</span>
           <span className='ck-set-v'>
             <Switch
               checked={enabled}
@@ -344,8 +346,18 @@ function TravelAutoCard({ store }: { store: CheckinStore }) {
             />
           </span>
         </div>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('到期自动领取')}</span>
+          <span className='ck-set-v'>
+            <Switch
+              checked={claimEnabled}
+              disabled={store.travelSaving}
+              onCheckedChange={next => void setClaimAuto(next)}
+            />
+          </span>
+        </div>
         <div className='ck-note'>
-          {t('旅行要几小时才回来，所以领取由后台按固定间隔轮询（不是每天一次）；开启后无需手动操作，也可在「签到中心」页点「立即执行」当场跑一轮。')}
+          {t('旅行要几小时才回来，所以领取由后台按固定间隔轮询（不是每天一次）；开启后无需手动操作，也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。到期自动领取对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「成长记录」。')}
         </div>
       </div>
     </section>
@@ -633,9 +645,9 @@ function ScheduleTab(): React.ReactElement {
         </div>
       </section>
 
-      {/* 自动派猫猫旅行：挂在定时签到面板下方（它与定时签到同页，但周期语义
-          不同，仍是独立小卡）。仅 WorkBuddy 国内版有成长中心：没有 travel
-          段时不渲染。 */}
+      {/* WorkBuddy 成长任务（自动派猫猫旅行 + 到期自动领取）：挂在定时签到面板
+          下方（它与定时签到同页，但周期语义不同，仍是独立小卡）。仅 WorkBuddy
+          国内版有成长中心：没有 travel 段时不渲染。 */}
       {checkin.snapshot?.travel ? <TravelAutoCard store={checkin} /> : null}
 
       <KeepalivePanel

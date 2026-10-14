@@ -279,7 +279,11 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         // 任务」行的展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块），
         // 不再进本快照；明细台账走独立的 /api/travel-records 分页接口。
         "travel": has_cn_account.then(|| {
-            json!({ "enabled": crate::server::core::travel_auto::auto_enabled() })
+            json!({
+                "enabled": crate::server::core::travel_auto::auto_enabled(),
+                // 成长任务到期前自动领取（独立开关，见 core::travel_auto）
+                "claimEnabled": crate::server::core::travel_auto::claim_auto_enabled(),
+            })
         }),
         "history": checkin_history::list(),
     }))

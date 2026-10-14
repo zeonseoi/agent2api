@@ -140,8 +140,9 @@ export type CheckinCenterSnapshot = {
   auto: SchedulesSnapshot
   /** WorkBuddy 国际版日活保活的模型链（后端快照直接给当前生效值 + 缺省值） */
   keepalive?: KeepaliveState
-  /** 派猫猫旅行的自动开关（WorkBuddy 国内版；无国内版账号时后端不给这个键） */
-  travel?: { enabled: boolean }
+  /** WorkBuddy 国内版成长中心的自动开关（无国内版账号时后端不给这个键）：
+   *  `enabled` = 自动派猫猫旅行，`claimEnabled` = 到期前自动领取成长任务 */
+  travel?: { enabled: boolean; claimEnabled?: boolean }
   history: CheckinHistoryEntry[]
 }
 
@@ -346,9 +347,14 @@ type CheckinBridge = {
     message?: unknown
     credit?: unknown
   } | null | undefined>
-  /** 旅行自动开关的读写（POST /api/travel/auto，起停后端独立轮询） */
-  getTravelAuto?(): Promise<{ enabled?: boolean } | null | undefined>
-  setTravelAuto?(enabled: boolean): Promise<{ enabled?: boolean } | null | undefined>
+  /** 成长中心自动开关的读写（POST /api/travel/auto，起停后端独立轮询）。
+   *  `enabled` = 自动派猫猫旅行；`claimEnabled` = 到期前自动领取成长任务。
+   *  两项可分别提交（只传一项时另一项不动）。 */
+  getTravelAuto?(): Promise<{ enabled?: boolean; claimEnabled?: boolean } | null | undefined>
+  setTravelAuto?(patch: { enabled?: boolean; claimEnabled?: boolean }): Promise<{
+    enabled?: boolean
+    claimEnabled?: boolean
+  } | null | undefined>
   /** 旅行记录明细台账（GET /api/travel-records；与 bridge.rs、web_shim.rs 三处成对） */
   getTravelRecords?(params: Record<string, unknown>): Promise<{
     records?: TravelRecordRow[]
@@ -1265,8 +1271,28 @@ export async function setTravelAuto(enabled: boolean): Promise<void> {
   if (store.travelSaving) return
   patch({ travelSaving: true })
   try {
-    await bridge().setTravelAuto?.(enabled)
+    await bridge().setTravelAuto?.({ enabled })
     toast(enabled ? t('✅ 已开启自动派猫猫旅行') : t('已关闭自动派猫猫旅行'))
+    await loadCheckinCenter()
+  } catch (error) {
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ travelSaving: false })
+  }
+}
+
+/**
+ * 存「到期前自动领取成长任务」开关（独立于旅行开关，见 `core::travel_auto`）。
+ *
+ * 与 [`setTravelAuto`] 同一形态（同一端点、同一保存中闸、写后重拉快照），
+ * 只是提交的键不同 —— 后端 `POST /api/travel/auto` 受理 `{claimEnabled}`。
+ */
+export async function setClaimAuto(enabled: boolean): Promise<void> {
+  if (store.travelSaving) return
+  patch({ travelSaving: true })
+  try {
+    await bridge().setTravelAuto?.({ claimEnabled: enabled })
+    toast(enabled ? t('✅ 已开启到期自动领取') : t('已关闭到期自动领取'))
     await loadCheckinCenter()
   } catch (error) {
     toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')

@@ -159,6 +159,9 @@
    线画在**相邻两行之间**（`.ck-task-row + .ck-task-row` 的 border-top）：
    清单末行后面还跟着猫猫旅行 / 开学季，用 :last-child 判「末行」会失效。 */
 .ck-task-row + .ck-task-row { border-top: 1px solid var(--hairline); }
+/* 悬停整行给底色：与账号行 / 定时条目行同一档（--row-hover）。一行里有标题、
+   结论、状态与按钮，鼠标落在行内时高亮整行，才看得出「这一条」是哪一条。 */
+.ck-task-row:hover { background: var(--row-hover); }
 .ck-task-pts { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 /* 任务的到期 / 解锁标记（有期限才有）：与结果文案同档灰字，不抢标题注意力 */
 .ck-task-day { font-size: 12px; color: var(--text-3); }
@@ -187,6 +190,10 @@
 }
 .ck-set-line:last-child { border-bottom: 0; }
 .ck-set-k { color: var(--text-2); flex: none; width: 58px; }
+/* 成长任务卡的键列加宽：那张卡的两颗开关标签较长（「自动派猫猫旅行」7 字），
+   58px 只够 3~4 字、长标签会折成两行。只放宽这张卡，不动定宽基线
+   （其它卡的「总开关」「名称」等短标签照旧）。 */
+.ck-growth-card .ck-set-k { width: 96px; }
 .ck-set-v { flex: 1; min-width: 0; }
 .ck-range { display: flex; flex-wrap: wrap; gap: 6px; }
 .ck-note {

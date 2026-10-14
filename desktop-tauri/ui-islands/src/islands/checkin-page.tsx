@@ -66,7 +66,7 @@ const CHECKIN_TAB_OPTIONS = [
   { value: 'center', label: t('签到中心') },
   { value: 'schedule', label: t('定时签到') },
   { value: 'records', label: t('签到记录') },
-  { value: 'travel', label: t('旅行记录') },
+  { value: 'travel', label: t('成长记录') },
 ] as const
 
 /* ─── 小组件 ───────────────────────────────── */

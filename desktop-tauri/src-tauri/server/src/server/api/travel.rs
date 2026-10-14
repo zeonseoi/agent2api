@@ -32,26 +32,42 @@ use crate::server::errors::management_error;
 use crate::server::http::ok_json;
 use crate::server::ServerState;
 
-/// GET /api/travel/auto —— 读自动开关。
+/// GET /api/travel/auto —— 读自动开关（旅行 + 成长任务领取各一项）。
 pub async fn get_travel_auto() -> Response {
-    ok_json(json!({ "enabled": travel_auto::auto_enabled() }))
+    ok_json(json!({
+        "enabled": travel_auto::auto_enabled(),
+        "claimEnabled": travel_auto::claim_auto_enabled(),
+    }))
 }
 
-/// POST /api/travel/auto —— 存自动开关（body `{enabled}`），并起停调度。
+/// POST /api/travel/auto —— 存自动开关（body `{enabled}` 与/或 `{claimEnabled}`），
+/// 并起停调度。两项可分别提交（只传一项时另一项不动）。
 pub async fn set_travel_auto(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = match serde_json::from_slice::<Value>(&body) {
         Ok(value) => value,
         Err(error) => return management_error(400, format!("请求体不是合法 JSON：{error}")),
     };
-    let Some(enabled) = payload.get("enabled").and_then(Value::as_bool) else {
-        return management_error(400, "enabled 必须是布尔值");
-    };
-    match state.travel_auto() {
-        Some(service) => service.set_enabled(enabled),
-        // 全局句柄未装入（理论上启动时已装）：仍然写配置，只是本次不排调度
-        None => travel_auto::set_auto(enabled),
+    let enabled = payload.get("enabled").and_then(Value::as_bool);
+    let claim_enabled = payload.get("claimEnabled").and_then(Value::as_bool);
+    if enabled.is_none() && claim_enabled.is_none() {
+        return management_error(400, "需要 enabled 或 claimEnabled（布尔值）");
     }
-    ok_json(json!({ "enabled": travel_auto::auto_enabled() }))
+    // 旅行开关：起停后台轮询（领取不开时循环仍可只跑旅行）
+    if let Some(enabled) = enabled {
+        match state.travel_auto() {
+            Some(service) => service.set_enabled(enabled),
+            // 全局句柄未装入（理论上启动时已装）：仍然写配置，只是本次不排调度
+            None => travel_auto::set_auto(enabled),
+        }
+    }
+    // 领取开关：只写配置，调度由旅行循环那一侧按需现读（见 travel_auto::fire）
+    if let Some(claim_enabled) = claim_enabled {
+        travel_auto::set_claim_auto(claim_enabled);
+    }
+    ok_json(json!({
+        "enabled": travel_auto::auto_enabled(),
+        "claimEnabled": travel_auto::claim_auto_enabled(),
+    }))
 }
 
 /// POST /api/travel/run —— 立即执行一轮（自动派发 + 领取）。

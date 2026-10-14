@@ -66,6 +66,9 @@ pub const TICK_MS: u64 = 2 * 60 * 60 * 1000;
 
 /// config.json 里承载自动旅行开关的键
 const CONFIG_KEY: &str = "travelAuto";
+/// config.json 里承载**成长任务自动领取**开关的键（独立于旅行开关，见
+/// [`claim_auto_enabled`]）
+const CLAIM_CONFIG_KEY: &str = "growthClaimAuto";
 /// config.json 里承载旅行状态缓存的键
 const CACHE_KEY: &str = "travelCache";
 
@@ -206,6 +209,153 @@ pub fn record_manual(account_id: &str, account_name: &str, report: &growth::trav
         &report.message,
         report.credit,
     );
+}
+
+// ─── 到期前自动领取成长任务 ──────────────────────────────────
+
+/// 自动领取的开关（config.json 的 `growthClaimAuto` 键，**独立于旅行开关**）。
+///
+/// ── 为什么与旅行开关分开 ────────────────────────────────────
+/// 两件事的风险不同：旅行会真花掉账号的每日次数（用户要显式开），任务领取是
+/// 把**已经该拿的奖励**领回来（动作更轻）。合成一个开关会让「只想派猫」的用户
+/// 被迫接受任务领取（或反之）。两个键各自读写，界面各一颗开关。
+pub fn claim_auto_enabled() -> bool {
+    config::current()
+        .raw()
+        .get(CLAIM_CONFIG_KEY)
+        .and_then(|value| value.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// 写自动领取开关。
+pub fn set_claim_auto(enabled: bool) {
+    config::update_raw_field(CLAIM_CONFIG_KEY, json!({ "enabled": enabled }));
+}
+
+/// 任务是否「快到期」：`valid_end` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
+///
+/// `valid_end` 是 ISO 8601 带时区串（如 `2026-11-02T23:59:00+08:00`）。取它
+/// 的北京日期键，往前推一天得到「该领的那天」；今天到了或过了就返回 true
+/// （到期当天/之后仍会尝试，直到上游把它判成已领或任务下线）。
+///
+/// 无期限（`valid_end` 为 null）的任务**不碰** —— 用户要的是「有结束时间的任务」。
+fn due_for_claim(task: &Value) -> bool {
+    let Some(end) = task.get("valid_end").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(threshold) = claim_threshold_day(end) else {
+        return false;
+    };
+    // 日期键定长，字典序即时间序（见 beijing 模块的说明）
+    crate::server::core::beijing::today_key() >= threshold
+}
+
+/// `valid_end`（ISO 串）→ 「该领的那天」= 到期日 − 1 天的北京日期键。
+///
+/// 拆成纯函数便于单测：判据里只有它涉及日期运算，`due_for_claim` 只做一次
+/// 字符串比较（日期键 `YYYY-MM-DD` 定长、字典序即时间序）。
+/// 解析不出来（非法串 / 无时区）给 None，调用方按「不快到」保守处理。
+fn claim_threshold_day(end: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    let end_day = at
+        .with_timezone(&crate::server::core::beijing::offset())
+        .date_naive();
+    Some((end_day - chrono::Days::new(1)).format("%Y-%m-%d").to_string())
+}
+
+/// 对一个账号扫一遍成长任务，领掉「快到期」的。
+///
+/// ── 判据与动作 ──────────────────────────────────────────────
+/// 只看 `valid_end` 非空、且今天 ≥ 到期日 − 1 天的任务；已 `claimed` 的跳过。
+/// 已完成 → 直接 claim；**未完成 → 先点亮（accept + 上报）再 claim**（用户选：
+/// 「未完成的也顺便点亮再领」）。未映射 / 不可伪造 / 未解锁的任务由官方
+/// `process_task` 自己保守跳过，这里不重复判。
+///
+/// ── 为什么复用 `process_task(auto_claim = true)` ─────────────
+/// 它已经是「accept → 上报 → 回读 → claim」的一体流程（含 accept 回读验证），
+/// 正是「点亮 + 领取」。这里只是把「挑哪几条」的逻辑放在外面。
+///
+/// 返回 `(领取成功数, 失败数)`，供轮次汇总日志用。
+async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usize) {
+    let accounts = cn_accounts(store);
+    let mut claimed = 0usize;
+    let mut failed = 0usize;
+    for account in &accounts {
+        let id = account.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let name = account
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(id);
+        let Some(account_ctx) = GrowthAccount::from_store(store, id) else {
+            continue;
+        };
+        // 两个口径都拉（小程序限定任务只在带 mp 头的列表里下发），合并去重
+        let mut tasks: Vec<Value> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for mp in [false, true] {
+            let Ok(list) = growth::list_tasks(&account_ctx, mp).await else {
+                continue;
+            };
+            for task in list {
+                let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
+                if code.is_empty() || seen.iter().any(|item| item == code) {
+                    continue;
+                }
+                seen.push(code.to_string());
+                tasks.push(task);
+            }
+        }
+        for task in &tasks {
+            let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
+            if code.is_empty() {
+                continue;
+            }
+            let status = task.get("accept_status").and_then(Value::as_str).unwrap_or("");
+            if status == "claimed" {
+                continue;
+            }
+            if !due_for_claim(task) {
+                continue;
+            }
+            let report = growth::process_task(&account_ctx, code, task, true).await;
+            match report.outcome {
+                growth::TaskOutcome::Done => {
+                    claimed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_CLAIMED,
+                        Some(format!("{}（+{} 积分）", report.message, report.credit)),
+                        None,
+                    );
+                }
+                growth::TaskOutcome::Failed => {
+                    failed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_FAILED,
+                        None,
+                        Some(format!("{code}：{}", report.message)),
+                    );
+                }
+                // Already / Skipped：不是事件（已领 / 未映射 / 不可伪造 / 未解锁）
+                _ => {}
+            }
+        }
+    }
+    (claimed, failed)
 }
 
 // ─── 一轮执行 ────────────────────────────────────────────────
@@ -584,6 +734,11 @@ impl TravelAuto {
 
     /// 跑一轮（自动循环与「立即执行」共用）。防重入：已在跑就跳过。
     ///
+    /// ── 一轮做两件事 ────────────────────────────────────────────
+    /// ① 猫猫旅行状态机（`collect`，受旅行开关控制，`collect` 内部自己判）；
+    /// ② 成长任务到期领取（受领取开关控制）。两者开关独立，但共用这一条循环
+    ///    与这一道防重入闸 —— 不新起第二个循环，避免两套生命周期与并发打上游。
+    ///
     /// ── 为什么用 Drop 守卫而不是手动复位 ────────────────────────
     /// `fire` 会在中途 await（网络请求）。若这一轮正跑着，用户把开关关掉，`stop()`
     /// 会 `abort` 掉任务 —— 那会让 await 之后的复位代码永不执行，`running` 永久卡在
@@ -600,11 +755,29 @@ impl TravelAuto {
             RunningGuard { inner: self.inner.clone() }
         };
         let _ = collect(&self.store, TravelMode::Act, reason).await;
+        // 成长任务到期领取：独立开关，开才跑（本轮已打上游，顺带扫描不额外起循环）
+        if claim_auto_enabled() {
+            let (claimed, failed) = claim_due_tasks(&self.store, reason).await;
+            if claimed > 0 || failed > 0 {
+                logging::log(
+                    "[Growth]",
+                    &format!(
+                        "🎁 成长任务到期领取（{reason}）：领回 {claimed} 项{}",
+                        if failed > 0 { format!("，失败 {failed} 项") } else { String::new() },
+                    ),
+                );
+            }
+        }
     }
 
-    /// 手动「立即执行一轮」（界面按钮）。
+    /// 手动「立即执行一轮」（界面按钮）：旅行一轮 + 到期任务领取（各受自己
+    /// 的开关控制），与后台循环 [`Self::fire`] 同口径。
     pub async fn run_now(&self) -> Value {
-        collect(&self.store, TravelMode::Act, "手动触发").await
+        let data = collect(&self.store, TravelMode::Act, "手动触发").await;
+        if claim_auto_enabled() {
+            let _ = claim_due_tasks(&self.store, "手动触发").await;
+        }
+        data
     }
 }
 
@@ -655,5 +828,42 @@ mod tests {
         assert_eq!(reason_source("手动触发"), "manual");
         assert_eq!(reason_source("后台巡检"), "auto");
         assert_eq!(reason_source("开启自动"), "auto");
+    }
+
+    /// 「该领的那天」= 到期日 − 1 天的北京日期键（`due_for_claim` 的核心判据）。
+    ///
+    /// 上游 `valid_end` 是带时区的 ISO 串，取**北京日期**再减一天：晚 23:59 的
+    /// 时刻不能被时区差推到次日（那会让「前一天」算错），所以先换到 +08:00 再取日。
+    #[test]
+    fn claim_threshold_is_one_day_before_expiry() {
+        assert_eq!(
+            claim_threshold_day("2026-11-02T23:59:00+08:00").as_deref(),
+            Some("2026-11-01")
+        );
+        // 跨月边界：11-01 的前一天是 10-31
+        assert_eq!(
+            claim_threshold_day("2026-11-01T00:00:00+08:00").as_deref(),
+            Some("2026-10-31")
+        );
+        // 非 +08:00 的来源：按北京日期换算后再减一天
+        assert_eq!(
+            claim_threshold_day("2026-11-02T16:30:00Z").as_deref(),
+            Some("2026-11-02")
+        );
+    }
+
+    /// 非法 / 无时区的串给 None（调用方据此保守不领）。
+    #[test]
+    fn claim_threshold_rejects_unparseable() {
+        assert_eq!(claim_threshold_day("").as_deref(), None);
+        assert_eq!(claim_threshold_day("2026-11-02").as_deref(), None);
+        assert_eq!(claim_threshold_day("not-a-date").as_deref(), None);
+    }
+
+    /// 无 `valid_end` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
+    #[test]
+    fn due_for_claim_ignores_tasks_without_valid_end() {
+        assert!(!due_for_claim(&json!({ "task_code": "x" })));
+        assert!(!due_for_claim(&json!({ "valid_end": Value::Null })));
     }
 }

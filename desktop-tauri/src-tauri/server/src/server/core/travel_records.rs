@@ -12,6 +12,12 @@
 //! 跳过」—— 那些不是事件。只把 `departed`（真派出）/ `claimed`（真领回）/
 //! `failed`（真失败）记下来，台账才可读（与旧 `travel_history` 的取舍一致）。
 //!
+//! ── 它也承载「成长任务到期前自动领取」────────────────────────
+//! 任务领取不是猫猫旅行的动作，但同属「WorkBuddy 国内版成长中心」这一路、同由
+//! `core::travel_auto` 的两小时循环触发。**不另开一张表**：界面把这张表读成
+//! 「成长记录」（旅行 + 任务领取在一处看），多开一套查询 / 筛选 / 清空只是重复
+//! 建设。因此多一个 `task_claimed` 档位（见该常量的说明）。
+//!
 //! ── source 的字面集合 ────────────────────────────────────────
 //! `auto` 后台循环 / `startup` 启动补跑 / `manual` 手动「立即执行」与单账号
 //! 「派猫猫 / 领回」。前者由 `travel_auto::collect` 按 `reason` 归并，后两者从
@@ -42,6 +48,9 @@ pub const OUTCOME_DEPARTED: &str = "departed";
 pub const OUTCOME_CLAIMED: &str = "claimed";
 /// 领养成功（无猫 → 有猫；官方状态机的 `adopt` 档，同时入账 +300 积分）
 pub const OUTCOME_ADOPTED: &str = "adopted";
+/// 成长任务到期前的自动领取（不经猫猫旅行，落同一张表；见 `core::travel_auto`
+/// 的到期领取扫描）。message 是收益文案（如 `+300 积分`）。
+pub const OUTCOME_TASK_CLAIMED: &str = "task_claimed";
 pub const OUTCOME_FAILED: &str = "failed";
 
 pub fn install(db: Option<Db>) {
@@ -75,7 +84,10 @@ pub fn record(
         account_name: account_name.to_string(),
         provider: provider.to_string(),
         outcome: outcome.to_string(),
-        ok: matches!(outcome, OUTCOME_DEPARTED | OUTCOME_CLAIMED | OUTCOME_ADOPTED),
+        ok: matches!(
+            outcome,
+            OUTCOME_DEPARTED | OUTCOME_CLAIMED | OUTCOME_ADOPTED | OUTCOME_TASK_CLAIMED
+        ),
         message,
         error,
     });

@@ -568,10 +568,11 @@ const BRIDGE_JS: &str = r#"
       return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
     },
 
-    // ── 派猫猫旅行：自动调度（上游调用与单账号「巡检一次」在官方 growth 那侧，
-    // 见 api::travel 的模块头 —— 这里只有开关与「立即执行一轮」）──
+    // ── WorkBuddy 成长任务自动调度（上游调用与单账号「巡检一次」在官方 growth
+    // 那侧，见 api::travel 的模块头 —— 这里只有开关与「立即执行一轮」）──
+    // patch 形如 `{enabled}`（旅行）/ `{claimEnabled}`（到期领取），两项可分别提交
     getTravelAuto: () => call('GET', '/api/travel/auto'),
-    setTravelAuto: enabled => call('POST', '/api/travel/auto', { enabled }),
+    setTravelAuto: patch => call('POST', '/api/travel/auto', patch),
     runTravelNow: () => call('POST', '/api/travel/run', {}),
     // 旅行记录明细台账（与 web_shim.rs 的同名方法成对）
     getTravelRecords: params => {

@@ -5,16 +5,18 @@ import { t } from '../i18n'
 import { getCheckinStore, type TravelRecordRow } from './checkin-state'
 
 /**
- * 签到中心的「旅行记录」标签页：每账号一行的**明细台账**（schema v14）。
+ * 签到中心的「成长记录」标签页：每账号一行的**明细台账**（schema v14）。
  *
  * ── 这页回答什么 ────────────────────────────────────────────
  * 「谁哪一轮被派出去 / 领回了多少 / 谁失败了」—— 这些在改造前只有一条聚合的
  * config.json `travelHistory`（每轮一行，看不见账号粒度），现在每执行一轮「真动作」，
  * 每个真动手的账号落一行：时间、来源、账号、提供商、结果档位、收益与错误原文。
+ * **成长任务到期前的自动领取也落这张表**（结果档位 `task_claimed`）—— 旅行与
+ * 任务领取同属「WorkBuddy 国内版成长中心」这一路，一处看全，故页面叫「成长记录」。
  *
  * ── 与「签到记录」的关系 ────────────────────────────────────
  * 两页是并排的兄弟标签页，样式与交互刻意逐字一致（复用同一套 `.ck-records-*`
- * 样式），差别只在列语义与筛选档位（结果 = 派出 / 领回 / 失败）。
+ * 样式），差别只在列语义与筛选档位（结果 = 派出 / 领回 / 领养 / 领任务 / 失败）。
  *
  * ── 数据 ────────────────────────────────────────────────────
  * GET /api/travel-records（limit / offset 真分页 + outcome / keyword 筛选），
@@ -33,6 +35,8 @@ const PAGE_SIZE = 50
 const OUTCOME_VIEW: Record<string, { label: string; variant: 'success' | 'brand' | 'destructive' }> = {
   departed: { label: '派出', variant: 'brand' },
   claimed: { label: '领回', variant: 'success' },
+  adopted: { label: '领养', variant: 'success' },
+  task_claimed: { label: '领任务', variant: 'success' },
   failed: { label: '失败', variant: 'destructive' },
 }
 
@@ -101,9 +105,9 @@ function TravelRecordsTab(): React.ReactElement {
     const ask = shared().wbConfirm?.ask
     if (!ask) return
     const message = hasFilters
-      ? t('确定清空当前筛选出的旅行记录？清空后无法恢复。')
-      : t('确定清空<strong>全部</strong>旅行记录？清空后无法恢复。')
-    if (!(await ask({ title: t('清空旅行记录'), html: message, okText: t('清空'), okClass: 'danger' }))) return
+      ? t('确定清空当前筛选出的成长记录？清空后无法恢复。')
+      : t('确定清空<strong>全部</strong>成长记录？清空后无法恢复。')
+    if (!(await ask({ title: t('清空成长记录'), html: message, okText: t('清空'), okClass: 'danger' }))) return
     try {
       const api = shared().workbuddyDesktop as {
         clearTravelRecords?: (params: Record<string, unknown>) => Promise<{ removed?: number } | null | undefined>
@@ -112,7 +116,7 @@ function TravelRecordsTab(): React.ReactElement {
       await api?.clearTravelRecords?.(hasFilters
         ? { outcome: filters.outcome, keyword: filters.keyword }
         : { all: '1' })
-      toast('旅行记录已清空')
+      toast('成长记录已清空')
       await load({ page: 1, filters })
       setPage(1)
     } catch (caught) {
@@ -123,8 +127,8 @@ function TravelRecordsTab(): React.ReactElement {
   return (
     <section className='panel'>
       <div className='panel-head'>
-        <h2>{t('旅行记录')}</h2>
-        <span className='panel-sub'>{t('每执行一轮真动作 · 每个动手的账号一条明细 · 只记派出 / 领回 / 失败')}</span>
+        <h2>{t('成长记录')}</h2>
+        <span className='panel-sub'>{t('每执行一轮真动作 · 每个动手的账号一条明细 · 记派出 / 领回 / 领养 / 领任务 / 失败')}</span>
         <div className='ml-auto flex items-center gap-2'>
           <Button size='sm' variant='outline' disabled={loading} onClick={() => void load({ page, filters })}>
             {loading ? t('刷新中…') : t('刷新')}
@@ -174,13 +178,13 @@ function TravelRecordsTab(): React.ReactElement {
 
       {error ? (
         <div className='ck-page-error'>
-          <span>{t('读取旅行记录失败：{error}', { error })}</span>
+          <span>{t('读取成长记录失败：{error}', { error })}</span>
           <Button size='sm' variant='outline' onClick={() => void load({ page, filters })}>{t('重试')}</Button>
         </div>
       ) : null}
 
       {rows.length === 0 && !loading ? (
-        <div className='ck-empty'>{t('还没有旅行记录 —— 开启自动派猫猫旅行，或点「立即执行」跑一轮后，明细会出现在这里。')}</div>
+        <div className='ck-empty'>{t('还没有成长记录 —— 开启自动派猫猫旅行 / 到期自动领取，或点「立即执行」跑一轮后，明细会出现在这里。')}</div>
       ) : (
         <div className='ck-records-scroll'>
           <table className='ck-table ck-records-table'>
