@@ -318,9 +318,12 @@ pub async fn run_task(state: &ServerState, account_id: &str, body: &Bytes) -> Re
             }
         }
     } else if request.code == "first_buddy" {
-        growth::process_first_buddy(&account, &task).await
+        // light = 只点亮不领奖（界面「完成」按钮）；full = 点亮 + 领奖。
+        let auto_claim = request.mode != "light";
+        growth::process_first_buddy(&account, &task, auto_claim).await
     } else {
-        growth::process_task(&account, &request.code, &task).await
+        let auto_claim = request.mode != "light";
+        growth::process_task(&account, &request.code, &task, auto_claim).await
     };
     ok_json(json!({
         "id": account_id,

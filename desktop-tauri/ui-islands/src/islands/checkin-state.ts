@@ -434,6 +434,8 @@ export type CheckinStore = {
   onboarding: ReadonlyMap<string, OnboardingCache>
   /** 成长任务的按账号缓存（WorkBuddy 国内版） */
   growth: ReadonlyMap<string, GrowthCache>
+  /** 成长任务**单任务**在途（键 `${id}:${code}`，任务行按钮的去重闸） */
+  growthTaskRunning: ReadonlySet<string>
   /** 旅行自动开关保存中（开关临时禁用） */
   travelSaving: boolean
 }
@@ -453,6 +455,7 @@ let store: CheckinStore = {
   signing: new Set<string>(),
   onboarding: new Map<string, OnboardingCache>(),
   growth: new Map<string, GrowthCache>(),
+  growthTaskRunning: new Set<string>(),
   travelSaving: false,
 }
 
@@ -1070,18 +1073,24 @@ export async function queryGrowth(id: string): Promise<void> {
 }
 
 /**
- * 执行成长任务（`mode=full` 点亮+领奖；`mode=claim` 只领已完成奖励）。
+ * 批量执行成长任务（`mode=light` 只点亮；`mode=claim` 只领已完成奖励）。
  *
  * ── 为什么在本地循环而不是一次全量请求 ──────────────────────
  * 后端把执行拆成**单任务**端点：全量逐条留 1s+ 写间隔（上游风控口径）会超过
  * 管理 API 的 60 秒转发超时，一次全量请求会被中途掐断。这里逐条 await、
  * 逐条把结果落进 `results` —— 界面实时看到进度，失败的任务不影响后续。
  *
+ * ── 为什么没有「点亮 + 领奖」一体的批量档 ────────────────────
+ * 上游归账有延迟（上报后回读常还是旧进度），一体档会在同一轮里把「刚点亮、
+ * 还没归账」的任务判成未完成而跳过领奖，结果忽领忽不领（实测过）。所以批量
+ * 「一键完成」只做点亮，「领奖」交给另一颗按钮按服务端已确认的 completed 领 ——
+ * 两件事分开、各自幂等，用户看得懂每一步。单任务两颗按钮同理（见 runGrowthOne）。
+ *
  * ── 挑选口径 ────────────────────────────────────────────────
  * 只跑映射表支持、非不可伪造、未锁定的任务；`claim` 模式再收窄到「已完成」的
  * （点亮是写操作，不属于「领取」的语义）。
  */
-export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<void> {
+export async function runGrowth(id: string, mode: 'light' | 'claim'): Promise<void> {
   const current = growthOf(id)
   if (current.running) return
   const targets = (current.tasks ?? []).filter(task => {
@@ -1090,7 +1099,7 @@ export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<voi
     if (mode === 'claim') {
       return task.status === 'completed' || (task.current >= task.target && task.status !== 'claimed')
     }
-    return task.status !== 'claimed'
+    return task.status !== 'claimed' && task.status !== 'completed'
   })
   if (targets.length === 0) {
     toast(t('没有需要执行的任务'))
@@ -1127,15 +1136,59 @@ export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<voi
     }
   }
   patchGrowth(id, { running: false })
-  if (failed > 0) {
-    toast(t('成长任务完成（{done} 项成功、{failed} 项失败），积分 +{credit} 能量 +{energy}', {
-      done, failed, credit, energy,
+  if (mode === 'claim') {
+    if (failed > 0) {
+      toast(t('领取完成（{done} 项成功、{failed} 项失败），积分 +{credit} 能量 +{energy}', {
+        done, failed, credit, energy,
+      }), 'err')
+    } else {
+      toast(t('✅ 领取完成：积分 +{credit} 能量 +{energy}', { credit, energy }))
+    }
+  } else if (failed > 0) {
+    toast(t('点亮完成（{done} 项成功、{failed} 项失败），到「可领取」后手点「领取」', {
+      done, failed,
     }), 'err')
   } else {
-    toast(t('✅ 成长任务执行完成：积分 +{credit} 能量 +{energy}', { credit, energy }))
+    toast(t('✅ 已点亮 {done} 项，到「可领取」后手点「领取」领奖', { done }))
   }
   // 执行会改任务状态：重查一次让清单回到最新（读路径，不再写）
   await queryGrowth(id)
+}
+
+/**
+ * 执行**单个**任务（任务行里的「完成」/「领取」按钮）。
+ *
+ * `mode=light` 只点亮不领奖（「完成」按钮）；`mode=claim` 只领已完成奖励
+ * （「领取」按钮）。与批量 `runGrowth` 共用后端单任务端点，区别只在挑选范围 ——
+ * 这里是用户点名的那一条，不做任何筛选（可不可以做由后端如实回报）。
+ *
+ * 结果落进 `results`（与批量同一处，界面在那一行显示本次结论），完成后重查
+ * 清单让徽章跟上。
+ */
+export async function runGrowthOne(id: string, code: string, mode: 'light' | 'claim'): Promise<void> {
+  const key = `${id}:${code}`
+  if (store.growthTaskRunning.has(key)) return
+  patch({ growthTaskRunning: new Set([...store.growthTaskRunning, key]) })
+  try {
+    const data = await bridge().runGrowthTask?.(id, code, mode)
+    const row = normalizeGrowthResults([data])[0]
+    if (row) {
+      // 单任务结果只保留这一条（清掉上一次的批量结果，免得行里显示旧结论）
+      patchGrowth(id, { results: [row] })
+      if (row.outcome === 'failed') {
+        toast(t('{title}：{message}', { title: code, message: row.message }), 'err')
+      } else {
+        toast(t('{title}：{message}', { title: code, message: row.message }))
+      }
+    }
+    await queryGrowth(id)
+  } catch (error) {
+    toast(t('{title}：{message}', { title: code, message: errorMessage(error) }), 'err')
+  } finally {
+    const rest = new Set(getCheckinStore().growthTaskRunning)
+    rest.delete(key)
+    patch({ growthTaskRunning: rest })
+  }
 }
 
 /** 执行开学季任务；`lottery=true` 时任务后把抽奖余额抽空。 */

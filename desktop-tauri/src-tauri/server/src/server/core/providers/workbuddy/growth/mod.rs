@@ -509,6 +509,10 @@ pub struct TaskReport {
 
 /// 单任务一体流程：accept（带登记验证）→ 按 target 补齐上报 → 回读 → claim。
 ///
+/// `auto_claim` 为真时达成即领奖（「一键完成」）；为假时只点亮、把领奖留给
+/// 用户手点「领取」（界面每任务那颗「完成」按钮）—— 两处「达成即 claim」
+/// （进入时已 completed、上报后回读 completed）都按它分支。
+///
 /// ── 为什么 accept 要「回读确认」────────────────────────────
 /// 参考项目实测：上游存在 HTTP 200 + msg=OK 但 accept 未真正登记的形态，
 /// 此时后续上报全部不归账、任务永远点不亮。所以 accept 之后必须回读
@@ -519,7 +523,12 @@ pub struct TaskReport {
 /// 常规任务走 billing 域（`{bill}/v2/report`）；桌面指纹事件组走 chat 域；
 /// web 域事件走 `{web}/v2/report`；MP 事件组走 `{bill}/v2/report` 的
 /// 小程序指纹形状。
-pub async fn process_task(account: &GrowthAccount, code: &str, task: &Value) -> TaskReport {
+pub async fn process_task(
+    account: &GrowthAccount,
+    code: &str,
+    task: &Value,
+    auto_claim: bool,
+) -> TaskReport {
     let spec = spec_of(code);
     let uid8: String = account.uid.chars().take(8).collect();
     let accept_status = task
@@ -580,8 +589,18 @@ pub async fn process_task(account: &GrowthAccount, code: &str, task: &Value) -> 
             energy: 0,
         };
     }
-    // 已完成未领：直接 claim
+    // 已完成未领：默认直接 claim；`auto_claim=false`（界面「完成」按钮，
+    // 只点亮不领奖）时留到用户手点「领取」再领。
     if cur >= target || accept_status == "completed" {
+        if !auto_claim {
+            return TaskReport {
+                code: code.to_string(),
+                outcome: TaskOutcome::Done,
+                message: format!("已完成（{cur}/{target}），待手动领取"),
+                credit: 0,
+                energy: 0,
+            };
+        }
         let (result, credit, energy, message) = claim_task(account, code, spec.mp).await;
         let outcome = match result {
             1 => TaskOutcome::Done,
@@ -689,6 +708,16 @@ pub async fn process_task(account: &GrowthAccount, code: &str, task: &Value) -> 
         };
     }
     if ast2 == "completed" || cur2 >= target2 {
+        // 只点亮模式：报完就停，领奖留给用户手点「领取」（见函数头）。
+        if !auto_claim {
+            return TaskReport {
+                code: code.to_string(),
+                outcome: TaskOutcome::Done,
+                message: format!("已点亮（{cur2}/{target2}），待手动领取"),
+                credit: 0,
+                energy: 0,
+            };
+        }
         let (result, credit, energy, message) = claim_task(account, code, spec.mp).await;
         let outcome = match result {
             1 => TaskOutcome::Done,
@@ -708,7 +737,7 @@ pub async fn process_task(account: &GrowthAccount, code: &str, task: &Value) -> 
 
 /// 领养任务（first_buddy）的一体流程：走领养链路，app 侧的直接收益已由
 /// [`adopt_buddy`] 返回；之后任务状态变 completed，再走 claim。
-pub async fn process_first_buddy(account: &GrowthAccount, task: &Value) -> TaskReport {
+pub async fn process_first_buddy(account: &GrowthAccount, task: &Value, auto_claim: bool) -> TaskReport {
     let accept_status = task
         .get("accept_status")
         .and_then(Value::as_str)
@@ -727,6 +756,16 @@ pub async fn process_first_buddy(account: &GrowthAccount, task: &Value) -> TaskR
         };
     }
     if cur >= target || accept_status == "completed" {
+        // 只点亮模式：已完成就停，领奖留给用户手点「领取」。
+        if !auto_claim {
+            return TaskReport {
+                code: "first_buddy".to_string(),
+                outcome: TaskOutcome::Done,
+                message: format!("已完成（{cur}/{target}），待手动领取"),
+                credit: 0,
+                energy: 0,
+            };
+        }
         let (result, credit, energy, message) = claim_task(account, "first_buddy", false).await;
         let outcome = match result {
             1 => TaskOutcome::Done,
@@ -746,8 +785,19 @@ pub async fn process_first_buddy(account: &GrowthAccount, task: &Value) -> TaskR
     } else {
         TaskOutcome::Failed
     };
-    // 领养成即任务完成：直接 try claim（已是既领状态则幂等返回 already）
+    // 领养成即任务完成：直接 try claim（已是既领状态则幂等返回 already）。
+    // 只点亮模式（auto_claim=false）时领养照做（它本身给 +300 积分，是领养动作
+    // 不是领奖），但任务奖励留给用户手点「领取」。
     if ok {
+        if !auto_claim {
+            return TaskReport {
+                code: "first_buddy".to_string(),
+                outcome: TaskOutcome::Done,
+                message: format!("{message}；任务已完成，待手动领取"),
+                credit: 0,
+                energy: 0,
+            };
+        }
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         let (result, credit2, energy2, claim_message) =
             claim_task(account, "first_buddy", false).await;

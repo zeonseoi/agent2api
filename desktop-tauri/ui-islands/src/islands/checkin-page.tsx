@@ -8,7 +8,8 @@ import {
   claimOnboarding, getCheckinStore, groupTone, loadCheckinCenter, nextScheduleRun,
   onboardingExpanded, queryOnboarding, runAllCheckin, setCheckinTab, showCheckinTab,
   signSingleAccount, subscribeCheckinStore, toggleOnboardingExpand, toggleProviderExpand,
-  growthExpanded, queryGrowth, runGrowth, runGrowthSchool, runGrowthTravel, toggleGrowthExpand,
+  growthExpanded, queryGrowth, runGrowth, runGrowthOne, runGrowthSchool, runGrowthTravel,
+  toggleGrowthExpand,
   type CheckinProviderGroup, type CheckinStore, type CheckinTab,
 } from './checkin-state'
 import { ScheduleTab } from './checkin-schedule-tab'
@@ -502,8 +503,8 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
             size='sm'
             variant='outline'
             disabled={cache?.status !== 'loaded' || cache?.running === true}
-            title={t('接单 + 点亮 + 领奖（只处理已实测沉淀的任务）')}
-            onClick={() => void runGrowth(row.id, 'full')}
+            title={t('接单 + 点亮（不自动领奖；到「可领取」后手点「领取」）')}
+            onClick={() => void runGrowth(row.id, 'light')}
           >
             {cache?.running ? t('执行中…') : t('一键完成')}
           </Button>
@@ -531,6 +532,14 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
           </div>
           {tasks.map(task => {
             const result = resultOf(task.code)
+            // 单任务在途（按钮去重闸 + 文案）
+            const busy = getCheckinStore().growthTaskRunning.has(`${row.id}:${task.code}`)
+            // 这一条能不能点亮 / 能不能领奖：与后端 process_task 的判定同口径
+            // （支持 + 非不可伪造 + 未锁定才有意义）。点亮只在「未领取」时可用，
+            // 领奖只在「已完成」时可用 —— 两个动作各自独立，用户看得懂每一步。
+            const actionable = task.supported && !task.unforgeable && !task.locked
+            const canLight = actionable && task.status !== 'claimed' && task.status !== 'completed'
+            const canClaim = actionable && task.status === 'completed'
             return (
               <div className='ck-task-line' key={task.code}>
                 <span className={task.status === 'claimed' ? 'ck-task-tick done' : 'ck-task-tick'}>
@@ -553,6 +562,30 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
                           : task.locked
                             ? <Badge variant='outline' shape='tag'>{t('未解锁')}</Badge>
                             : <Badge variant='warning' shape='tag'>{t('可完成')}</Badge>}
+                  {canLight ? (
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      className='ck-task-btn'
+                      disabled={busy || cache?.running === true}
+                      title={t('只做这一条：接单 + 点亮（不自动领奖）')}
+                      onClick={() => void runGrowthOne(row.id, task.code, 'light')}
+                    >
+                      {busy ? t('执行中…') : t('完成')}
+                    </Button>
+                  ) : null}
+                  {canClaim ? (
+                    <Button
+                      size='sm'
+                      variant='ghost'
+                      className='ck-task-btn'
+                      disabled={busy || cache?.running === true}
+                      title={t('只领这一条的奖励（幂等，重复点不会重复入账）')}
+                      onClick={() => void runGrowthOne(row.id, task.code, 'claim')}
+                    >
+                      {busy ? t('执行中…') : t('领取')}
+                    </Button>
+                  ) : null}
                 </span>
               </div>
             )
