@@ -78,6 +78,24 @@ function onboardingProviderLabel(provider: string): string {
     : provider === 'officeace' ? 'OfficeAce 果办' : provider
 }
 
+/**
+ * 上游给的日期串（ISO 8601 带时区，如 `2026-11-02T23:59:00+08:00`）→
+ * 北京时间的 `YYYY-MM-DD`；解析不出来返回空串（调用方据此省略那半句）。
+ *
+ * 为什么不用 `formatTime`：它收的是**毫秒时间戳**（账号/记录的既有口径），
+ * 而上游这两个字段是带时区的字符串日期。这里按北京时间取年月日 ——
+ * 上游给的就是 +08:00，用本地时区格式化在跨时区机器上会差一天。
+ */
+function formatDay(value: unknown): string {
+  if (typeof value !== 'string' || !value) return ''
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return ''
+  const beijing = new Date(at + 8 * 60 * 60 * 1000)
+  const month = String(beijing.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(beijing.getUTCDate()).padStart(2, '0')
+  return `${beijing.getUTCFullYear()}-${month}-${day}`
+}
+
 function useCheckinStore(): CheckinStore {
   const [store, setStore] = React.useState(getCheckinStore())
   React.useEffect(() => subscribeCheckinStore(() => setStore(getCheckinStore())), [])
@@ -357,7 +375,7 @@ function OnboardingRow({ row }: { row: { id: string; name: string; provider?: st
       {expanded ? (
         <div className='ck-prov-detail'>
           {tasks.map(task => (
-            <div className='ck-task-line' key={task.key}>
+            <div className='ck-task-line ck-task-row' key={task.key}>
               <span className={task.done ? 'ck-task-tick done' : 'ck-task-tick'}>
                 {task.done ? '✓' : '·'}
               </span>
@@ -540,8 +558,11 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
             const actionable = task.supported && !task.unforgeable && !task.locked
             const canLight = actionable && task.status !== 'claimed' && task.status !== 'completed'
             const canClaim = actionable && task.status === 'completed'
+            // 有效期 / 解锁时间（都是「有才显示」：绝大多数任务没有期限）
+            const dueDay = formatDay(task.validEnd)
+            const unlockDay = task.locked ? formatDay(task.unlockAt) : ''
             return (
-              <div className='ck-task-line' key={task.code}>
+              <div className='ck-task-line ck-task-row' key={task.code}>
                 <span className={task.status === 'claimed' ? 'ck-task-tick done' : 'ck-task-tick'}>
                   {task.status === 'claimed' ? '✓' : '·'}
                 </span>
@@ -549,6 +570,8 @@ function GrowthRow({ row }: { row: { id: string; name: string } }) {
                   {task.title || task.code}
                   {task.target > 1 ? ` (${task.current}/${task.target})` : ''}
                 </span>
+                {unlockDay ? <span className='ck-task-day'>{t('解锁 {date}', { date: unlockDay })}</span> : null}
+                {dueDay ? <span className='ck-task-day'>{t('到期 {date}', { date: dueDay })}</span> : null}
                 {result ? <span className='ck-task-pts'>{result.message}</span> : null}
                 <span className='ck-task-st'>
                   {task.unforgeable

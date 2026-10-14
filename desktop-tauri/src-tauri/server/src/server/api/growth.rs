@@ -122,6 +122,11 @@ fn task_row(task: &Value) -> Value {
         "target": progress.get("target").and_then(Value::as_i64).unwrap_or(0),
         "locked": task.get("locked").and_then(Value::as_bool).unwrap_or(false),
         "unlockAt": task.get("unlock_at").cloned().unwrap_or(Value::Null),
+        // 任务的有效期（上游 `valid_start` / `valid_end`，ISO 8601 带时区串；
+        // 无期限的任务两键都是 null）。多数任务没有期限，界面只在非空时显示
+        // 「到期 …」—— 与 unlockAt 同一「有才显示」的口径。
+        "validStart": task.get("valid_start").cloned().unwrap_or(Value::Null),
+        "validEnd": task.get("valid_end").cloned().unwrap_or(Value::Null),
         // 是否在映射表里（未映射任务在执行时会保守跳过 —— 界面如实标注）
         "supported": spec.is_some(),
         "unforgeable": spec.as_ref().map(|spec| spec.unforgeable).unwrap_or(false),

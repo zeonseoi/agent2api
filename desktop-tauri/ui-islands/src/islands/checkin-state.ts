@@ -216,6 +216,9 @@ export type GrowthTaskRow = {
   target: number
   locked?: boolean
   unlockAt?: unknown
+  /** 任务有效期（上游 valid_start / valid_end，ISO 8601 串；无期限为 null/undefined） */
+  validStart?: unknown
+  validEnd?: unknown
   /** 在映射表里（未支持的任务执行时会保守跳过，界面如实标注） */
   supported: boolean
   unforgeable?: boolean
@@ -982,6 +985,8 @@ function normalizeGrowthTasks(raw: unknown): GrowthTaskRow[] {
         target: numberOf(row.target),
         locked: row.locked === true,
         unlockAt: row.unlockAt,
+        validStart: row.validStart,
+        validEnd: row.validEnd,
         supported: row.supported === true,
         unforgeable: row.unforgeable === true,
         unforgeableReason: typeof row.unforgeableReason === 'string' ? row.unforgeableReason : '',

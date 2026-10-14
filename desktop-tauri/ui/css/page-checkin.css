@@ -152,7 +152,16 @@
 }
 .ck-task-tick.done { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok-bd); }
 .ck-task-tick.todo { border: 1.5px dashed var(--border-strong); color: transparent; }
+/* 多行任务清单的行分隔线（新手福利 / 成长任务）。一行一条结论（含领奖结论）
+   时，没有线就看不出某条结论属于哪一行 —— 与 .ck-prov-row / .ck-sched-row
+   同一档 hairline。只挂在多行清单的行上（.ck-task-row），猫猫旅行 / 开学季
+   那两行是整块概览、不是清单，不画。
+   线画在**相邻两行之间**（`.ck-task-row + .ck-task-row` 的 border-top）：
+   清单末行后面还跟着猫猫旅行 / 开学季，用 :last-child 判「末行」会失效。 */
+.ck-task-row + .ck-task-row { border-top: 1px solid var(--hairline); }
 .ck-task-pts { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 任务的到期 / 解锁标记（有期限才有）：与结果文案同档灰字，不抢标题注意力 */
+.ck-task-day { font-size: 12px; color: var(--text-3); }
 .ck-task-st { margin-left: auto; }
 .ck-task-st .ck-task-btn { margin-left: 8px; }
 .ck-group-label { margin: 10px 0 4px; font-size: 12px; color: var(--text-3); }
