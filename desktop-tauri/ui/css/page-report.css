@@ -95,11 +95,16 @@
    flex-wrap 下藏掉一张时剩下一张自动铺满整行；grid 的固定两列会留下半行空白。
    flex-basis 320px 是「低于这个宽度就换行」的阈值，两卡并排的下限因此是
    ~654px（两张 320 + 间距），比 900px 的窄窗口断点更早换行 —— 换行后每张满宽，
-   也就是窄窗口下退化成改动前的观感。 */
+   也就是窄窗口下退化成改动前的观感。
+
+   align-items: stretch（flex 默认值，这里显式写出）：同一行的两张卡等高。
+   原先的 flex-start 让每张卡按自身内容定高 —— 排行卡的行数一致时看不出差别，
+   但同行的两张环形图卡只要有一张是空态（Credits 两维常常为空），高度就差一截，
+   底边参差不齐。等高后空态卡与有数据的卡同高，整行底边对齐。 */
 .report-rank-grid {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 14px;
 }
 
@@ -260,11 +265,14 @@
    两个维度（用量花在哪个模型 / 落到哪家），并排放才便于对照。
    用 flex + flex-basis 而不是 grid：两张卡**各自独立决定显隐**（models 是新增
    字段，旧后端不返回），flex-wrap 下藏掉一张时剩下一张自动铺满整行；
-   grid 的固定两列会留下半行空白。与 .report-rank-grid 同一手法。 */
+   grid 的固定两列会留下半行空白。与 .report-rank-grid 同一手法。
+
+   align-items: stretch（同 .report-rank-grid）：同一行两张卡等高 —— Token 的
+   环卡与 Credits 的空态卡并排时，空态卡被拉到与环卡同高，底边对齐。 */
 .report-donut-grid {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 14px;
 }
 

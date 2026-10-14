@@ -89,6 +89,8 @@ pub(super) struct RangeTotals {
     pub requests: i64,
     pub successful: i64,
     pub tokens: i64,
+    /// 区间内的上游扣费 Credits 合计（与 `tokens` 同一口径的累加）
+    pub credits: f64,
     pub active_days: i64,
     pub model_totals: Vec<ModelAccum>,
     pub provider_totals: Vec<ProviderAccum>,
@@ -106,6 +108,7 @@ pub(super) fn range_totals(
         requests: 0,
         successful: 0,
         tokens: 0,
+        credits: 0.0,
         active_days: 0,
         model_totals: Vec::new(),
         provider_totals: Vec::new(),
@@ -118,12 +121,13 @@ pub(super) fn range_totals(
         totals.requests += day.requests;
         totals.successful += day.successful;
         totals.tokens += day.tokens;
+        totals.credits += day.credits;
         // activeDays 只数**区间内**有请求的天数（补零的日子不算「活跃」）
         if day.requests > 0 {
             totals.active_days += 1;
         }
         for acc in &day.model_tokens {
-            push_model_accum(&mut totals.model_totals, &acc.model, acc.tokens, acc.requests);
+            push_model_accum(&mut totals.model_totals, &acc.model, acc.tokens, acc.requests, acc.credits);
         }
         for acc in &day.provider_stats {
             push_provider_accum(
@@ -132,6 +136,7 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.credits,
             );
         }
         for acc in &day.account_stats {
@@ -142,6 +147,7 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.credits,
             );
         }
     }
@@ -157,6 +163,7 @@ pub(super) fn range_totals(
     let covered_requests: i64 = totals.provider_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.provider_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.provider_totals.iter().map(|item| item.tokens).sum();
+    let covered_credits: f64 = totals.provider_totals.iter().map(|item| item.credits).sum();
     // `max(0)` 兜住手改文件造成的「拆分比总量还多」；余量全零时这里仍会建出
     // 一个空组，但 `build_providers` 会把全零的组滤掉（见那边的 `requests > 0
     // || tokens > 0`），所以不会凭空冒出空的「未知」项
@@ -166,6 +173,12 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        // Credits 是浮点：各路求和与总量必然有 1e-15 级的舍入差。这个残值必须
+        // **夹成 0**（见 `credit_residue`）—— 「未知」组的建组与保留虽只由
+        // requests / tokens 判定（见上），但报表的 Credits 环形图是按
+        // `credits > 0` 取段的，2.8e-14 会骗过那个判据、在图上留下一行
+        // 「未知 0 0.0%」（读数被 toFixed(2) 舍成 0，却占着一行图例）
+        credit_residue(totals.credits, covered_credits),
     );
 
     // ── 账号维度同理 ────────────────────────────────────────────
@@ -176,6 +189,7 @@ pub(super) fn range_totals(
     let covered_requests: i64 = totals.account_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.account_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.account_totals.iter().map(|item| item.tokens).sum();
+    let covered_credits: f64 = totals.account_totals.iter().map(|item| item.credits).sum();
     push_account_accum(
         &mut totals.account_totals,
         "",
@@ -183,22 +197,52 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        // 理由同 provider 那一段（浮点残值同样要夹掉）
+        credit_residue(totals.credits, covered_credits),
     );
     totals
 }
 
+/// 未被任何组覆盖的 Credits 余量（`总量 − 各组之和`），并把浮点舍入残值夹成 0。
+///
+/// ── 为什么必须夹 ────────────────────────────────────────────
+/// 各组的 credits 是逐条累加的浮点数，其和与总量的差在数学上恒为 0，浮点下
+/// 却是 1e-14 级的噪声。这个噪声值本身无害，但它是**真值 > 0**：报表的
+/// Credits 环形图按 `credits > 0` 决定画不画一段，于是噪声会凭空多出一段
+/// 「未知 0 0.0%」—— 读数被 toFixed(2) 舍成 0，图例却留着那一行。
+/// 真正的余量（旧聚合行没有 providerStats / accountStats 键时，那段请求的
+/// credits 会整个落进来）是 0.01 以上的量级，与噪声隔着十几个数量级。
+/// 取 1e-6 作阈值：远高于任何规模的累加噪声（哪怕是百万级的 credits），
+/// 又远低于一分 credit —— 两者之间没有任何真实取值。
+fn credit_residue(total: f64, covered: f64) -> f64 {
+    let residue = total - covered;
+    if residue.abs() < 1e-6 {
+        0.0
+    } else {
+        residue
+    }
+}
+
 /// 把一次请求（或一天的累计）并进按模型的累计表。
 /// 线性查找即可：模型数量是个位到十位级，建 HashMap 反而更慢。
-pub(super) fn push_model_accum(list: &mut Vec<ModelAccum>, model: &str, tokens: i64, requests: i64) {
+pub(super) fn push_model_accum(
+    list: &mut Vec<ModelAccum>,
+    model: &str,
+    tokens: i64,
+    requests: i64,
+    credits: f64,
+) {
     match list.iter_mut().find(|item| item.model == model) {
         Some(item) => {
             item.tokens += tokens;
             item.requests += requests;
+            item.credits += credits;
         }
         None => list.push(ModelAccum {
             model: model.to_string(),
             requests,
             tokens,
+            credits,
         }),
     }
 }
@@ -215,18 +259,21 @@ pub(super) fn push_provider_accum(
     requests: i64,
     successful: i64,
     tokens: i64,
+    credits: f64,
 ) {
     match list.iter_mut().find(|item| item.provider == provider) {
         Some(item) => {
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
+            item.credits += credits;
         }
         None => list.push(ProviderAccum {
             provider: provider.to_string(),
             requests,
             successful,
             tokens,
+            credits,
         }),
     }
 }
@@ -251,12 +298,14 @@ pub(super) fn push_account_accum(
     requests: i64,
     successful: i64,
     tokens: i64,
+    credits: f64,
 ) {
     match list.iter_mut().find(|item| item.account_id == account_id) {
         Some(item) => {
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
+            item.credits += credits;
             // 名字只做「快照刷新」：非空才覆盖，绝不清空已有的名字
             // （某些请求拿不到名字而另一些拿到了，取有名字的那一份）
             if !account_name.is_empty() {
@@ -269,6 +318,7 @@ pub(super) fn push_account_accum(
             requests,
             successful,
             tokens,
+            credits,
         }),
     }
 }
@@ -332,6 +382,7 @@ pub(super) fn build_providers(totals: &[ProviderAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "credits": item.credits,
             })
         })
         .collect()
@@ -383,6 +434,7 @@ pub(super) fn build_models(totals: &[ModelAccum]) -> Vec<Value> {
                 },
                 "requests": item.requests,
                 "totalTokens": item.tokens,
+                "credits": item.credits,
             })
         })
         .collect()
@@ -429,6 +481,7 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "credits": item.credits,
             })
         })
         .collect()
@@ -698,4 +751,33 @@ pub(super) fn normalize_status_filter(value: Option<&str>) -> Option<StatusFilte
 /// `YYYY-MM-DD` → NaiveDate（手改文件里的坏值返回 None，调用方各自兜底）
 fn parse_key(text: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::credit_residue;
+
+    /// 纯浮点噪声必须夹成 0：报表的 Credits 环形图按 `credits > 0` 取段，
+    /// 2.8e-14 会凭空多出一行「未知 0 0.0%」（实测复现过，见函数注释）。
+    #[test]
+    fn credit_residue_clamps_floating_noise() {
+        // 库里实测的那一组：各组之和与总量的差是 1e-14 级
+        assert_eq!(credit_residue(120.2500000000001, 120.25000000000007), 0.0);
+        // 正负两侧的噪声都夹
+        assert_eq!(credit_residue(100.0, 100.0 + 1e-9), 0.0);
+        assert_eq!(credit_residue(100.0, 100.0 - 1e-9), 0.0);
+    }
+
+    /// 真正的余量（旧聚合行没有 providerStats / accountStats 键时整段落进来）
+    /// 是 0.01 以上的量级，**不能**被夹掉 —— 夹了就丢数据了。
+    #[test]
+    fn credit_residue_keeps_real_remainder() {
+        assert_eq!(credit_residue(120.25, 100.0), 20.25);
+        // 一分 credit 是真实可读的最小量级，阈值必须远低于它。
+        // 余量本身带浮点尾数（`1.0 - 0.99` → `0.010000000000000009`），
+        // 所以这里比量级而不是比字面相等 —— 关键是被**保留**（> 0，没夹成 0）
+        let tiny = credit_residue(1.0, 0.99);
+        assert!(tiny > 0.0, "真实余量不该被夹掉，得到 {tiny}");
+        assert!((tiny - 0.01).abs() < 1e-9);
+    }
 }

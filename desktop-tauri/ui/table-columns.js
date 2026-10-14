@@ -101,7 +101,10 @@
       id: 'models',
       mode: 'table',
       root: '.page[data-page="gateway"] table.models-table',
-      columns: ['check', 'model', 'rate', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
+      // 顺序即列顺序，且必须与 models-panel-state.ts 的 COLUMNS 逐项对齐 ——
+      // 这里的登记是列宽（覆盖值落到哪个 <col>、轨道列表、末列是否往里挪）的
+      // 权威，漏一列会让那一列既没有把手也拖不动（简介列就漏过一次）。
+      columns: ['check', 'model', 'rate', 'description', 'source', 'budget', 'caps', 'alias', 'act'].map(key => ({ key })),
       columnsOf: visibleColumnsOf(() => window.wbModelsPanel?.visibleColumns?.()),
     },
     {

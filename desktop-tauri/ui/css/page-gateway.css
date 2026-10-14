@@ -225,15 +225,26 @@
 /* 勾选列的表头 / 单元格都居中：一整列只有复选框，居中才与账号页勾选列同一观感
    （数据行走列设置的 ta-center；th 上的 text-align 是全局 left，这里单独补） */
 .models-table th[data-col="check"] { text-align: center; }
-.models-table .c-model { width: 19%; }
+/* 模型列：模型名是等宽短串（`deepseek-v4.1-flash` 这类），是本表最窄档 ——
+   再缩一档到 12%，让出的 3% 归映射列（chips 有弹性、最吃宽）。超长时整串
+   省略、悬停看全即可。 */
+.models-table .c-model { width: 12%; }
 .models-table .c-rate { width: 5.5%; }
+/* 简介列：一格一段中文说明（「DeepSeek 旗舰模型，支持 1M 上下文窗口」这类），
+   比倍率 / 来源那种短标记宽得多，但要给别名列（chips）留够 —— 取 13%，
+   全部从别名列挪（33% → 20%）：chips 有弹性、本就能收缩，而简介是纯文本、
+   窄了只会整句省略。合计仍 100%。 */
+.models-table .c-description { width: 13%; }
 .models-table .c-source { width: 6.5%; }
 /* 能力位两列：数值一格（上下文 / 最大输出）、四枚图标圆点一格。
    并入映射列的宽度从这里来 —— 五列会把它挤到装不下 chips（见 models-page
    文件头的列数取舍） */
 .models-table .c-budget { width: 10%; }
 .models-table .c-caps { width: 11.5%; }
-.models-table .c-alias { width: 33%; }
+/* 映射列：chips 一行放不下几条（一条别名一个 chip），是本表最需要宽度的一列 ——
+   先后从模型列累计挪 7%（19% → 12%）：模型名是等宽短串，超长时整串省略、悬停
+   看全即可，而 chips 挤窄了会换行成好几排、把行高撑起来。合计仍 100%。 */
+.models-table .c-alias { width: 27%; }
 .models-table .c-act { width: 11%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
@@ -286,6 +297,10 @@
 .models-table .mid .t[data-copy]:active,
 .models-table .alias .t[data-copy]:active { opacity: .55; }
 .mname { color: var(--text-3); font-size: 11.5px; }
+/* 简介列：单行省略（完整句子靠 title 悬停看全）。不换行 —— 一行模型的高度
+   必须稳定，简介长短不一会把行高撑得参差不齐。字号与 .mname 同档（都是
+   「模型的说明文字」），但颜色用正文色：它是这一列的主体内容，不是名字的副标 */
+.mdesc { color: var(--text-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .rate { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
 /* ── 能力位两列（「上下文 / 输出」与「能力」）─────────────────────────

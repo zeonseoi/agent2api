@@ -26,9 +26,13 @@ export type StatsHour = {
 export type StatsGroup = {
   id?: string; label?: string; model?: string
   requests?: number; success?: number; totalTokens?: number; tokens?: number
+  /** 上游扣费 Credits 合计（后端按同一口径累加；旧行 / 上游没给则 0） */
+  credits?: number
 }
 export type StatsOverview = {
   requests?: number; successful?: number; tokens?: number; activeDays?: number; streak?: number
+  /** 上游扣费 Credits 合计（与 tokens 同源同区间；后端可能不给这个键） */
+  credits?: number
   topModel?: { model?: string; tokens?: number; percentage?: number } | null
 }
 export type CacheRateWindow = { inputTokens?: number; hitTokens?: number; rate?: number }
@@ -134,6 +138,24 @@ export function formatPercent(rate: unknown): string {
   return `${((Number(rate) || 0) * 100).toFixed(1)}%`
 }
 
+/**
+ * Credits 读数：保留两位小数、去掉末尾多余的 0（`0.07` / `5.3` / `0`）。
+ *
+ * 为什么不像 Token 那样走 units.js 的量级缩写（万 / 亿 / k / M）：Credits 是
+ * **钱**，量级远小于 Token（一次请求 0.07，一天可能才几十），缩写会把它压成
+ * 「0.1k」这种看不出差别的形态 —— 钱要的是能对账的精确读数，不是「一眼看量级」。
+ * 两位小数是上游扣费的实际精度（`extract_usage` 读到的就是这种小数）。
+ *
+ * 与请求日志用量列的 `formatCredit`（requests-page.tsx）是**两处独立实现**：
+ * 那边是单条明细的读数、这里是一段区间的合计，用途不同、各自演化；但小数位与
+ * 去尾零的口径刻意保持一致，同一个数在两页看到的样子相同。
+ */
+export function formatCredits(value: unknown): string {
+  const credits = Number(value) || 0
+  if (!Number.isFinite(credits) || credits < 0) return '0'
+  return String(Number(credits.toFixed(2)))
+}
+
 /** 坐标保留一位小数即可，串更短、与旧实现的输出也逐字一致 */
 export function round1(value: number): number {
   return Math.round(value * 10) / 10
@@ -217,6 +239,10 @@ export function overviewCells(overview: StatsOverview | undefined, range: string
     { key: 'requests', label: t('总请求数'), value: formatInt(requests), sub: RANGE_LABEL[range] || '', mono: false },
     { key: 'successful', label: t('成功请求数'), value: formatInt(successful), sub: t('成功率 {rate}', { rate: successRate }), mono: false },
     { key: 'tokens', label: t('总 Token'), value: formatTokens(data.tokens), sub: t('输入 + 输出'), mono: false },
+    // 总 Credits 紧跟在总 Token 后面：两个都是「这一段的用量合计」，并排放才好对照。
+    // 后端没给这个键（旧后端）时给 0 —— 与「确实没花钱」在数值上同形，但这一格本来
+    // 就是「上游报了多少就显示多少」，没有可编的语义（见 formatCredits 的说明）
+    { key: 'credits', label: t('总 Credits'), value: formatCredits(data.credits), sub: t('上游扣费'), mono: false },
     { key: 'activeDays', label: t('活跃天数'), value: formatInt(data.activeDays), sub: t('区间共 {n} 天', { n: days }), mono: false },
     { key: 'streak', label: t('当前连续天数'), value: formatInt(data.streak), sub: t('含今天在内往前数'), mono: false },
   ]
@@ -386,35 +412,86 @@ export type DonutSliceView = {
   tip: string
 }
 export type DonutLegendView = {
-  key: string; fill: string; name: string; tokensText: string; percentText: string; tip: string
+  key: string; fill: string; name: string; valueText: string; percentText: string; tip: string
 }
 export type DonutView = { size: number; slices: DonutSliceView[]; legend: DonutLegendView[]; totalText: string }
 
 /**
- * 环形图 + 右侧图例列表（模型用量 / 提供商用量的共用实现）。`null` = 这一维没数据。
+ * 环形图的**量纲**：同一套几何与配色，只换「读哪一个数、怎么写成字」。
  *
- * 数据形状（`[{label, totalTokens, requests}]`）：模型与提供商两维同形，身份字段名不同
- * （模型是 `model`、提供商是 `id`），按「label → model → id」依次兜底。
+ * ── 为什么做成两个指标而不是给 donutView 加布尔开关 ─────────────
+ * 模型用量 / 提供商用量的环形图各要两张（Token 一张、Credits 一张），
+ * 四处渲染共用的是**几何与占比逻辑**（扇区角度、图例、避让），差的是
+ * 「取哪个字段、怎么格式化、气泡里写什么单位」。把这三件事收成一张表，
+ * 四处调用只传一个枚举 —— 逻辑只有一份，加第三种量纲也只是往表里加一行。
  *
- * 图例带上 Token 与百分比：扇区角度只表达「相对占比」，看不出绝对量级 —— 而「这段是
- * 1.2 亿还是 1200 万」正是用户要问的。中心读数是总量：把各扇区的共同分母摆在最显眼处，
- * 右侧每段的百分比立刻有了参照。
+ * 两个 `tip` 的模板分开写（而不是共用一个 `{value}` 占位）是刻意的：
+ * 单位词「tokens / credits」要能被各语言按自己的语序安放，塞进同一个键里
+ * 就得把单位拼进值、让译者看不到它。两条键各自独立，互不影响既有译文。
  */
-export function donutView(list: StatsGroup[] | undefined, unknownLabel: string): DonutView | null {
+export type DonutMetric = 'tokens' | 'credits'
+
+type DonutMetricSpec = {
+  /** 从一行聚合里取本量纲的数值（缺字段按 0） */
+  pick: (item: StatsGroup) => number
+  /** 数值 → 展示串（Token 走量级缩写，Credits 走两位小数） */
+  format: (value: number) => string
+  /** 扇区气泡：`名字 · 读数 单位 · 占比` */
+  sliceTip: (label: string, value: number, percent: number) => string
+  /** 图例气泡：比扇区多一个请求次数 */
+  legendTip: (name: string, value: number, requests: number, percent: number) => string
+}
+
+const DONUT_METRICS: Record<DonutMetric, DonutMetricSpec> = {
+  tokens: {
+    pick: item => Number(item?.totalTokens ?? item?.tokens) || 0,
+    format: formatTokens,
+    sliceTip: (label, value, percent) => `${label} · ${formatTokens(value)} tokens · ${formatPercent(percent)}`,
+    legendTip: (name, value, requests, percent) => t('{name} · {tokens} tokens · {n} 次请求 · {pct}', {
+      name, tokens: formatTokens(value), n: formatInt(requests), pct: formatPercent(percent),
+    }),
+  },
+  credits: {
+    pick: item => Number(item?.credits) || 0,
+    format: formatCredits,
+    sliceTip: (label, value, percent) => `${label} · ${formatCredits(value)} credits · ${formatPercent(percent)}`,
+    legendTip: (name, value, requests, percent) => t('{name} · {credits} credits · {n} 次请求 · {pct}', {
+      name, credits: formatCredits(value), n: formatInt(requests), pct: formatPercent(percent),
+    }),
+  },
+}
+
+/**
+ * 环形图 + 右侧图例列表（模型 / 提供商用量的共用实现，Token 与 Credits 两种量纲共用）。
+ * `null` = 这一维没数据。
+ *
+ * 数据形状（`[{label, totalTokens, credits, requests}]`）：模型与提供商两维同形，
+ * 身份字段名不同（模型是 `model`、提供商是 `id`），按「label → model → id」依次兜底。
+ *
+ * 图例带上读数与百分比：扇区角度只表达「相对占比」，看不出绝对量级 —— 而「这段是
+ * 1.2 亿还是 1200 万」正是用户要问的。中心读数是总量：把各扇区的共同分母摆在最显眼处，
+ * 右侧每段的百分比立刻有了参照。`metric` 决定读 Token 还是 Credits（见 DONUT_METRICS）。
+ */
+export function donutView(
+  list: StatsGroup[] | undefined,
+  unknownLabel: string,
+  metric: DonutMetric = 'tokens',
+): DonutView | null {
+  const spec = DONUT_METRICS[metric]
   const rows = (Array.isArray(list) ? list : [])
     .map(item => {
       const label = String(item?.label ?? item?.model ?? item?.id ?? '').trim()
       return {
         label: label || unknownLabel,
-        tokens: Number(item?.totalTokens ?? item?.tokens) || 0,
+        value: spec.pick(item),
         requests: Number(item?.requests) || 0,
       }
     })
     // 全零的组不画：只可能来自手改过的数据，扇区角为 0 什么也看不见
-    .filter(item => item.tokens > 0)
+    .filter(item => item.value > 0)
 
   if (!rows.length) return null
-  const total = rows.reduce((sum, item) => sum + item.tokens, 0)
+  const total = rows.reduce((sum, item) => sum + item.value, 0)
   if (!total) return null
 
   const { size, inner, outer, padAngle } = DONUT
@@ -428,7 +505,7 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string):
   const legend: DonutLegendView[] = []
 
   rows.forEach((item, index) => {
-    const percent = item.tokens / total
+    const percent = item.value / total
     const sweep = percent * 360
     // 间隙从两端各让出半个，但**不能超过本段自身的四分之一**：色板之外的段（模型很多时）
     // 单段可能只有 1° 多，固定 2° 的间隙会把整段吃成负角度、直接从环上消失，而右侧图例
@@ -461,23 +538,20 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string):
         fill,
         evenOdd: sweep >= 359.999,
         label,
-        tip: `${item.label} · ${formatTokens(item.tokens)} tokens · ${formatPercent(percent)}`,
+        tip: spec.sliceTip(item.label, item.value, percent),
       })
     }
     legend.push({
       key: `${index}-${item.label}`,
       fill,
       name: item.label,
-      tokensText: formatTokens(item.tokens),
+      valueText: spec.format(item.value),
       percentText: formatPercent(percent),
-      tip: t('{name} · {tokens} tokens · {n} 次请求 · {pct}', {
-        name: item.label, tokens: formatTokens(item.tokens),
-        n: formatInt(item.requests), pct: formatPercent(percent),
-      }),
+      tip: spec.legendTip(item.label, item.value, item.requests, percent),
     })
   })
 
-  return { size, slices, legend, totalText: formatTokens(total) }
+  return { size, slices, legend, totalText: spec.format(total) }
 }
 
 /* ─── 板块四：热力图 ──────────────────────── */

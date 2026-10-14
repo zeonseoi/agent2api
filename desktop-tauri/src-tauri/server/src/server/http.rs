@@ -364,6 +364,13 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）
         .route("/api/checkin-activity", post(api::billing::run_activity))
+        // ── 派猫猫旅行：自动调度（上游调用与手动巡检在官方 growth 那侧，见
+        // api::travel 的模块头 —— 这里只有开关与「立即执行一轮」）──
+        .route(
+            "/api/travel/auto",
+            get(api::travel::get_travel_auto).post(api::travel::set_travel_auto),
+        )
+        .route("/api/travel/run", post(api::travel::run_travel))
         // ── 会话与登录 ──
         .route("/api/session/login/start", post(api::session::login_start))
         .route("/api/session/login/wait", get(api::session::login_wait))
@@ -585,6 +592,15 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         .route("/api/checkin-records/", any(api::logs_api::not_found))
         .route("/api/checkin-records/{*rest}", any(api::logs_api::not_found))
+        // 旅行记录明细台账（签到中心「旅行记录」页）：与 /api/checkin-records
+        // 同形（GET 查询 / DELETE 清空，全清护栏 all=1）。挂 protected：明细里
+        // 有账号名与收益文案，敏感度与 /api/logs 一致。
+        .route(
+            "/api/travel-records",
+            get(api::travel_records::query_records).delete(api::travel_records::clear_records),
+        )
+        .route("/api/travel-records/", any(api::logs_api::not_found))
+        .route("/api/travel-records/{*rest}", any(api::logs_api::not_found))
         // ── 签到中心的聚合快照 ──
         // 只读一条：分组与「今日已签」的判定复用批量签到同一对判据
         // （CHECKIN_PROVIDERS ∩ supports_checkin），见 api::checkin_center 的模块头。

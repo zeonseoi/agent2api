@@ -23,8 +23,12 @@ use super::record::{AccountAccum, DailyEntry, ModelAccum, ProviderAccum};
 
 /// `request_daily` 的列顺序（所有 SELECT 都按这个顺序取，`decode_daily`
 /// 依赖它；不写 `SELECT *` 的理由同 `sql::REQUEST_COLUMNS`）
+///
+/// `credits` 排在**末尾**：与明细侧那条「加列只加在末尾」的纪律同理 ——
+/// 中间插一列会让后面所有 `row.get(n)` 的序号整体挪一位，改动在 diff 里看不出错，
+/// 只会静默取错值（schema v11 加的列）。
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
-     cache_input_tokens, model_tokens, provider_stats, account_stats";
+     cache_input_tokens, model_tokens, provider_stats, account_stats, credits";
 
 /// JSON 数组列 → `Vec<T>`。解析失败或内容不是数组时退化成空表。
 ///
@@ -56,6 +60,8 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         model_tokens: decode_accum::<ModelAccum>(&model_tokens),
         provider_stats: decode_accum::<ProviderAccum>(&provider_stats),
         account_stats: decode_accum::<AccountAccum>(&account_stats),
+        // 末列是 schema v11 加的（当天 Credits 合计）；旧行 DEFAULT 0 原样读出
+        credits: row.get(9)?,
     })
 }
 
@@ -97,14 +103,14 @@ pub(super) fn select_daily_row(
 pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO request_daily (date, requests, successful, tokens, cache_hit_tokens, \
-         cache_input_tokens, model_tokens, provider_stats, account_stats) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         cache_input_tokens, model_tokens, provider_stats, account_stats, credits) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(date) DO UPDATE SET requests = excluded.requests, \
          successful = excluded.successful, tokens = excluded.tokens, \
          cache_hit_tokens = excluded.cache_hit_tokens, \
          cache_input_tokens = excluded.cache_input_tokens, \
          model_tokens = excluded.model_tokens, provider_stats = excluded.provider_stats, \
-         account_stats = excluded.account_stats",
+         account_stats = excluded.account_stats, credits = excluded.credits",
         params![
             day.date,
             day.requests,
@@ -115,6 +121,7 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
             encode_accum(&day.model_tokens),
             encode_accum(&day.provider_stats),
             encode_accum(&day.account_stats),
+            day.credits,
         ],
     )?;
     Ok(())

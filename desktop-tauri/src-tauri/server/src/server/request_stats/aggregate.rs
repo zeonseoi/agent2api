@@ -168,6 +168,9 @@ pub(super) fn summarize(
             "requests": totals.requests,
             "successful": totals.successful,
             "tokens": totals.tokens,
+            // 上游扣费 Credits 合计（与 tokens 同一口径的累加，只是换了量纲）。
+            // 前端概览卡片与两张环形图都读它；`credits` 是浮点，JSON 里就是小数
+            "credits": totals.credits,
             "activeDays": totals.active_days,
             "streak": consecutive,
             "topModel": top_model,
@@ -213,11 +216,20 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         day.successful += 1;
     }
     day.tokens += item.total_tokens;
+    // Credits 与 token 同一条「终态行才累加」的路径：失败请求的 credit 已在
+    // `normalize` 里清零，所以这里直接加就是「真实产生扣费的那些请求」的合计
+    day.credits += item.credit;
     day.cache_hit_tokens += item.cache_read_tokens;
     day.cache_input_tokens += item.prompt_tokens;
     // 模型维度用「上游真名」当统计键（见 `model_stat_key`）：映射只是代名，
     // 实际请求的仍是上游那一个模型，报表要按它归组
-    push_model_accum(&mut day.model_tokens, model_stat_key(item), item.total_tokens, 1);
+    push_model_accum(
+        &mut day.model_tokens,
+        model_stat_key(item),
+        item.total_tokens,
+        1,
+        item.credit,
+    );
     // 空 provider 也建组（见 push_provider_accum 的注释）
     push_provider_accum(
         &mut day.provider_stats,
@@ -225,6 +237,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
+        item.credit,
     );
     push_account_accum(
         &mut day.account_stats,
@@ -233,6 +246,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
+        item.credit,
     );
 }
 

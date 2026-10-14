@@ -91,6 +91,8 @@ pub mod scheduled_tasks;
 pub mod sub_kernel;
 pub mod subscriptions;
 pub mod task_state;
+pub mod travel_auto;
+pub mod travel_records;
 pub mod update;
 pub mod upstream;
 pub mod usage_query;

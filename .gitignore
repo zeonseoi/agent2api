@@ -10,6 +10,7 @@ desktop-tauri/src-tauri/gen/schemas/
 /target/
 
 # 本地开发过程产物
+.idea/
 .zcode/
 .verify/
 prototype/

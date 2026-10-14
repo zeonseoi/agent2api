@@ -187,58 +187,55 @@ pub fn is_reserved(key: &str) -> bool {
 /// 为什么从 1 而不是 0 起步：0 是全新库的初始值，用它当「已是最新版」会让
 /// 全新库跳过建表。1 起步后「库里什么都没有」与「schema 版本 1」是两件事。
 ///
-/// ── 版本 2：requests 表加两个 JSON 文本列 ──────────────────────
-/// 见 [`V2_SCHEMA`]。新库会按 1 → 2 的顺序跑完（v1 建表时**不含**这两列，
-/// 由 v2 的 ALTER 加上），所以「全新库」与「从 v1 升上来的库」最终形态一致 ——
-/// 这也是为什么 v1 的 DDL **不**回填这两列：那里改了会让两条路径分叉
-/// （新库有列、老库经 ALTER 也有列，但列的定义来源变成两处，下次改动容易漏一处）。
+/// ── 版本 2 / 5 / 6 / 7 / 10 / 12 / 13：既有表**加列** ────────────
+/// 见 [`ADDED_COLUMNS`]（版本号 → 表 → 列 → 声明，每列的语义写在那一份表上）。
+/// v2 给 `requests` 加两个 JSON 文本列，v5 加思考等级两列，v6 加阶段与计时
+/// 两列，v7 加「测试来源」列，v10 加选路决策快照列，v12 加请求级 Credits，
+/// v13 给 `request_daily` 加当天 Credits 合计。
+///
+/// 加列是本文件唯一**非幂等**的 DDL（`ALTER ... ADD COLUMN` 不支持
+/// `IF NOT EXISTS`）。在单条版本线上幂等由版本号保证就够了，但本 fork 与
+/// 官方上游曾各占一份 v10/v11（本地是 Credits 两列、官方是 `requests.route`
+/// 与 `checkin_records`）—— 撞号之后出现「版本号已经越过某版、它引入的列却
+/// 缺失」的库，按版本号跑 DDL 永远补不上。所以加列改为按**实际列**核对
+/// （[`ensure_column`]），并在每次打开时用 [`reconcile`] 兜一遍最终形态。
 ///
 /// ── 版本 3：request_raw 表（原始报文，预览对话功能的地基）───────
-/// 见 [`V3_SCHEMA`]。与 v2 的差别：这次是**新表**而不是加列，所以走
-/// `CREATE TABLE IF NOT EXISTS`（不需要 ALTER，也就不需要「v1 不建、v2 补」
-/// 那种两段式）。老库（user_version=2）与全新库都会跑 v3 —— 老库靠这一步
-/// 建出表，全新库在 v1 里**也不建**它（定义只有 v3 一处，与 v2 那条
-/// 「不要把列塞回 v1」的纪律同理）。
+/// 见 [`V3_SCHEMA`]。与加列类的差别：这是**新表**，走
+/// `CREATE TABLE IF NOT EXISTS`，天然幂等，不需要按列核对。
 ///
 /// ── 版本 4：把 v3 的建表语句**再幂等地跑一遍**（存量库修复）──────
-/// 见 [`V4_SCHEMA`]。这不是一次结构变更，而是对「版本号写着 3、表却不在」
+/// 见 [`V4_SCHEMA`]。这不是结构变更，而是对「版本号写着 3、表却不在」
 /// 这类存量库的修复：实测有库 `user_version=3` 却没有 `request_raw`（早期
 /// 二进制曾在这个版本号下放过别的 DDL，撞号了）。后果是记账收尾事务里那句
 /// `DELETE FROM request_raw` 报「no such table」→ **整个事务回滚** → 明细的
 /// 进行中行永远收不了尾（界面上表现为「只有进行中、没有结束」）。
-/// v3 的 DDL 本身是 `CREATE TABLE IF NOT EXISTS`，重跑一次零成本：
-/// 表在就跳过，表不在就补上，两种库的最终形态一致。
+/// 这是本项目第一次遇到版本号撞车 —— v4 的补法是「换一个新版本号把 DDL 重放」，
+/// 只在**单条线**上够用；等到两条线撞号（见上面加列那段）就需要 [`reconcile`]。
 ///
-/// ── 版本 5：requests 表加两个思考等级列 ──────────────────────
-/// 见 [`V5_SCHEMA`]。与 v2 完全同一形态（既有表加列，ALTER 两连）：
-/// v1 的 DDL 不回填，两条建库路径（全新库跑 1→5 / 老库从任意版本升上来）
-/// 得到同一份表结构。
-///
-/// ── 版本 6：requests 表加阶段与阶段计时两列 ───────────────────
-/// 见 [`V6_SCHEMA`]。同样是既有表加列（ALTER 两连）。这两列只在**在途**
-/// 期间有值，收尾时一律清空（见 `request_stats::sql` 的各条收尾语句）——
-/// 「有没有阶段」因此就是「这一行还在跑」的第二个读数，与 status=0 同进同退。
-///
-/// ── 版本 7：requests 表加「测试来源」一列 ─────────────────────
-/// 见 [`V7_SCHEMA`]。同样是既有表加列（单条 ALTER）。模型测试走的是真实转发
-/// 链路，它产生的请求会照常进请求日志 —— 这一列把它与真实流量分开，
-/// 于是报表聚合能把它排除（测试是人工反复发起的样本，混进去会把真实流量读歪），
-/// 而请求日志那边照旧能看到它、并标成「测试」。
 /// ── 版本 8：account_usage_records 表（每账号的余额查询记录）─────
-/// 见 [`V8_SCHEMA`]。与 v3 同一形态（新表，`CREATE TABLE IF NOT EXISTS`，
-/// 老库与全新库都会跑这一版建出它）。它取代旧 kv 快照 `usageQuerySnapshot`
-/// 成为「每账号最近一次余额查询结果」的权威存放处：全局「定时查询积分」
-/// 退役后查询按账号各自到期触发，一行一账号才能逐条更新、逐条被选路读取
-/// （kv 整份读改写撑不住这个粒度）。旧快照的数据由 `core::usage_records`
-/// 启动时导入，升级后余额列不会变空白。
+/// 见 [`V8_SCHEMA`]。新表，`CREATE TABLE IF NOT EXISTS`。它取代旧 kv 快照
+/// `usageQuerySnapshot` 成为「每账号最近一次余额查询结果」的权威存放处：
+/// 全局「定时查询积分」退役后查询按账号各自到期触发，一行一账号才能逐条
+/// 更新、逐条被选路读取（kv 整份读改写撑不住这个粒度）。旧快照的数据由
+/// `core::usage_records` 启动时导入，升级后余额列不会变空白。
+///
+/// ── 版本 9：requests 补「按账号 + 时间」索引（限制器的 Token 周期聚合）──
+/// 见 [`V9_SCHEMA`]。`CREATE INDEX IF NOT EXISTS`，同样天然幂等。
 ///
 /// ── 版本 11：checkin_records 表（签到记录的每账号明细台账）───────
-/// 见 [`V11_SCHEMA`]。与 v3 / v8 同一形态（新表，`CREATE TABLE IF NOT EXISTS`）。
-/// 它是签到中心「签到记录」页的数据源：每执行一次签到，每个账号一行
-/// （领成功 / 已领过 / 失败及其错误原文 / 收益文案），补上改造前「只有
-/// config.json 里一条聚合同 lastResult」看不见的明细。写入方是
-/// `core::checkin_records`（记账点唯一：`core::billing::checkin::run_checkin`）。
-pub const SCHEMA_VERSION: i64 = 11;
+/// 见 [`V11_SCHEMA`]。新表，`CREATE TABLE IF NOT EXISTS`。它是签到中心
+/// 「签到记录」页的数据源：每执行一次签到，每个账号一行（领成功 / 已领过 /
+/// 失败及其错误原文 / 收益文案），补上改造前「只有 config.json 里一条聚合
+/// 同 lastResult」看不见的明细。写入方是 `core::checkin_records`（记账点唯一：
+/// `core::billing::checkin::run_checkin`）。
+///
+/// ── 版本 14：travel_records 表（旅行记录的每账号明细台账）───────
+/// 见 [`V14_SCHEMA`]。与 v11 同一形态（新表）。它是签到中心「旅行记录」页的
+/// 数据源：每执行一轮「真动作」，每个真动手的账号一行（派出 / 领回 / 失败）。
+/// 写入方是 `core::travel_records`（记账点在 `core::travel_auto`）。它与
+/// v11 的 checkin_records 是**并列**的两张表，不共用列。
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -418,55 +415,70 @@ CREATE TABLE IF NOT EXISTS debug_traffic (
 CREATE INDEX IF NOT EXISTS idx_debug_traffic_ts ON debug_traffic(ts);
 ";
 
-/// 版本 2：给 `requests` 补两列 JSON 文本（重试链 + 敏感词命中）。
+/// 「加列」类版本的全部内容：`(版本号, 表, 列, 声明)`。
 ///
-/// ── 这两列解决什么 ──────────────────────────────────────────
-/// 请求日志的「重试」列原先只能显示一个「重试」标记（只知道次数），因为
-/// 「每一轮换了谁、为什么换」与「这次命中了哪些敏感词」在明细里都没有落点 ——
-/// 前者只在转发链路的局部变量里存在过，后者被脱敏模块的聚合统计吃掉。
-/// 两列补上之后，那颗标签才有内容可弹（见 `ui/requests-panel.js` 的重试列）。
+/// ── 为什么把加列集中成一份表，而不是每版一个 DDL 常量 ──────────────
+/// 加列是唯一非幂等的 DDL（`ALTER TABLE ... ADD COLUMN` 不支持
+/// `IF NOT EXISTS`，写上去是语法错）。在**单条**版本线上，「一个版本跑一次、
+/// 跑完把 `user_version` 写进同一事务」已经够了。但本 fork 与官方上游各占了
+/// 一份 v10/v11（本地是 Credits 两列、官方是 `requests.route` 与
+/// `checkin_records`）—— 撞号之后会出现「版本号已经越过某版、它引入的列却
+/// 缺失」的库（升级路径详见 [`migrate`] 与 [`reconcile`]）。对这种库按版本号
+/// 跑 DDL 永远补不上那一列；而按**实际列**核对则天然幂等。集中成这一份表，
+/// 就是为了让「推进版本」（[`apply_version`]）与「核对修复」（[`reconcile`]）
+/// 读同一份事实来源，不会两处漂移。
 ///
-/// ── 为什么是「可空的 JSON 文本」而不是拆表 ─────────────────────
-/// 它们是**一条明细的附属历史**，读写都是整份进出、没有按单次尝试查询的
-/// 需求（要排障就在 `sqlite3` 里对 JSON 列用 `json_each`）。与 `request_daily`
-/// 的三个 `*Stats` 列同一取舍 —— 理由在 `request_stats::record::RequestEntry
-/// ::attempt_details` 的注释里写得更细。
+/// 第 4 列（声明）是 `ADD COLUMN` 后面的类型与约束，逐字来自原先各版本的常量。
+/// 是否已存在由 [`ensure_column`] 用 `PRAGMA table_info` 判断。
 ///
-/// ── 默认值为什么是 `'[]'` 而不是 NULL ─────────────────────────
-/// 与 `request_daily` 那三个列一致：空数组与「这一列没有数据」是同一件事，
-/// 统一成 `'[]'` 让读取方少一个分支。写入侧（`sql::encode_json_list`）也把
-/// 序列化失败兜成 `'[]'`，两边形态一致。
+/// ── 为什么是「可空的 JSON 文本」而不是拆表（v2）─────────────────
+/// `attempt_details` / `sensitive_hits` 是**一条明细的附属历史**，读写都是
+/// 整份进出、没有按单次尝试查询的需求（要排障就在 `sqlite3` 里对 JSON 列用
+/// `json_each`）。默认 `'[]'` 而不是 NULL：空数组与「这一列没有数据」是同一
+/// 件事，统一成 `'[]'` 让读取方少一个分支（写入侧 `encode_json_list` 也把
+/// 序列化失败兜成 `'[]'`，两边形态一致）。
 ///
-/// ── 为什么用 ALTER 而不重建表 ────────────────────────────────
-/// 两张表的其它列与索引一个都不动，重建要「建新表 → 搬数据 → 删旧表 → 重建索引」，
-/// 而 `requests` 可能有几万行（`MAX_ENTRIES` = 20000）。ALTER ADD COLUMN 是
-/// SQLite 的元数据操作（常数时间、不重写数据），代价可以忽略。
-///
-/// ── 为什么这里不能写 IF NOT EXISTS ───────────────────────────
-/// SQLite 的 `ALTER TABLE ... ADD COLUMN` **不支持** `IF NOT EXISTS`（这是它与
-/// 本文件所有 CREATE 语句的关键差别）。幂等性因此由**版本号**保证 ——
-/// 一个版本只跑一次，跑完立刻把 `user_version` 写在同一个事务里（见
-/// `migrate` 的说明）。写这段时不要「顺手加一个 IF NOT EXISTS」：
-/// 语句会直接报语法错，而不是变成空操作。
-///
-/// 另外：全新库会先跑 v1（建出**不含**这两列的 requests 表）再跑本版本，
-/// 于是两条路径（新库 / 老库升级）得到同一份表结构。不要为了「少跑一条 ALTER」
-/// 把这两列塞回 v1 的 DDL —— 那样老库升级后与 v1 的 DDL 定义就对不上了。
-const V2_SCHEMA: &str = "
--- ── requests 补两列（schema v2）───────────────────────────────
--- attempt_details：每次上游尝试的明细 `[{provider,status,error}]`，
---   按发生顺序。条数 <= attempts（采集侧一一对应），另受
---   `core::upstream::usage::MAX_ATTEMPT_DETAILS`（24）的体积闸约束。
--- sensitive_hits：本次请求命中的脱敏规则 `[{word,count}]`，按次数降序。
---   来源是脱敏模块算出的命中明细（改造前是「命中的敏感词」，现在是
---   「命中的硬编码规则标签」，见 `core::sanitize`；列名与结构未动，
---   前端请求日志的「敏」标签因此照常工作）。
--- 两列都 NOT NULL DEFAULT '[]'：见上面「默认值为什么是 '[]'」。
--- 「DEFAULT 后面的值必须是常量」——SQLite 对带非常量默认值的 ADD COLUMN 会
--- 直接报错，`'[]'` 是字面量，满足这条。
-ALTER TABLE requests ADD COLUMN attempt_details TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE requests ADD COLUMN sensitive_hits TEXT NOT NULL DEFAULT '[]';
-";
+/// 逐列语义（按版本）：
+///   - v2 `attempt_details`：每次上游尝试的明细 `[{provider,status,error}]`，
+///     按发生顺序。条数 <= attempts，另受 `usage::MAX_ATTEMPT_DETAILS`（24）闸。
+///   - v2 `sensitive_hits`：本次命中的脱敏规则 `[{word,count}]`，按次数降序。
+///     列名与结构未随「敏感词 → 硬编码规则」的改造而变，前端「敏」标签照常。
+///   - v5 `client_reasoning`：下游请求体里客户端显式指定的思考等级；空串 =
+///     没指定（或该行来自还没有此列的旧版本）。
+///   - v5 `upstream_reasoning`：实际随上游请求发出的思考等级；空串 = 没有
+///     等级随行（客户端没指定且映射没绑、承载家不接等级、或一次都没发出去）。
+///   - v6 `phase`：在途阶段（connecting/waiting/streaming/retrying/queued），
+///     空串 = 不在途；终态行收尾时清空，与 status=0 同进同退。
+///   - v6 `phase_started_at`：进入当前阶段的时刻（毫秒，与 ts 同口径），阶段
+///     计时由它现算；不在途的行是 NULL（「真的可能没有」用 NULL 而非 0）。
+///   - v7 `is_test`：这条明细是不是模型测试发起的（1/0）。测试走真实转发链路，
+///     与真实流量长得一样，唯一能分开的就是「谁发起的」——报表聚合据此排除
+///     （测试是人工反复发起的样本，混进去会把真实流量读歪），请求日志照常
+///     显示并标出来。
+///   - v10 `route`：选路决策快照 JSON 原文（`{strategy,sticky,stickyHit,
+///     picked,ordered[],blocked[]}`，采集侧已截断）。DEFAULT NULL：旧行与
+///     「没走到选路」都是「没有决策」，与 `attempt_details` 的 `'[]'` 不同
+///     （那是有意的空表，这里不必造一种空形态）。
+///   - v12 `credit`：本次请求的上游扣费 Credits（REAL，小数如 0.07 / 5.3）。
+///     不是所有家都给 ——WorkBuddy 国内版实测非零，国际版与其余家多为 0；
+///     旧行 DEFAULT 0。
+///   - v13 `credits`：`request_daily` 当天 Credits 合计（REAL）。报表页只走
+///     聚合表（寿命独立于明细、`all` 可跨年），所以聚合行上也要有落点，否则
+///     跨年区间会少一大段。列名用复数（与 `DailyEntry::credits` 同名）：单天
+///     合计是个汇总读数，明细那列是**单次请求**的扣费，用单数 `credit`；
+///     两者语义不同、不共用列名。
+const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
+    (2, "requests", "attempt_details", "TEXT NOT NULL DEFAULT '[]'"),
+    (2, "requests", "sensitive_hits", "TEXT NOT NULL DEFAULT '[]'"),
+    (5, "requests", "client_reasoning", "TEXT NOT NULL DEFAULT ''"),
+    (5, "requests", "upstream_reasoning", "TEXT NOT NULL DEFAULT ''"),
+    (6, "requests", "phase", "TEXT NOT NULL DEFAULT ''"),
+    (6, "requests", "phase_started_at", "INTEGER"),
+    (7, "requests", "is_test", "INTEGER NOT NULL DEFAULT 0"),
+    (10, "requests", "route", "TEXT"),
+    (12, "requests", "credit", "REAL NOT NULL DEFAULT 0"),
+    (13, "request_daily", "credits", "REAL NOT NULL DEFAULT 0"),
+];
 
 /// 版本 3：`request_raw` 表 —— 请求/响应的**下游侧**原始正文（预览对话功能的地基）。
 ///
@@ -513,83 +525,6 @@ CREATE TABLE IF NOT EXISTS request_raw (
 /// 加列时必然只改一处，而「表定义只有一处事实来源」正是 v2 那条纪律。
 /// `CREATE TABLE IF NOT EXISTS` 保证对正常库（表已在）是无操作。
 const V4_SCHEMA: &str = V3_SCHEMA;
-
-/// 版本 5：`requests` 补两列（schema v5）—— 思考等级的双端记录。
-///
-/// ── 存什么 ──────────────────────────────────────────────────
-///   - `client_reasoning`：**下游请求体里**客户端显式指定的思考等级
-///     （识别键与归一规则见 `core::model_rules::reasoning::read_client_level`）。
-///     空串 = 客户端没指定（或该行来自还没有此列的旧版本）。
-///   - `upstream_reasoning`：**实际随上游请求发出**的思考等级（映射绑定注入的
-///     或客户端显式指定且承载家接等级的最终值；采集点在
-///     `core::upstream::payload::send_body`，与 `upstream_model` 同点同时）。
-///     空串 = 没有等级随行（客户端没指定且映射没绑、承载家不接等级、
-///     「关闭思考」档、或一次都没发出去）。
-///
-/// 两列都 NOT NULL DEFAULT ''：与 `client_model` / `upstream_model` 同一套
-/// 「键恒在、空串就是没有」的存储契约，前端不必处理第三种「键缺失」形态。
-/// 加列走 ALTER 的全部理由（为什么不动 v1 的 DDL、为什么不能写
-/// IF NOT EXISTS、幂等靠版本号）与 [`V2_SCHEMA`] 完全相同，不赘述。
-const V5_SCHEMA: &str = "
--- ── requests 补两列（schema v5）──────────────────────────────
-ALTER TABLE requests ADD COLUMN client_reasoning TEXT NOT NULL DEFAULT '';
-ALTER TABLE requests ADD COLUMN upstream_reasoning TEXT NOT NULL DEFAULT '';
-";
-
-/// 版本 6：`requests` 补两列（schema v6）—— 在途请求的**阶段**与**阶段计时**。
-///
-/// ── 存什么 ──────────────────────────────────────────────────
-///   - `phase`：该请求当前所处的转发阶段，取值是 `core::upstream::usage::
-///     LogPhase` 的四个字面量（`connecting` 连接中 / `waiting` 等待响应 /
-///     `streaming` 响应中 / `retrying` 重试中 / `queued` 排队中）；空串 = 不在途（终态行、
-///     旧行、以及转发前就失败从未插入过在途行的行）。
-///   - `phase_started_at`：**进入当前阶段**的时刻（毫秒时间戳，与 `ts`
-///     同一口径）。阶段计时（请求日志状态列第二行）由它算出来。
-///
-/// ── 为什么两列都只服务「在途」───────────────────────────────
-/// 它们是进行中行的展示字段（列表状态列显示「响应中 1分53秒」这类读数），
-/// 终态行一个字都不读 —— 所以收尾（`update_running_request` /
-/// `finish_stale_running` / `finish_running_request`）一律把两列清回
-/// 空串 / NULL：不清的话，一条已经失败的行会留着「上次看到的阶段」，
-/// 而那个值既不是事实、也没有任何读点。
-///
-/// ── 为什么不像 OmniProxy 那样只存阶段、计时刻现算 ────────────
-/// 那边阶段计时存的是 `phase_started_at`（SQL 里 `julianday('now')` 现减），
-/// 这里同一形态：`phase_started_at` 入库、`phaseElapsedMs` 在 API 序列化时
-/// 现算（见 `request_stats::report::entry_json`）。前端因此拿到的永远是一个
-/// 与服务端时钟同源的读数，不必依赖浏览器本地时钟去减。
-///
-/// 两列都 NOT NULL / 可空的分工：`phase` 跟 `client_model` 那一套「键恒在、
-/// 空串就是没有」的契约（前端少一种「键缺失」形态）；`phase_started_at` 与
-/// `first_response_ms` 一样是**真的可能没有**（不在途的行），所以可空，
-/// 用 NULL 而不是 0 表达「没有这个时刻」。
-/// 加列走 ALTER 的全部理由（为什么不动 v1 的 DDL、为什么不能写
-/// IF NOT EXISTS、幂等靠版本号）与 [`V2_SCHEMA`] 完全相同，不赘述。
-const V6_SCHEMA: &str = "
--- ── requests 补两列（schema v6）──────────────────────────────
-ALTER TABLE requests ADD COLUMN phase TEXT NOT NULL DEFAULT '';
-ALTER TABLE requests ADD COLUMN phase_started_at INTEGER;
-";
-
-/// 版本 7：`requests` 补一列（schema v7）—— 这条请求是不是**模型测试**发起的。
-///
-/// ── 存什么 ──────────────────────────────────────────────────
-/// `is_test = 1`：这条明细来自模型管理页的「测试」（`api::model_test`）；
-/// `0`（默认，含全部旧行）：真实流量。
-///
-/// ── 为什么要有它（而不是靠「模型名 / 来源」猜）────────────────
-/// 测试请求与真实请求**走的是同一条转发链路**（这正是测试的价值：结论与生产
-/// 同源），所以它们在明细里长得一模一样 —— 模型、账号、状态码、用量全都真实。
-/// 唯一能分开它们的就是「这次是谁发起的」，而那只有入口知道。报表按天聚合
-/// （`request_stats` 的 `fold_into_daily` 与 `rebuild_day`）据此跳过测试行，
-/// 请求日志则照常显示并标出来。
-///
-/// 加列走 ALTER 的全部理由（为什么不动 v1 的 DDL、为什么不能写
-/// IF NOT EXISTS、幂等靠版本号）与 [`V2_SCHEMA`] 完全相同，不赘述。
-const V7_SCHEMA: &str = "
--- ── requests 补一列（schema v7）──────────────────────────────
-ALTER TABLE requests ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;
-";
 
 /// 版本 8：account_usage_records 表 —— 每账号一条余额查询记录（一账号一行，
 /// 主键即账号 id，重复写入天然是 UPSERT）。
@@ -644,18 +579,6 @@ const V9_SCHEMA: &str = "
 CREATE INDEX IF NOT EXISTS idx_requests_account_ts ON requests(account_id, ts);
 ";
 
-/// 版本 10：requests 补「选路决策快照」一列。
-///
-/// 存整个决策 JSON 的原文（`{strategy, sticky, stickyHit, picked, ordered[],
-/// blocked[]}`，采集侧已截断到各有界条数）。DEFAULT NULL：旧行与「没走到
-/// 选路」的请求都是「没有决策」—— 展示层对两者不渲染同一段，与
-/// `attempt_details` 的 `'[]'` 不同（那表达「空表」是有意的信息，这里 NULL
-/// 就是「没这回事」，不必造一种空形态）。
-const V10_SCHEMA: &str = "
--- ── requests 补选路决策快照列（schema v10）───────────────────
-ALTER TABLE requests ADD COLUMN route TEXT;
-";
-
 /// 版本 11：checkin_records 表 —— 签到记录的**每账号明细台账**。
 ///
 /// 存什么：每执行一次签到（定时条目轮次 / 启动补签 / 手动批量 / 单账号 /
@@ -703,18 +626,72 @@ CREATE INDEX IF NOT EXISTS idx_checkin_records_outcome ON checkin_records(outcom
 CREATE INDEX IF NOT EXISTS idx_checkin_records_provider ON checkin_records(provider);
 ";
 
-/// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时什么都不做）。
+/// 版本 14：travel_records 表 —— 派猫猫旅行的**每账号明细台账**。
+///
+/// 与 [`V11_SCHEMA`]（checkin_records）同一形态：每执行一次「真动作」的轮次
+/// （后台巡检 / 启动补跑 / 手动触发）里，每个**真动手的**账号落一行。列的口径：
+///   - `ts` / `date`：记账时刻与北京时间日期键（口径同 checkin_records）；
+///   - `source`：触发来源 `auto / startup / manual`（后台循环 / 启动补跑 /
+///     手动「立即执行」或单账号「派猫猫 / 领回」）—— 见 `core::travel_records`；
+///   - `reason`：给日志看的那句（轮次触发原因，如「后台巡检」「手动触发」）；
+///   - `account_id` / `account_name` / `provider`：账号三件套；
+///   - `outcome`：`departed`（派出旅途）/ `claimed`（领回奖励）/
+///     `failed`（派出或领取失败）；
+///   - `ok`：`departed|claimed → 1` 的布尔投影（SQL 过滤列）；
+///   - `message`：领取收益文案（如 `+12 积分`），派出行为空；
+///   - `error`：失败原因原文（失败行）。
+///
+/// 为什么**只记真动作**：旅行每 2 小时一轮、跨小时才领，多数轮次对多数账号
+/// 是「在途等待」或「当天已领满跳过」—— 那些不是事件。只把「真派了 / 真领了 /
+/// 真失败」记下来，台账才可读（与 `core::travel_history` 的旧取舍一致）。
+///
+/// 为什么 row_id 用 AUTOINCREMENT：与 [`V11_SCHEMA`] 同理由（翻页游标）。
+/// 它取代了 config.json 的 `travelHistory`（每轮一行的轮次汇总）—— 那张卡与
+/// 后端 `travel_history` 模块随本版一并删除（见 `core::travel_auto::collect`）。
+///
+/// 索引三个（ts / outcome / provider），与 checkin_records 同一取舍。
+const V14_SCHEMA: &str = "
+-- ── travel_records：派猫猫旅行每账号明细台账（schema v14）────
+CREATE TABLE IF NOT EXISTS travel_records (
+  row_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           INTEGER NOT NULL,
+  date         TEXT NOT NULL DEFAULT '',
+  source       TEXT NOT NULL DEFAULT '',
+  reason       TEXT NOT NULL DEFAULT '',
+  account_id   TEXT NOT NULL DEFAULT '',
+  account_name TEXT NOT NULL DEFAULT '',
+  provider     TEXT NOT NULL DEFAULT '',
+  outcome      TEXT NOT NULL DEFAULT '',
+  ok           INTEGER NOT NULL DEFAULT 0,
+  message      TEXT,
+  error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_travel_records_ts ON travel_records(ts);
+CREATE INDEX IF NOT EXISTS idx_travel_records_outcome ON travel_records(outcome);
+CREATE INDEX IF NOT EXISTS idx_travel_records_provider ON travel_records(provider);
+";
+
+/// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时只做一次核对修复）。
 ///
 /// 返回 `rusqlite::Result` 而不是本模块自造的字符串错误：调用方 `Db::open`
 /// 是唯一消费点，它把错误包成一句人能读的话（`format!`）就够了；而这里需要
 /// 区分「读版本号失败 / 跑 DDL 失败 / 写版本号失败」三种，保留 rusqlite 的
 /// 错误类型（含 SQLite 的错误码与消息）才说得清是哪一步坏的。
+///
+/// ── 为什么最后一定要跑一遍 [`reconcile`] ────────────────────
+/// 版本号是**推进**的依据，但不是唯一事实：本 fork 与官方上游曾各占一份
+/// v10/v11（本地是 Credits 两列、官方是 `requests.route` 与 `checkin_records`），
+/// 撞号之后会出现「版本号已经越过某版、它引入的列/表却缺失」的库 —— 对这类库
+/// 按版本号跑 DDL 永远补不上。`reconcile` 按**实际对象**核对最终形态，缺什么
+/// 补什么；它幂等，所以每次打开都跑，顺带成为「上一次修复中途失败、下次自动
+/// 重试」的兜底（即使版本号已经写成 SCHEMA_VERSION）。
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if current >= SCHEMA_VERSION {
+    if current > SCHEMA_VERSION {
         // 版本比本二进制新（用户从新版回退到旧版）：**不报错、也不动库**。
         // 报错会让旧版直接起不来（用户只是想回退一次），而「降级 schema」
         // 意味着删列删表，那是不可逆的数据丢失 —— 两者都不该自动发生。
+        // （只有**严格**大于才跳过：等于时仍要走一遍 reconcile，见上面。）
         return Ok(());
     }
     for version in (current + 1)..=SCHEMA_VERSION {
@@ -737,11 +714,81 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    reconcile(conn)
+}
+
+/// 按**实际对象**核对最终 schema：该有的表 / 索引不在就建、该有的列不在就补。
+///
+/// ── 与「按版本号推进」是什么关系 ─────────────────────────────
+/// 不是替代，而是兜底。`migrate` 的版本循环仍按版本号推进（新库、单线老库都
+/// 走它），本函数只补版本号**补不到的洞**：两条版本线撞号（见 [`migrate`] 与
+/// [`ADDED_COLUMNS`]）会让某个版本的 DDL 永久跳过。
+///
+/// ── 为什么可以每次都跑 ──────────────────────────────────────
+/// 它做的全是幂等操作：`CREATE ... IF NOT EXISTS`（表 / 索引在就跳过）与
+/// [`ensure_column`]（列在就跳过）。代价是每次打开多几条 `PRAGMA table_info`
+/// 与一段零改动的 DDL，相对一次启动可忽略。
+///
+/// ── 为什么是「缺才补」而不是「多就删」────────────────────────
+/// 只补不删：多出来的列 / 表（比如官方比本 fork 多带的）是数据，删列删表都
+/// 不可逆。本函数的职责是保证「本二进制能跑」，不是把库修剪成某个形态。
+fn reconcile(conn: &Connection) -> rusqlite::Result<()> {
+    // 先保证所有「表 / 索引」在（都是 CREATE IF NOT EXISTS，天然幂等）：
+    // V1 是全部基础表 + 其索引，V3 / V8 / V11 / V14 是后续新增的表，V9 是一个索引。
+    // （V4 复用 V3，不重复列。）
+    for ddl in [V1_SCHEMA, V3_SCHEMA, V8_SCHEMA, V9_SCHEMA, V11_SCHEMA, V14_SCHEMA] {
+        conn.execute_batch(ddl)?;
+    }
+    // 再逐列补齐「加列」类版本的列（表里已存在的跳过）。
+    for &(_, table, column, decl) in ADDED_COLUMNS {
+        ensure_column(conn, table, column, decl)?;
+    }
     Ok(())
+}
+
+/// `table` 是否已经有 `column` 列。
+///
+/// 用 `PRAGMA table_info` 读列清单再按名比对（而不是 `select ... limit 0`
+/// 之类的试探）：后者靠报错判断，会把「列不存在」与「其它 SQL 错误」混成一类。
+/// `table` 是本文件的编译期常量（[`ADDED_COLUMNS`]），不是外部输入，所以直接
+/// 拼进 SQL —— 何况 `PRAGMA` 本就不支持参数绑定（`table_info(?)` 会被当成一个
+/// 字面量列名）。
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 幂等加列：列已在就跳过，不在就 `ALTER TABLE ... ADD COLUMN`。
+///
+/// 这是本文件唯一「绕过版本号」的写操作，理由见 [`ADDED_COLUMNS`] 的说明
+/// （两条版本线撞号会让某些列永远补不上）。`table` / `column` / `decl` 都来自
+/// 编译期常量，不拼外部输入。
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    if column_exists(conn, table, column)? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))
 }
 
 /// 执行某个版本的 DDL。**新增版本时在这里加一个分支**，并在上面写好该版本的
 /// 建表/改表语句常量。
+///
+/// 加列类版本（2/5/6/7/10/12/13）统一走 [`apply_added_columns`]：DDL 在
+/// [`ADDED_COLUMNS`] 里，执行时按列核对（[`ensure_column`]）—— 撞号库里这些列
+/// 可能已经在了，裸 ALTER 会以 `duplicate column name` 失败（这正是本次修的
+/// 问题：fork 的 v11 已经带了 `credit`/`credits`，而官方 v10/v11 的列还没补）。
 ///
 /// `_` 分支返回 Ok 而不是 unreachable!：版本号是外部输入（库文件可能来自
 /// 更新的二进制，被旧版读到），越过 [`SCHEMA_VERSION`] 的版本不该 panic。
@@ -750,28 +797,191 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 fn apply_version(conn: &Connection, version: i64) -> rusqlite::Result<()> {
     match version {
         1 => conn.execute_batch(V1_SCHEMA),
-        // v2：requests 补两个 JSON 文本列（重试链 / 敏感词命中）。
-        // 与 v1 的差别只有一条：这里是 ALTER 而不是 CREATE，所以**没有**
-        // IF NOT EXISTS 可用（见 V2_SCHEMA 的说明），幂等由版本号保证。
-        2 => conn.execute_batch(V2_SCHEMA),
         // v3：request_raw 原始报文表（新表用 CREATE IF NOT EXISTS，见 V3_SCHEMA）
         3 => conn.execute_batch(V3_SCHEMA),
         // v4：重放 v3 建表（修复「版本号 3、表却不在」的存量库，见 SCHEMA_VERSION）
         4 => conn.execute_batch(V4_SCHEMA),
-        // v5：requests 补两个思考等级列（下游指定 / 上游实际发出，见 V5_SCHEMA）
-        5 => conn.execute_batch(V5_SCHEMA),
-        // v6：requests 补阶段与阶段计时两列（在途请求的状态列读数，见 V6_SCHEMA）
-        6 => conn.execute_batch(V6_SCHEMA),
-        // v7：requests 补「测试来源」一列（模型测试的流量标记，见 V7_SCHEMA）
-        7 => conn.execute_batch(V7_SCHEMA),
         // v8：account_usage_records 每账号余额记录表（取代旧 kv 快照，见 V8_SCHEMA）
         8 => conn.execute_batch(V8_SCHEMA),
         // v9：requests 补按账号聚合的索引（限制器的 Token 周期消耗聚合，见 V9_SCHEMA）
         9 => conn.execute_batch(V9_SCHEMA),
-        // v10：requests 补「选路决策快照」一列（请求详情的路由回放，见 V10_SCHEMA）
-        10 => conn.execute_batch(V10_SCHEMA),
         // v11：checkin_records 签到记录明细台账（签到记录页的数据源，见 V11_SCHEMA）
         11 => conn.execute_batch(V11_SCHEMA),
+        // v14：travel_records 旅行记录明细台账（旅行记录页的数据源，见 V14_SCHEMA）
+        14 => conn.execute_batch(V14_SCHEMA),
+        // v2 / v5 / v6 / v7 / v10 / v12 / v13：既有表加列，见 ADDED_COLUMNS
+        2 | 5 | 6 | 7 | 10 | 12 | 13 => apply_added_columns(conn, version),
         _ => Ok(()),
+    }
+}
+
+/// 执行「加列」类版本：把 [`ADDED_COLUMNS`] 里该版本的全部列按名补齐（幂等）。
+fn apply_added_columns(conn: &Connection, version: i64) -> rusqlite::Result<()> {
+    for &(v, table, column, decl) in ADDED_COLUMNS {
+        if v == version {
+            ensure_column(conn, table, column, decl)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// 建一个「fork 的 v11」库：v1 基础表 + fork 自己的 v10/v11（`requests.credit`
+    /// 与 `request_daily.credits`），user_version = 11 —— 但它**缺**官方 v10/v11 的
+    /// `requests.route` 与 `checkin_records` 表。
+    ///
+    /// 这正是线上那个库的形态：官方二进制读到 11 会跳过迁移（`route` 永远补不上，
+    /// 报表 / 日志查询报 `no such column: route` 而整块空白），而合并版二进制会去
+    /// 跑 v12 的 `ALTER ADD COLUMN credit` → duplicate column → 打开失败。
+    fn build_fork_v11(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN credit REAL NOT NULL DEFAULT 0;\
+             ALTER TABLE request_daily ADD COLUMN credits REAL NOT NULL DEFAULT 0;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 11i64).unwrap();
+    }
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    /// 用完删文件的临时库路径（本模块的用例各自独占一个标签）。
+    fn temp_path(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "agent2api-schema-{label}-{}.db",
+            std::process::id()
+        ));
+        remove_temp(&path);
+        path
+    }
+
+    fn remove_temp(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn repairs_fork_v11_db() {
+        let path = temp_path("repair");
+        build_fork_v11(&path);
+
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).expect("fork v11 库应当能被修复升级");
+
+        let cols = columns(&conn, "requests");
+        assert!(cols.iter().any(|c| c == "route"), "route 应被补上：{cols:?}");
+        assert!(cols.iter().any(|c| c == "credit"), "credit 应保留：{cols:?}");
+        assert!(
+            cols.iter().any(|c| c == "attempt_details"),
+            "v2 列也应在：{cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c == "phase_started_at"),
+            "v6 列也应在：{cols:?}"
+        );
+        assert!(
+            table_exists(&conn, "checkin_records"),
+            "checkin_records 表应被建出"
+        );
+        assert!(
+            table_exists(&conn, "travel_records"),
+            "travel_records 表应被建出"
+        );
+        let daily = columns(&conn, "request_daily");
+        assert!(
+            daily.iter().any(|c| c == "credits"),
+            "credits 应保留：{daily:?}"
+        );
+        let uv: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+        drop(conn);
+        remove_temp(&path);
+    }
+
+    /// 全新库按版本顺序推进仍得到同一份形态（顺序路径没被改坏）。
+    #[test]
+    fn fresh_db_reaches_target() {
+        let path = temp_path("fresh");
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+
+        let cols = columns(&conn, "requests");
+        for expected in [
+            "attempt_details",
+            "sensitive_hits",
+            "client_reasoning",
+            "upstream_reasoning",
+            "phase",
+            "phase_started_at",
+            "is_test",
+            "route",
+            "credit",
+        ] {
+            assert!(cols.iter().any(|c| c == expected), "{expected} 应在：{cols:?}");
+        }
+        assert!(columns(&conn, "request_daily").iter().any(|c| c == "credits"));
+        assert!(table_exists(&conn, "checkin_records"));
+        assert!(table_exists(&conn, "travel_records"));
+        let uv: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION);
+        drop(conn);
+        remove_temp(&path);
+    }
+
+    /// 已是目标形态的库：再迁移一次不报错（reconcile 幂等）。
+    #[test]
+    fn migrate_is_idempotent() {
+        let path = temp_path("idem");
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).expect("第二次迁移应当是无操作");
+        drop(conn);
+        remove_temp(&path);
+    }
+
+    /// 版本号比本二进制新时不改库（回退场景），也不因缺列而报错。
+    #[test]
+    fn newer_db_is_left_untouched() {
+        let path = temp_path("newer");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 5)
+            .unwrap();
+        migrate(&conn).expect("更新的库应当被原样放过");
+
+        // 版本号不变，且没有把本二进制的列塞进去（说明确实没动库）。
+        let uv: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, SCHEMA_VERSION + 5);
+        assert!(!columns(&conn, "requests").iter().any(|c| c == "route"));
+        drop(conn);
+        remove_temp(&path);
     }
 }

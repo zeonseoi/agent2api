@@ -30,6 +30,9 @@
 //!   keepalive.rs 国际版日活保活的模型链配置（config.json 的 checkinKeepalive）
 //!   request.rs   端点表、调用选项、请求头、JS 语义工具
 //!   commodity.rs 积分包商品码与套餐分类
+//!
+//! 派猫猫旅行不在本目录：它的上游调用与状态机在官方的
+//! `providers::workbuddy::growth::travel`，本仓只补自动调度（`core::travel_auto`）。
 
 pub mod checkin;
 mod activity;

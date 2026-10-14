@@ -72,6 +72,8 @@ type RequestEntry = {
   clientReasoning?: string; upstreamReasoning?: string
   durationMs?: number; firstResponseMs?: number | null
   promptTokens?: number; completionTokens?: number; totalTokens?: number; cacheReadTokens?: number
+  /** 本次请求的上游扣费 Credits（浮点；上游没给 / 旧行则 0） */
+  credit?: number
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
@@ -550,6 +552,21 @@ function cacheRate(entry: RequestEntry): string {
 }
 
 /**
+ * Credits 读数：上游按请求返回的扣费（小数）。与 token 不同，它不是量级词，
+ * 而是「这次花了多少钱」——保留两位小数、去掉无意义的尾零（5.3 不写成 5.30）。
+ *
+ * **0 也照样显示**（方案 B）：上游没给 credit 的家/版本会返回 0，但「这次真的是
+ * 0」与「这家压根没这个读数」在展示层不区分 —— 始终显示这一行，用户一眼能确认
+ * 功能在跑，而不是以为坏了。代价是免费模型/国际版会一直显示 `0 credits`。
+ */
+function formatCredit(value: unknown): string {
+  const credit = Number(value) || 0
+  if (!Number.isFinite(credit) || credit < 0) return '0'
+  // 两位小数、去尾零：5.3 → "5.3"，0.07 → "0.07"，1 → "1"，0 → "0"
+  return String(Number(credit.toFixed(2)))
+}
+
+/**
  * 成功口径与后端 `RequestEntry::is_success` 逐字对齐：2xx **且**没有错误摘要。流式请求的
  * HTTP 200 在响应头阶段就发出去了，之后的上游断流 / 错误帧只能靠 error 表达 —— 只按状态码判
  * 会把这类失败画成绿色，与后端筛选（status=ok/error）、报表成功率对不上账。
@@ -925,11 +942,16 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       if (!isOk(entry)) {
         return (
           <span key={key} className={className} title={t('失败请求不记录用量')}>
-            <span className='req-usage-line'>in: - / out: - / all: -</span>
+            <span className='req-usage-line'>credits: -</span>
+            <span className='req-usage-line sub'>in: - / out: - / all: -</span>
             <span className='req-usage-line sub'>{t('缓存读取: - / 命中率: -')}</span>
           </span>
         )
       }
+      // 三行：Credits（上游扣费，独立一行放最上）→ in/out/all → 缓存/命中率。
+      // Credits 之所以独立一行而不并进下面两行：它是「花了多少钱」，与 token
+      // 是不同性质的信息，挤在同一行会糊在一起、也不好对齐比较。
+      const credit = formatCredit(entry.credit)
       const line1 = `in: ${formatTokens(entry.promptTokens)} / out: ${formatTokens(entry.completionTokens)} / all: ${formatTokens(entry.totalTokens)}`
       const line2 = t('缓存读取: {cache} / 命中率: {rate}', {
         cache: formatTokens(entry.cacheReadTokens), rate: cacheRate(entry),
@@ -939,9 +961,11 @@ function requestCell(entry: RequestEntry, column: VisibleColumn): React.ReactNod
       // 整行 nowrap，超宽省略 —— 完整读数在 title 里（与该列既有手法同一套）
       const speed = tokensPerSecond(entry)
       const line2full = speed ? `${line2} · ${speed}` : line2
+      const creditLine = `credits: ${credit}`
       return (
-        <span key={key} className={className} title={[line1, line2full].filter(Boolean).join('\n')}>
-          <span className='req-usage-line'>{line1}</span>
+        <span key={key} className={className} title={[creditLine, line1, line2full].filter(Boolean).join('\n')}>
+          <span className='req-usage-line'>{creditLine}</span>
+          <span className='req-usage-line sub'>{line1}</span>
           <span className='req-usage-line sub'>
             {line2}
             {speed ? <span title={SPEED_TIP}> · {speed}</span> : null}

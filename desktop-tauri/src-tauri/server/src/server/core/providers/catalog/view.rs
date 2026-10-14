@@ -206,6 +206,12 @@ pub fn manage_view(store: &AccountStore) -> Value {
                 .unwrap_or_default();
             models.push(json!({
                 "id": id, "name": item.get("name"), "credits": item.get("credits"),
+                // 模型的中文简介（上游 `/v3/config` 清单里的 `descriptionZh`）。
+                // 键名归一成 `description`：这是**给界面显示的简介**，前端不必知道
+                // 上游那一长串字段名，将来上游换字段也只改这一处。
+                // 只有部分家给这个字段（WorkBuddy 两个地区、Qoder 有；Cline / Trae
+                // 的清单没有），缺失时为 null，界面显示空。
+                "description": item.get("descriptionZh"),
                 "isDefault": item.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
                 "provider": provider, "providerLabel": super::super::label_of(provider),
                 "source": source, "enabled": enabled, "aliases": aliases,

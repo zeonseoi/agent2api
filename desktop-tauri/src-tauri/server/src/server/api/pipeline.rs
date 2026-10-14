@@ -606,6 +606,9 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     entry.completion_tokens = snapshot.completion_tokens;
     entry.total_tokens = snapshot.total_tokens;
     entry.cache_read_tokens = snapshot.cache_read_tokens;
+    // 上游扣费 Credits（本次改造）：与 token 四件套同源同口径，采集点在上游
+    // 响应的 usage 旁路（`core::upstream::usage`），这里只负责搬运。
+    entry.credit = snapshot.credit;
     // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
     // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
     // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），

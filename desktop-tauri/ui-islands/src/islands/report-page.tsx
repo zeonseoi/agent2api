@@ -119,6 +119,8 @@ const TIP_ACCOUNTS = t('所选范围内每个账号各消耗了多少 Token，�
 const TIP_PROVIDERS = t('所选范围内每个提供商各消耗了多少 Token，按 Token 用量从多到少排。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。百分比按本区间的总 Token 数算（这一块只看用量，请求次数与成功率在概览卡片里）。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了（请求体非法、模型不存在、没有可用账号）。这一维与账号那一维不同：旧明细里根本没有「哪家承载」的信息（早期版本只有单一上游，但那是配置事实而非逐条记录），所以无法回算，旧数据会一直留在「未知」里；此后新产生的请求都会记上具体的提供商。')
 const TIP_MODELS = t('所选范围内每个模型各消耗了多少 Token，按用量从多到少排，扇区角度即占比。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该模型的 Token 用量与百分比。扇区内的百分比只在 ≥3% 时标出，更小的会挤成一团 —— 完整读数在右侧列表与悬停气泡里。颜色按用量排名分配：最大的那段是红色，依次往后；同一份报表里换个维度看，配色口径不变。')
 const TIP_PROVIDERS_PIE = t('所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。')
+const TIP_MODELS_CREDITS = t('所选范围内每个模型各消耗了多少 Credits，按 Credits 用量从多到少排，扇区角度即占比。中心是这一维的 Credits 合计（等于概览里的总 Credits），右侧每行给出该模型的 Credits 用量与百分比。Credits 来自上游响应的 usage，与 Token 用量同源同区间；不是所有上游都上报，没上报的家记 0，它们在图上也会是 0。')
+const TIP_PROVIDERS_CREDITS = t('所选范围内每个提供商各消耗了多少 Credits，按 Credits 用量从多到少排，扇区角度即占比。中心是这一维的 Credits 合计（等于概览里的总 Credits），右侧每行给出该提供商的 Credits 用量与百分比。Credits 来自上游响应的 usage，与 Token 用量同源同区间；不是所有上游都上报，没上报的家记 0。同一家可以挂多个账号，这一维按提供商归并。')
 const TIP_CACHE_RATES = t('命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。')
 const TIP_DAILY_TREND = t('每天的总 Token 用量（输入 + 输出）。柱顶标出当天的读数；区间很长、柱子挤到放不下时只标最高的那几天，其余悬停柱子即可读到。')
 
@@ -257,9 +259,11 @@ function RankPanel({ panelId, listId, labelId, title, tip, rows, totalText, with
 
 /* ─── 板块三：用量环形图（模型 / 提供商）──── */
 
-function DonutPanel({ panelId, listId, title, tip, ariaLabel, view, emptyText }: {
+function DonutPanel({ panelId, listId, title, tip, ariaLabel, centerLabel, view, emptyText }: {
   panelId: string; listId: string; title: string; tip: string
   ariaLabel: string
+  /** 中心读数下方的量纲名（「总 Token」/「总 Credits」）—— 环上的数字是哪种量纲靠它说明 */
+  centerLabel: string
   view: DonutView | null
   emptyText: string
 }) {
@@ -292,7 +296,7 @@ function DonutPanel({ panelId, listId, title, tip, ariaLabel, view, emptyText }:
                 </svg>
                 <div className='donut-center'>
                   <div className='donut-center-value'>{view.totalText}</div>
-                  <div className='donut-center-label'>{t('总 Token')}</div>
+                  <div className='donut-center-label'>{centerLabel}</div>
                 </div>
               </div>
               <div className='donut-legend'>
@@ -300,7 +304,9 @@ function DonutPanel({ panelId, listId, title, tip, ariaLabel, view, emptyText }:
                   <div className='donut-legend-row' data-tip={row.tip} key={row.key}>
                     <span className='donut-dot' style={{ background: row.fill }} />
                     <span className='donut-legend-name' title={row.name}>{row.name}</span>
-                    <span className='donut-legend-tokens'>{row.tokensText}</span>
+                    {/* 类名沿用官方的 donut-legend-tokens（样式在 page-report.css 里，
+                        那份文件保持上游原样）：它现在装的是本量纲的读数，Token / Credits 共用 */}
+                    <span className='donut-legend-tokens'>{row.valueText}</span>
                     <span className='donut-legend-percent'>{row.percentText}</span>
                   </div>
                 ))}
@@ -729,17 +735,32 @@ function ReportPage() {
         ) : null}
       </div>
 
-      {/* ── 用量环形图：模型 / 提供商两张并排（各自独立判断显隐）── */}
+      {/* ── 用量环形图：模型 / 提供商各两张（Token 一张、Credits 一张）──
+           每张卡各自独立判断显隐（后端可能不返回该维，或这一维没有数据）。
+           Credits 的两张排在 Token 两张之后：先看用量、再看花费，与概览卡片
+           「总 Token 在前、总 Credits 在后」的顺序一致。 */}
       <div className='report-donut-grid'>
         {modelList ? (
           <DonutPanel panelId='report-models-panel' listId='report-models-donut' title={t('模型用量')}
-            tip={TIP_MODELS} ariaLabel={t('模型用量占比')}
-            view={donutView(modelList, t('未知模型'))} emptyText={t('所选范围内还没有模型用量')} />
+            tip={TIP_MODELS} ariaLabel={t('模型用量占比')} centerLabel={t('总 Token')}
+            view={donutView(modelList, t('未知模型'), 'tokens')} emptyText={t('所选范围内还没有模型用量')} />
         ) : null}
         {providerList ? (
-          <DonutPanel panelId='report-providers-pie-panel' listId='report-providers-donut' title={t('提供商用')}
-            tip={TIP_PROVIDERS_PIE} ariaLabel={t('提供商用占比')}
-            view={donutView(providerList, t('未知'))} emptyText={t('所选范围内还没有提供商用量')} />
+          <DonutPanel panelId='report-providers-pie-panel' listId='report-providers-donut' title={t('提供商用量')}
+            tip={TIP_PROVIDERS_PIE} ariaLabel={t('提供商用量占比')} centerLabel={t('总 Token')}
+            view={donutView(providerList, t('未知'), 'tokens')} emptyText={t('所选范围内还没有提供商用量')} />
+        ) : null}
+        {modelList ? (
+          <DonutPanel panelId='report-models-credits-panel' listId='report-models-credits-donut'
+            title={t('模型 Credits 用量')} tip={TIP_MODELS_CREDITS} ariaLabel={t('模型 Credits 用量占比')}
+            centerLabel={t('总 Credits')}
+            view={donutView(modelList, t('未知模型'), 'credits')} emptyText={t('所选范围内还没有模型 Credits 用量')} />
+        ) : null}
+        {providerList ? (
+          <DonutPanel panelId='report-providers-credits-panel' listId='report-providers-credits-donut'
+            title={t('提供商 Credits 用量')} tip={TIP_PROVIDERS_CREDITS} ariaLabel={t('提供商 Credits 用量占比')}
+            centerLabel={t('总 Credits')}
+            view={donutView(providerList, t('未知'), 'credits')} emptyText={t('所选范围内还没有提供商 Credits 用量')} />
         ) : null}
       </div>
 

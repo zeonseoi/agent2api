@@ -140,7 +140,35 @@ export type CheckinCenterSnapshot = {
   auto: SchedulesSnapshot
   /** WorkBuddy 国际版日活保活的模型链（后端快照直接给当前生效值 + 缺省值） */
   keepalive?: KeepaliveState
+  /** 派猫猫旅行的自动开关（WorkBuddy 国内版；无国内版账号时后端不给这个键） */
+  travel?: { enabled: boolean }
   history: CheckinHistoryEntry[]
+}
+
+/**
+ * 旅行记录明细台账的一行（签到中心「旅行记录」页；与后端 travel_records 同形）。
+ *
+ * 单账号的**实时**旅行状态（有没有猫 / 在途 / 可领）由官方「成长任务」行的
+ * 展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块）—— 本页只展示
+ * 历史动作明细（派出 / 领养 / 领回 / 失败）。
+ */
+export type TravelRecordRow = {
+  rowId?: number | null
+  ts?: number | null
+  date?: string | null
+  /** 触发来源：auto / startup / manual */
+  source?: string | null
+  /** 触发原因（后台巡检 / 启动补跑 / 手动触发…） */
+  reason?: string | null
+  accountId?: string | null
+  accountName?: string | null
+  provider?: string | null
+  /** departed（派出）/ claimed（领回）/ adopted（领养）/ failed（失败） */
+  outcome?: string | null
+  ok?: boolean | null
+  /** 收益文案（如 `+12 积分`），派出行为空 */
+  message?: string | null
+  error?: string | null
 }
 
 /**
@@ -309,12 +337,21 @@ type CheckinBridge = {
     results?: unknown
     lottery?: unknown
   } | null | undefined>
-  /** 猫猫旅行巡检一次 */
+  /** 猫猫旅行巡检一次（官方成长任务行里的按钮；走 growth/travel 端点） */
   runGrowthTravel?(id: string): Promise<{
     outcome?: unknown
     message?: unknown
     credit?: unknown
   } | null | undefined>
+  /** 旅行自动开关的读写（POST /api/travel/auto，起停后端独立轮询） */
+  getTravelAuto?(): Promise<{ enabled?: boolean } | null | undefined>
+  setTravelAuto?(enabled: boolean): Promise<{ enabled?: boolean } | null | undefined>
+  /** 旅行记录明细台账（GET /api/travel-records；与 bridge.rs、web_shim.rs 三处成对） */
+  getTravelRecords?(params: Record<string, unknown>): Promise<{
+    records?: TravelRecordRow[]
+    total?: number
+  } | null | undefined>
+  clearTravelRecords?(params: Record<string, unknown>): Promise<{ removed?: number } | null | undefined>
 }
 
 function bridge(): CheckinBridge {
@@ -331,12 +368,12 @@ function accountsView(): { wbAccountsView?: { refreshUsageAfterCheckin?: (id?: s
 
 /* ─── 页内标签页（签到中心 / 定时签到 / 签到记录）────────── */
 
-export type CheckinTab = 'center' | 'schedule' | 'records'
+export type CheckinTab = 'center' | 'schedule' | 'records' | 'travel'
 
 /** 持久化键（命名仿 settings 页的 workbuddy-desktop-settings-cat） */
 const TAB_STORAGE_KEY = 'workbuddy-desktop-checkin-tab'
 
-const CHECKIN_TABS: readonly CheckinTab[] = ['center', 'schedule', 'records']
+const CHECKIN_TABS: readonly CheckinTab[] = ['center', 'schedule', 'records', 'travel']
 
 /** 上次停留的标签页（没存过 / 值不认 → 签到中心）。localStorage 挂了给缺省。 */
 function readStoredTab(): CheckinTab {
@@ -397,6 +434,8 @@ export type CheckinStore = {
   onboarding: ReadonlyMap<string, OnboardingCache>
   /** 成长任务的按账号缓存（WorkBuddy 国内版） */
   growth: ReadonlyMap<string, GrowthCache>
+  /** 旅行自动开关保存中（开关临时禁用） */
+  travelSaving: boolean
 }
 
 let store: CheckinStore = {
@@ -414,6 +453,7 @@ let store: CheckinStore = {
   signing: new Set<string>(),
   onboarding: new Map<string, OnboardingCache>(),
   growth: new Map<string, GrowthCache>(),
+  travelSaving: false,
 }
 
 const subscribers = new Set<() => void>()
@@ -1151,6 +1191,29 @@ export async function runGrowthTravel(id: string): Promise<void> {
   } catch (error) {
     patchGrowth(id, { runningTravel: false, error: errorMessage(error) })
     toast(t('猫猫旅行失败：{error}', { error: errorMessage(error) }), 'err')
+  }
+}
+
+/* ─── 派猫猫旅行的自动开关（后端独立轮询，官方没有这一档）─── */
+
+/**
+ * 存自动旅行开关（POST /api/travel/auto）。
+ *
+ * 后端据此起停那条独立轮询（每 2 小时一轮，见 `core::travel_auto`）。开关读数
+ * 取快照的 `travel.enabled`，写成功后重拉一次快照让读数落地（后端回的就是新值，
+ * 但快照里的 `travel` 段也要一起换，否则徽章还停在旧态）。
+ */
+export async function setTravelAuto(enabled: boolean): Promise<void> {
+  if (store.travelSaving) return
+  patch({ travelSaving: true })
+  try {
+    await bridge().setTravelAuto?.(enabled)
+    toast(enabled ? t('✅ 已开启自动派猫猫旅行') : t('已关闭自动派猫猫旅行'))
+    await loadCheckinCenter()
+  } catch (error) {
+    toast(t('保存失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ travelSaving: false })
   }
 }
 

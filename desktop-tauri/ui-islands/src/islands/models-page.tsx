@@ -723,6 +723,19 @@ function ModelsPage() {
             <span className='rate'>{model.credits ? formatCredits(model.credits) : '—'}</span>
           </td>
         )
+      case 'description': {
+        // 上游清单里的中文简介（`descriptionZh`）。只有部分家给这个字段，
+        // 没有时给「—」而不是空串 —— 空串会让人以为这一行渲染坏了，
+        // 破折号才是「这个模型没有简介」的既有占位（与倍率 / 来源列同口径）。
+        const text = String(model.description ?? '').trim()
+        return (
+          <td className={cellClass('cell-description', column.align)}>
+            {text
+              ? <span className='mdesc' title={text}>{text}</span>
+              : <span className='rate'>—</span>}
+          </td>
+        )
+      }
       case 'source':
         return <td className={cellClass('cell-source', column.align)}>{sourceCell(model)}</td>
       case 'budget':
@@ -942,6 +955,7 @@ function ModelsPage() {
                   <col className='c-check' data-col='check' />
                   <col className='c-model' data-col='model' />
                   <col className='c-rate' data-col='rate' />
+                  <col className='c-description' data-col='description' />
                   <col className='c-source' data-col='source' />
                   <col className='c-budget' data-col='budget' />
                   <col className='c-caps' data-col='caps' />
@@ -952,6 +966,7 @@ function ModelsPage() {
                   <th data-col='check'>{allPickNode}</th>
                   <th data-col='model'>{t('上游模型')}</th>
                   <th data-col='rate'>{t('倍率')}</th>
+                  <th data-col='description'>{t('简介')}</th>
                   <th data-col='source'>{t('来源')}</th>
                   {/* 表头只留短标题，完整口径进问号提示（原括号长标题让表头喧宾夺主）。
                       这是静态内容：重渲染时逐字不变，不会破坏「静态表头」的约定。

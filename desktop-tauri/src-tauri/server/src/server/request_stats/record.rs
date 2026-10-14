@@ -143,6 +143,14 @@ pub struct RequestEntry {
     pub total_tokens: i64,
     #[serde(rename = "cacheReadTokens", default)]
     pub cache_read_tokens: i64,
+    /// 本次请求的上游扣费 Credits（浮点；上游没给 / 旧行则 0）。
+    ///
+    /// 与 token 四件套同源同口径：转发时从上游响应的 `usage` 旁路抄出
+    /// （`core::upstream::usage::extract_usage`，兼容 `credit`/`credits`/`cost`）。
+    /// **不是所有家都给**：WorkBuddy 国内版实测非零，国际版/其他家多为 0。
+    /// 前端据此决定「有没有这张读数」，不要给 0 编「免费」的语义。
+    #[serde(rename = "credit", default)]
+    pub credit: f64,
     /// 实际承载本次请求的 provider id（架构文档 §3.6）。
     ///
     /// ── 为什么是 `String` + 空串而不是 `Option<String>` ─────────
@@ -414,6 +422,7 @@ impl RequestEntry {
         copy.completion_tokens = 0;
         copy.total_tokens = 0;
         copy.cache_read_tokens = 0;
+        copy.credit = 0.0;
         copy
     }
 }
@@ -442,6 +451,8 @@ pub struct NewRequestEntry {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    /// 本次请求的上游扣费 Credits（见 `RequestEntry::credit`）
+    pub credit: f64,
     /// 实际承载本次请求的 provider id（Agent2API 改造 W2b-T3 新增填入，
     /// W4 接上持久化：见 `normalize` 末尾的透传）。
     ///
@@ -486,6 +497,7 @@ impl NewRequestEntry {
             completion_tokens: 0,
             total_tokens: 0,
             cache_read_tokens: 0,
+            credit: 0.0,
             provider: None,
             client_model: String::new(),
             upstream_model: String::new(),
@@ -549,6 +561,9 @@ impl NewRequestEntry {
             completion_tokens: token(self.completion_tokens),
             total_tokens: token(self.total_tokens),
             cache_read_tokens: token(self.cache_read_tokens),
+            // Credits 与 token 同一「失败清零」口径：失败请求不该产生用量。
+            // 上游没给时本就是 0；负值（理论上的返还）夹成 0，展示层不为它写分支。
+            credit: if failed { 0.0 } else { self.credit.max(0.0) },
             provider,
             // 双名透传（trim 的理由与 provider 相同：空白不该造出一个
             // 「看起来不同的名字」）；空串语义 = 没有点名 / 没有发出去
@@ -689,6 +704,13 @@ pub struct DailyEntry {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 当天的上游扣费 Credits 合计（与 `tokens` 同一口径的累加，只是换了量纲）。
+    ///
+    /// 与明细行的 `credit` 同源（`core::upstream::usage` 的旁路提取），失败请求
+    /// 已在 `normalize` 里清零，所以这里累加的就是「真实产生扣费的那些请求」。
+    /// `f64` 而不是整数：Credits 本身是小数（0.07 / 5.3）。
+    #[serde(default)]
+    pub credits: f64,
     /// 命中缓存的输入 token 数
     #[serde(rename = "cacheHitTokens", default)]
     pub cache_hit_tokens: i64,
@@ -735,6 +757,7 @@ impl DailyEntry {
             requests: 0,
             successful: 0,
             tokens: 0,
+            credits: 0.0,
             cache_hit_tokens: 0,
             cache_input_tokens: 0,
             model_tokens: Vec::new(),
@@ -752,6 +775,10 @@ pub struct ModelAccum {
     pub requests: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该模型当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
+    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    #[serde(default)]
+    pub credits: f64,
 }
 
 /// 单个 provider 在某天的累计（聚合行的组成部分，W4 新增）。
@@ -772,6 +799,10 @@ pub struct ProviderAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该 provider 当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
+    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    #[serde(default)]
+    pub credits: f64,
 }
 
 /// 单个账号在某天的累计（聚合行的组成部分）。
@@ -800,6 +831,10 @@ pub struct AccountAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该账号当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
+    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    #[serde(default)]
+    pub credits: f64,
 }
 
 /// 明细查询条件（「模型请求日志」页用）——

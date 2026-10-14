@@ -568,6 +568,29 @@ const BRIDGE_JS: &str = r#"
       return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
     },
 
+    // ── 派猫猫旅行：自动调度（上游调用与单账号「巡检一次」在官方 growth 那侧，
+    // 见 api::travel 的模块头 —— 这里只有开关与「立即执行一轮」）──
+    getTravelAuto: () => call('GET', '/api/travel/auto'),
+    setTravelAuto: enabled => call('POST', '/api/travel/auto', { enabled }),
+    runTravelNow: () => call('POST', '/api/travel/run', {}),
+    // 旅行记录明细台账（与 web_shim.rs 的同名方法成对）
+    getTravelRecords: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('GET', '/api/travel-records' + (text ? '?' + text : ''));
+    },
+    clearTravelRecords: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('DELETE', '/api/travel-records' + (text ? '?' + text : ''));
+    },
+
     // ── 间隔型定时任务（凭证自动维护 / 定时查询积分 / 模型刷新 / 两个前端自动刷新）──
     // 改一条任务用 PATCH（后端同时受理 POST 作别名：CORS 允许方法里没有 PATCH，
     // 浏览器直连时预检会拦下它；走本桥的调用两种都能用，这里按规范用 PATCH）。

@@ -160,6 +160,7 @@ use crate::port_conflict::{ConflictKind, PortConflict};
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
+use crate::server::core::travel_auto::TravelAuto;
 use crate::server::core::billing::BillingService;
 use crate::server::core::login::LoginService;
 use crate::server::core::models::ModelCatalog;
@@ -215,6 +216,10 @@ pub struct ServerState {
     upstream: UpstreamService,
     /// 定时签到句柄（轮询调度 + 启动补签；内部 Mutex + 后台任务）
     auto_checkin: AutoCheckin,
+    /// 派猫猫旅行句柄（WorkBuddy 国内版成长中心；独立轮询 + 跨日缓存）。
+    /// `Option`：handler 走 `state.travel_auto()` 拿它，取不到时降级为直接调用
+    /// `core::travel_auto` 的自由函数（理论恒为 Some —— 启动时即初始化）。
+    travel_auto: Option<TravelAuto>,
     /// 软件更新句柄（GitHub Release 检测 / 安装包下载；内部 Mutex）
     update: UpdateManager,
     /// 请求统计存储句柄（明细 + 按天聚合，现在同居统一库的两张表）。
@@ -347,6 +352,10 @@ impl ServerState {
         // `core::billing::checkin::run_checkin`（唯一），保留期裁剪随每次记账
         // 与「立即清理」进行（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
+        // 旅行记录的明细台账（签到中心「旅行记录」页）：装句柄即可，记账点在
+        // `core::travel_auto`（真动作处），保留期裁剪随每次记账与「立即清理」进行
+        // （见 travel_records 模块头）。它取代了 config.json 的 travelHistory。
+        core::travel_records::install(db.clone());
         // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
         // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
         // 放在这里是因为它要读写配置快照（`config::init` 已在上方就位），且必须早于
@@ -493,6 +502,11 @@ impl ServerState {
             store.clone(),
             billing.clone(),
         ));
+        // 派猫猫旅行：独立后台调度（WorkBuddy 国内版成长中心，见 core::travel_auto）。
+        // 与自动签到同一模式（进程级句柄，stop() 从停机路径调到），但**默认关闭** ——
+        // 旅行会真花掉账号的每日次数，要用户在签到中心显式开。上游调用交给官方的
+        // `providers::workbuddy::growth::travel`，这里只持调度句柄。
+        let travel_auto = Some(core::travel_auto::init_global(TravelAuto::new(store.clone())));
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
 
@@ -567,6 +581,7 @@ impl ServerState {
             models,
             upstream,
             auto_checkin,
+            travel_auto,
             update,
             request_stats,
             db,
@@ -720,6 +735,13 @@ impl ServerState {
             state.auto_checkin.start();
         }
 
+        // 派猫猫旅行：开关开启时才起调度（默认关闭，见 core::travel_auto 的模块头）。
+        // 与自动签到同处启动末尾 —— 循环与 HTTP 监听独立，早点起没意义。
+        if core::travel_auto::auto_enabled() {
+            logging::log("[Travel]", "🐾 派猫猫旅行自动调度已启用（每 2 小时一轮）");
+            state.travel_auto().map(TravelAuto::start);
+        }
+
         // 间隔型定时任务（凭证自动维护 / 模型目录刷新）：
         // 起一个循环，按各自配置的开关与间隔重复执行。
         //
@@ -787,6 +809,11 @@ impl ServerState {
     /// 定时签到句柄（/api/auto-checkin* 三条路由 + 启动调度）
     pub fn auto_checkin(&self) -> &AutoCheckin {
         &self.auto_checkin
+    }
+
+    /// 派猫猫旅行句柄（/api/travel/* 路由 + 后台轮询）
+    pub fn travel_auto(&self) -> Option<&TravelAuto> {
+        self.travel_auto.as_ref()
     }
 
     /// 软件更新句柄（/api/update/* 四条路由）

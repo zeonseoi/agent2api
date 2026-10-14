@@ -925,6 +925,31 @@ pub fn shim_js() -> &'static str {
       return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
     },
 
+    // ── 派猫猫旅行：自动调度（上游调用与单账号「巡检一次」在官方 growth 那侧，
+    // 与 bridge.rs 同名方法成对维护 —— 这里只有开关与「立即执行一轮」）──
+    getTravelAuto: function () { return call('GET', '/api/travel/auto'); },
+    setTravelAuto: function (enabled) { return call('POST', '/api/travel/auto', { enabled: enabled }); },
+    runTravelNow: function () { return call('POST', '/api/travel/run', {}); },
+    // 旅行记录明细台账（查询 / 清空；参数对象里空值不带，与 bridge.rs 成对）
+    getTravelRecords: function (params) {
+      const query = new URLSearchParams();
+      for (const key of Object.keys(params || {})) {
+        const value = params[key];
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('GET', '/api/travel-records' + (text ? '?' + text : ''));
+    },
+    clearTravelRecords: function (params) {
+      const query = new URLSearchParams();
+      for (const key of Object.keys(params || {})) {
+        const value = params[key];
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('DELETE', '/api/travel-records' + (text ? '?' + text : ''));
+    },
+
     // ── 间隔型定时任务 ──
     getScheduledTasks: function () { return call('GET', '/api/scheduled-tasks'); },
     saveScheduledTask: function (id, patch) {

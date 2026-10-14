@@ -47,6 +47,12 @@ export type ManageModel = {
   refreshedAt?: unknown
   credits?: unknown
   /**
+   * 模型的中文简介（上游清单里的 `descriptionZh`，后端归一成 `description` 透出）。
+   * 只有部分家给这个字段（WorkBuddy / Qoder 有；Cline / Trae 没有），缺失 = null。
+   * 自定义家的记录里没有简介（用户自己登记的模型不填这个），恒空串。
+   */
+  description?: unknown
+  /**
    * 对下游声明的能力位（生效值：清单原值 + 用户覆盖）。内置家由后端给
    * 「五键齐全、null = 未声明」的形状；自定义家由本模块适配成**稀疏表**
    * （没填的键不出现）—— 读侧统一走 `model-capability` 的归一/判定，
@@ -237,6 +243,8 @@ export function buildView(id: string): { models: ManageModel[]; mappings: Manage
       source: '',
       enabled: model.enabled,
       aliases: [],
+      // 自定义家的模型是用户自己登记的，没有上游简介可显示（简介列留空）
+      description: '',
       // 能力位是**记录自带的**（用户填的），没有「上游原值」这回事 ——
       // 覆盖标记恒空，弹窗按「未声明 / 已填」两态呈现
       capabilities: model.capabilities || {},

@@ -65,13 +65,13 @@ use super::report::normalize_status_filter;
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
 ///
 /// 末尾两列（`attempt_details` / `sensitive_hits`）是 schema v2 新增的 JSON 文本列
-/// （见 `db/schema.rs` 的 `V2_SCHEMA`）。它们必须排在**最后**：`decode_request`
+/// （见 `db/schema.rs` 的 `ADDED_COLUMNS`）。它们必须排在**最后**：`decode_request`
 /// 按序号取值，而「加列」这件事只有在末尾才不牵动前面的序号 —— 中间插一列会让
 /// 所有后续字段的序号整体挪一位，那种改动在整个文件里看不出错，只会静默取错值。
 const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
-     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route";
+     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, credit";
 
 // `request_daily`（按天聚合）那一支的列常量、编解码与读-改-写语句在
 // `daily.rs` —— 两张表的语句分文件后各自独立演化。
@@ -131,6 +131,8 @@ fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestEntry> {
             .get::<_, Option<String>>(24)?
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null),
+        // 末列是 schema v12 加的（上游扣费 Credits）；旧行 DEFAULT 0 原样读出
+        credit: row.get(25)?,
     })
 }
 
@@ -620,7 +622,7 @@ pub(super) fn update_running_request(
          completion_tokens = ?12, total_tokens = ?13, cache_read_tokens = ?14, provider = ?15, \
          client_model = ?16, upstream_model = ?17, attempt_details = ?18, sensitive_hits = ?19, \
          client_reasoning = ?20, upstream_reasoning = ?21, phase = '', phase_started_at = NULL, \
-         is_test = ?22, route = ?23 \
+         is_test = ?22, route = ?23, credit = ?24 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -648,6 +650,7 @@ pub(super) fn update_running_request(
             // 无进行中行时的兜底之外的主路径，写一次保证两条插入路径口径一致
             entry.is_test as i64,
             encode_optional_json(&entry.route),
+            entry.credit,
         ],
     )
 }
@@ -665,9 +668,9 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
         "INSERT INTO requests (id, ts, model, account_id, account_name, status, duration_ms, \
          first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
-         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route) \
+         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, credit) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, ?22, ?23)",
+         ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             entry.id,
             entry.ts,
@@ -692,6 +695,7 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.upstream_reasoning,
             entry.is_test as i64,
             encode_optional_json(&entry.route),
+            entry.credit,
         ],
     )?;
     Ok(())

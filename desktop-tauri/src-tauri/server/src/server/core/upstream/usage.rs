@@ -30,19 +30,28 @@ use serde_json::Value;
 
 use crate::server::logging;
 
-/// 一次上报的用量（四种 token 计数，字段名对应存储契约）
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 一次上报的用量（token 计数 + 本次扣费；字段名对应存储契约）
+///
+/// `credit` 是**上游按请求返回的 Credits 扣费**（WorkBuddy 国内版实测非零，
+/// 见 `extract_usage`）。与 token 一样是「有就记、没有就 0」的旁路读数，
+/// 不参与转发、缺失不影响任何东西。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UsageTokens {
     pub prompt: i64,
     pub completion: i64,
     pub total: i64,
     pub cache_read: i64,
+    /// 本次扣费 Credits（浮点；上游没给则 0）
+    pub credit: f64,
 }
 
-/// 从 usage 对象里提取 token 数（字段名兼容见模块头部）。
+/// 从 usage 对象里提取 token 数与扣费（字段名兼容见模块头部）。
 ///
 /// 返回 None 只有一种情况：`usage` 不是对象（null / 数字 / 字符串 / 数组）。
 /// 对象内单个字段缺失按 0 算；`total_tokens` 缺失时按 prompt + completion 补。
+///
+/// `credit` 兼容三种别名（对照 buddy-proxy 的 `credit`/`credits`/`cost`）：
+/// 上游不同家/不同版本对「本次扣费」的命名不统一，取到哪个算哪个。
 pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
     let object = usage.as_object()?;
     let prompt = number_field(object.get("prompt_tokens"))
@@ -58,7 +67,23 @@ pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
         .or_else(|| number_field(object.get("cache_read_tokens")))
         .or_else(|| number_field(object.get("cache_read_input_tokens")))
         .unwrap_or(0);
-    Some(UsageTokens { prompt, completion, total, cache_read })
+    let credit = float_field(object.get("credit"))
+        .or_else(|| float_field(object.get("credits")))
+        .or_else(|| float_field(object.get("cost")))
+        .unwrap_or(0.0);
+    Some(UsageTokens { prompt, completion, total, cache_read, credit })
+}
+
+/// 取浮点数值字段：整数 / 浮点 / 数字字符串都认（Credits 是小数，不能用
+/// `number_field` 那个取整的版本），非数值返回 None。
+fn float_field(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|number| number.is_finite())
 }
 
 /// 取数值字段：`as_i64` 对 `1.0` 这类浮点形态会失败，所以再补一次 f64 转换
@@ -182,6 +207,12 @@ pub struct TelemetrySnapshot {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
+    /// 本次请求的上游扣费 Credits（浮点；上游没给则 0）。
+    ///
+    /// 与四个 token 字段同一「最后一次为准」口径（`report_usage` 覆盖式写入）。
+    /// 只在部分上游（如 WorkBuddy 国内版）非零，其余家多为 0 —— 展示层据此
+    /// 决定「有没有这张读数」，不要给 0 编一个「免费」的语义。
+    pub credit: f64,
     /// 上游首帧到达的**绝对时刻**（毫秒 Unix 时间戳；None = 全程没有帧到达，
     /// 例如转发前就失败 / 请求尚未开始下发）。
     ///
@@ -992,6 +1023,7 @@ impl RequestTelemetry {
         guard.completion_tokens = tokens.completion;
         guard.total_tokens = tokens.total;
         guard.cache_read_tokens = tokens.cache_read;
+        guard.credit = tokens.credit;
     }
 
     /// 记一次「上游首帧已到达」。

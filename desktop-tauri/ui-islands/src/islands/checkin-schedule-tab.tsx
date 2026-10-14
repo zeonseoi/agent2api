@@ -3,7 +3,7 @@ import { Badge, Button, Checkbox, Input, Spinner, Switch } from '@ui'
 import { formatTime, shared, toast } from './accounts-shared'
 import { t } from '../i18n'
 import {
-  getCheckinStore, setKeepaliveDraft, submitKeepaliveModels, subscribeCheckinStore,
+  getCheckinStore, setKeepaliveDraft, setTravelAuto, submitKeepaliveModels, subscribeCheckinStore,
   type CheckinStore,
 } from './checkin-state'
 import {
@@ -308,6 +308,50 @@ function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: Sched
   )
 }
 
+/* ─── 自动派猫猫旅行开关卡 ──────────────────── */
+
+/**
+ * 自动派猫猫旅行开关卡（挂在「定时签到」页的定时签到面板下方）。
+ *
+ * ── 为什么与自动签到分开 ────────────────────────────────────
+ * 两者周期语义不同：签到是「每天定点跑一轮」，旅行是「每 2 小时轮一次、
+ * 到点才领」。混进同一张卡会让用户以为勾了旅行就跟着签到的时刻跑。
+ *
+ * ── 数据 ────────────────────────────────────────────────────
+ * 开关读数取签到中心快照的 `travel.enabled`（后端 `travelAuto` 配置键），
+ * 写走 `setTravelAuto`（POST /api/travel/auto，起停后端独立轮询）。
+ * 仅 WorkBuddy 国内版有成长中心：没有 travel 段（无国内版账号）时整卡不渲染。
+ */
+function TravelAutoCard({ store }: { store: CheckinStore }) {
+  const enabled = store.snapshot?.travel?.enabled === true
+  return (
+    <section className='panel'>
+      <div className='panel-head'>
+        <h2>{t('自动派猫猫旅行')}</h2>
+        <span className='tip-q' data-tip={t('开启后后台每 2 小时检查一次：空闲的账号自动派出、到点的自动领回积分（仅 WorkBuddy 国内版）。每个账号当天领回一次后当天不再派，次日自动恢复。会真花掉账号的每日旅行次数，请确认后再开。')}></span>
+        <Badge className='ml-auto' variant={enabled ? 'success' : 'outline'}>
+          {enabled ? t('已开启') : t('已关闭')}
+        </Badge>
+      </div>
+      <div className='p-4'>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('开关')}</span>
+          <span className='ck-set-v'>
+            <Switch
+              checked={enabled}
+              disabled={store.travelSaving}
+              onCheckedChange={next => void setTravelAuto(next)}
+            />
+          </span>
+        </div>
+        <div className='ck-note'>
+          {t('旅行要几小时才回来，所以领取由后台按固定间隔轮询（不是每天一次）；开启后无需手动操作，也可在「签到中心」页点「立即执行」当场跑一轮。')}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 /* ─── 保活模型链（清单编辑器：增 / 删 / 按住拖动排序）───── */
 
 /** 两份清单是否逐项相同（判「草稿有没有真改过」） */
@@ -588,6 +632,11 @@ function ScheduleTab(): React.ReactElement {
           ) : null}
         </div>
       </section>
+
+      {/* 自动派猫猫旅行：挂在定时签到面板下方（它与定时签到同页，但周期语义
+          不同，仍是独立小卡）。仅 WorkBuddy 国内版有成长中心：没有 travel
+          段时不渲染。 */}
+      {checkin.snapshot?.travel ? <TravelAutoCard store={checkin} /> : null}
 
       <KeepalivePanel
         models={chainModels}

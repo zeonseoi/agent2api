@@ -13,6 +13,7 @@ import {
 } from './checkin-state'
 import { ScheduleTab } from './checkin-schedule-tab'
 import { RecordsTab } from './checkin-records-tab'
+import { TravelRecordsTab } from './checkin-travel-tab'
 import { openZcodePlans } from './accounts-data'
 import { t } from '../i18n'
 
@@ -64,6 +65,7 @@ const CHECKIN_TAB_OPTIONS = [
   { value: 'center', label: t('签到中心') },
   { value: 'schedule', label: t('定时签到') },
   { value: 'records', label: t('签到记录') },
+  { value: 'travel', label: t('旅行记录') },
 ] as const
 
 /* ─── 小组件 ───────────────────────────────── */
@@ -894,6 +896,7 @@ function CheckinPage() {
       {store.tab === 'center' ? <CenterTab store={store} /> : null}
       {store.tab === 'schedule' ? <ScheduleTab /> : null}
       {store.tab === 'records' ? <RecordsTab /> : null}
+      {store.tab === 'travel' ? <TravelRecordsTab /> : null}
     </div>
   )
 }

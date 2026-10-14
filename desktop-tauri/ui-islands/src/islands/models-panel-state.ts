@@ -208,6 +208,9 @@ const COLUMNS: ColumnDecl[] = [
   { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
+  // 简介：上游清单里的中文介绍（`descriptionZh`），紧跟在倍率后 ——
+  // 两列都是「这一行模型是什么」的说明性信息，放一起便于对照
+  { key: 'description', label: t('简介') },
   { key: 'source', label: t('来源') },
   // 能力位两列（顺序、文案与 model-capability 的键序对应）：数值合并在
   // 「上下文 / 输出」一格里，三个布尔合并成一列徽章 —— 分成五列会把

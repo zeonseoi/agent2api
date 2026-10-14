@@ -379,6 +379,11 @@
 
 /* 第二行（缓存读取 / 命中率）是附加说明：淡一档，不抢主读数 */
 .req-usage-line.sub { color: var(--text-3); }
+
+/* 用量列第一行是 Credits 扣费（上游按请求返回，如 WorkBuddy 国内版）：用主色
+   把它与下面两行 token 读数区分开 —— 「花了多少钱」与「用了多少 token」是不同
+   性质的信息。始终显示（0 也显示，见 requests-page.tsx 的 formatCredit）。 */
+.req-row .req-usage > .req-usage-line:first-child { color: var(--primary); }
 /* 窄窗口：拆成多行，免得八列都缩成省略号。
    断点取 1200px：默认窗口 1060px 时内容区约 772px，八列必然挤，
    以下面的四列重排为准；拉宽到 1200 以上才换八列横排。

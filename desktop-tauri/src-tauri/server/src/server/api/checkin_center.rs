@@ -239,6 +239,9 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // `providers::workbuddy::growth`（从参考项目 workbuddy2api 移植）。
     // 与新手福利同一先例：快照只给账号入口清单（零上游请求），任务详情由
     // 前端展开时按需调 `GET /api/accounts/{id}/growth`（那是一次上游查询）。
+    //
+    // 「有没有国内版账号」也决定快照给不给 `travel` 键（那张自动派猫卡只在
+    // 有国内版账号时才有意义）—— 与 `supports_growth` 同一判据，不另立一套。
     let growth_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {
@@ -252,6 +255,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
             })
         })
         .collect();
+    let has_cn_account = !growth_rows.is_empty();
 
     ok_json(json!({
         "daily": {
@@ -268,6 +272,15 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "auto": state.auto_checkin().state(),
         // WorkBuddy 国际版日活保活的模型链（签到中心可编辑；空清单回落缺省链）
         "keepalive": crate::server::core::billing::keepalive::state(),
+        // 派猫猫旅行的**自动开关**（仅 WorkBuddy 国内版有成长中心）：这里只给
+        // 开关读数（「定时签到」页那张自动派猫卡读它）。**没有国内版账号时整个
+        // 键不给**（值为 null），界面据此不渲染那张卡 —— 与「不显示用不上的
+        // 功能」一致。单账号的旅行状态（有没有猫 / 在途 / 可领）由官方「成长
+        // 任务」行的展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块），
+        // 不再进本快照；明细台账走独立的 /api/travel-records 分页接口。
+        "travel": has_cn_account.then(|| {
+            json!({ "enabled": crate::server::core::travel_auto::auto_enabled() })
+        }),
         "history": checkin_history::list(),
     }))
 }

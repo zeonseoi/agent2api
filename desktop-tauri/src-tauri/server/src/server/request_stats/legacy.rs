@@ -73,10 +73,17 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                 existing.requests += item.requests;
                 existing.successful += item.successful;
                 existing.tokens += item.tokens;
+                existing.credits += item.credits;
                 existing.cache_hit_tokens += item.cache_hit_tokens;
                 existing.cache_input_tokens += item.cache_input_tokens;
                 for acc in item.model_tokens {
-                    push_model_accum(&mut existing.model_tokens, &acc.model, acc.tokens, acc.requests);
+                    push_model_accum(
+                        &mut existing.model_tokens,
+                        &acc.model,
+                        acc.tokens,
+                        acc.requests,
+                        acc.credits,
+                    );
                 }
                 // provider 维度同理逐行合并（同一天多行时两组都要合上，
                 // 否则「按 provider 之和 = requests」这条对账关系会破）
@@ -87,6 +94,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         acc.requests,
                         acc.successful,
                         acc.tokens,
+                        acc.credits,
                     );
                 }
                 // 账号维度同理（理由与 provider 那条一致：合并要不全做、要不全不做）
@@ -98,6 +106,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         acc.requests,
                         acc.successful,
                         acc.tokens,
+                        acc.credits,
                     );
                 }
             }

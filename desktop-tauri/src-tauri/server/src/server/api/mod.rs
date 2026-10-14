@@ -106,6 +106,8 @@ pub mod stats_api;
 pub mod storage_api;
 pub mod subscriptions;
 pub mod timeouts_api;
+pub mod travel;
+pub mod travel_records;
 pub mod update;
 pub mod upgrade_api;
 // 活动套餐通道的人机验证令牌池（界面铸造 → 网关消费），见该文件模块头

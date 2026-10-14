@@ -70,7 +70,7 @@ const DOMAIN_RULES = [
   { domain: 'proxies', files: ['proxies-page.tsx', 'proxies-state.ts'] },
   { domain: 'docs', files: ['docs-page.tsx'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts'] },
-  { domain: 'checkin', files: ['checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-schedules-state.ts'] },
+  { domain: 'checkin', files: ['checkin-page.tsx', 'checkin-state.ts', 'checkin-schedule-tab.tsx', 'checkin-records-tab.tsx', 'checkin-travel-tab.tsx', 'checkin-schedules-state.ts'] },
   { domain: 'tasks', files: ['tasks-panel.tsx'] },
   { domain: 'logs', files: ['logs-panel.tsx'] },
   { domain: 'requests', files: ['requests-page.tsx', 'request-detail.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js'] },

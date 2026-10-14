@@ -261,6 +261,7 @@
   "确认桌面端还在运行，再重试一次。": "Confirme que o app desktop ainda está em execução e tente novamente.",
   "移除": "Remover",
   "移除自定义模型": "Remover modelo personalizado",
+  "简介": "Descrição",
   "系统提示词": "Prompt de sistema",
   "绑定在「对外名 → 上游模型」这一条映射上的思考等级（列表照抄 OmniProxy 的手动绑定），选「不覆盖」表示不给这条映射指定等级。它会跟着这条映射注入转发，由承载的那家翻译成自己的档位字段（CatPaw 归并成 low/high/max，Qoder 按模型声明的档位归一）。以下几种情况故意不注入：① off / none（关闭思考）—— 本项目没有安全的表达方式；② 表外的自定义等级（各家能力范围不同，无法判断上游收不收）；③ 客户端请求体里已经自己指定了档位（那是更明确的意图，绑定不覆盖）；④ 这家上游不认识档位字段（如 WorkBuddy / 小浣熊 / AutoClaw / Cline）。注入与跳过都会写进详细日志。": "Nível de raciocínio vinculado a este mapeamento de “nome externo → modelo upstream” (a lista reproduz os vínculos manuais do OmniProxy); escolher “Não sobrescrever” significa não atribuir nível a este mapeamento. Ele é injetado no encaminhamento junto com este mapeamento e o provedor que o atende o traduz para o campo de nível próprio (o CatPaw agrupa em low/high/max; o Qoder normaliza conforme os níveis declarados pelo modelo). Os casos a seguir não são injetados de propósito: ① off / none (raciocínio desligado) — este projeto não tem uma forma segura de expressá-los; ② níveis personalizados fora da tabela (as capacidades variam entre provedores e não dá para saber se o upstream aceita); ③ o corpo da requisição do cliente já especifica um nível (intenção mais explícita, e o vínculo não sobrescreve); ④ o upstream deste provedor não reconhece o campo de nível (como WorkBuddy / Raccoon / AutoClaw / Cline). Tanto a injeção quanto a omissão vão para o log detalhado.",
   "继承上游": "Herdar do upstream",
