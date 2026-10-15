@@ -100,9 +100,13 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 状态」一类：不是配置项，配置写入绝不能动它。
     "panelAdmin",
     // 面板刷新令牌（server::access）：整份记录数组一个键（条目是个位数：
-    // 每设备一条活链），轮换/撤销都是整键重写。刷新令牌在库里只存 sha256，
-    // 重启后 access 短效令牌虽在内存丢失，浏览器用它静默换新。
+    // 每设备一条活链），轮换/撤销都是整键重写。刷新令牌在库里只存 sha256。
     "panelTokens",
+    // 面板 access 会话表（server::access）：与 `panelTokens` 同一形状、同样只存
+    // sha256。落库的理由是「重启不该把所有已登录的浏览器打成无效」—— 重启前它们
+    // 只在内存，重启后浏览器带着还在的 cookie 撞 401，而 401 又不清 cookie，
+    // 现场表现为「同一把对不上任何登录的指纹反复出现几十次」。
+    "panelAccessSessions",
     // ALTCHA 机器人校验的 HMAC 密钥（server::altcha）：首次签发 challenge
     // 时生成并落库，只经 HMAC 使用、从不外发。属于「其它零散状态」，
     // 配置写入绝不能动它。
@@ -154,8 +158,13 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 它不是配置项（配置写入绝不能动它，否则用户配好的代理会被改一次 API Key
     // 清空）。条目不落独立表、只整份读写，理由见那个模块头。
     "proxyPool",
+    // 代理设置（core::proxy_settings）：`{listenerPortBase, listenerPortEnd,
+    // testUrl}` 一个键 —— 「网络代理」页设置弹窗维护的节点监听端口范围与
+    // 出口测试网址。与 proxyPool 同类零散状态：不是配置项，配置写入绝不能
+    // 动它（否则用户改一次 API Key 端口范围就退回默认、大订阅又分配不出端口）。
+    "proxySettings",
     // 订阅（core::subscriptions）：整份 `{items: [...]}` 一个键 —— 「网络代理」
-    // 页「订阅」区块维护的订阅链接，内核（sub_kernel）拉起时从 api 层拿启用
+    // 页「订阅管理」维护的订阅链接，内核（sub_kernel）拉起时从 api 层拿启用
     // 清单。与 proxyPool 同类零散状态：不是配置项，配置写入绝不能动它。
     "subscriptions",
     // OfficeAce 模型可用性探测的结论（core::providers::officeace::probe）：
@@ -239,29 +248,46 @@ pub fn is_reserved(key: &str) -> bool {
 /// config.json 里一条聚合同 lastResult」看不见的明细。写入方是
 /// `core::checkin_records`（记账点唯一：`core::billing::checkin::run_checkin`）。
 ///
-/// ── 版本 12 / 13：既有表**加列**（本 fork 定制：上游扣费 Credits）────
-/// 见 [`V12_SCHEMA`] / [`V13_SCHEMA`]。v12 给 `requests` 加单次请求的扣费列，
-/// v13 给 `request_daily` 加当天合计列。与 v2 / v5 / v6 / v7 / v10 同一形态
-/// （ALTER 加列），「为什么不动 v1 的 DDL / 为什么不能写 IF NOT EXISTS /
-/// 幂等靠版本号」的全部理由相同，不赘述。
+/// ── 版本 12 / 13：既有表**加列**（两条版本线在这一段撞号）─────────
+/// 见 [`V12_SCHEMA`] / [`V13_SCHEMA`]。**本 fork 与官方上游各占了 v12 / v13
+/// 一份，含义不同**：
+///   - fork 那份：v12 给 `requests` 加单次请求的扣费列 `credit`，
+///     v13 给 `request_daily` 加当天合计列 `credits`（Credits 用量两件套）；
+///   - 官方那份：v12 给 `requests` 加「来源客户端」列 `client`，
+///     v13 是一次**数据动作**（清空预览对话的历史正文，一次性空间回收）。
+/// 两条线都必须留下（官方用户升级要 client 列，fork 用户升级要 Credits 两列），
+/// 于是合并后的 v12 常量里有**两条 ALTER**、v13 常量里只有 fork 那条 ALTER
+/// （官方的 DELETE 不可重放，留在 [`apply_data_action`] 的 v13 分支里单独执行）。
+/// 加列走 ALTER 的全部理由（为什么不动 v1 的 DDL、为什么不能写 IF NOT EXISTS、
+/// 幂等靠版本号）与 v2 / v5 / v6 / v7 / v10 相同，不赘述。
 ///
-/// ── 版本 14：travel_records 表（派猫猫旅行的每账号明细台账）────
-/// 见 [`V14_SCHEMA`]。新表，与 v3 / v8 / v11 同一形态（`CREATE ... IF NOT EXISTS`）。
+/// ── 版本 14：两条线也撞号（新表 vs 内容形态标记）──────────────
+/// 见 [`V14_SCHEMA`]。fork 那份：`travel_records` 表（派猫猫旅行的每账号明细
+/// 台账），与 v3 / v8 / v11 同一形态（`CREATE ... IF NOT EXISTS`）。
+/// 官方那份：`accounts.data` 改为 `enc1:` 密文信封的**内容形态标记**，
+/// **没有任何 DDL**（加密是逐行的内容变换，挂在启动迁移里做）。
+/// 合并后 v14 分支执行 fork 的建表；官方的「形态标记」不产生 SQL，只是让
+/// 这一版号本身成为「库里的 data 列是密文」的事实来源 —— 与 fork 的建表
+/// 共用同一个版本号，两条线的库都能拿到各自需要的东西（见 [`reconcile`]）。
 /// 它是签到中心「旅行记录」页的数据源：每执行一轮真动作，每个真动手的账号一行
 /// （派出 / 领回 / 失败）。写入方是 `core::travel_records`（记账点在 `core::travel_auto`）。
 ///
-/// ── 为什么 migrate 末尾还要跑一遍 [`reconcile`]（两条版本线撞号的修复）──
-/// 本 fork 与官方上游曾**各占一份 v10 / v11**：fork 那份把 v10/v11 用在 Credits
-/// 两列上，官方那份把 v10 用在 `requests.route`、v11 用在 `checkin_records` 表。
-/// 撞号之后会出现「版本号已经越过某版、它引入的列 / 表却缺失」的库 —— 对这类库
-/// 按版本号跑 DDL **永远补不上**（版本号不会再回到那一版）。所以每个版本的 DDL
-/// 都走 [`apply_ddl`]（撞到已存在的列就跳过），并在每次打开时用 [`reconcile`]
-/// 把全部版本的 DDL 按**实际对象**再重放一遍兜底。
+/// ── 为什么 migrate 末尾还要跑一遍 [`reconcile`]（版本线撞号的统一修复）──
+/// 本 fork 与官方上游**反复各占同一批版本号**：v10 / v11 曾撞号（fork 拿它们
+/// 放 Credits 两列，官方拿 v10 放 `requests.route`、v11 放 `checkin_records`
+/// 表），到 v3.0.4 又在 v12 / v13 / v14 上撞了一次（Credits 两列 + travel_records
+/// vs 来源客户端列 + 正文清空 + 加密标记）。撞号之后会出现「版本号已经越过某版、
+/// 它引入的列 / 表却缺失」的库 —— 对这类库按版本号跑 DDL **永远补不上**
+/// （版本号不会再回到那一版）。所以每个版本的 DDL 都走 [`apply_ddl`]（撞到已
+/// 存在的列就跳过），并在每次打开时用 [`reconcile`] 把全部版本的 DDL 按
+/// **实际对象**再重放一遍兜底。
 ///
 /// ── 为什么不干脆给 fork 换一组更高的版本号 ──────────────────
-/// 换了之后官方二进制读到「版本比本二进制新」会**整段跳过迁移**（见 [`migrate`]
-/// 的回退分支），fork 独有的列就再也补不上；而反过来把官方的版本号排在 fork 之后，
-/// 两条线合并时又必然再次撞号。按实际对象核对是唯一对两条线都成立的判据。
+/// 换了之后官方二进制读到「版本比它新」会**直接拒绝打开**（v14 起官方的
+/// [`migrate`] 明确反转成硬失败：密文账号被旧程序读到会被静默删光，见那里的
+/// 分支注释）—— 那比「跳过迁移」还糟，等于 fork 与官方再也无法共用一个库。
+/// 而把官方的版本号排在 fork 之后，两条线合并时又必然再次撞号。按实际对象
+/// 核对是唯一对两条线都成立的判据。
 pub const SCHEMA_VERSION: i64 = 14;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
@@ -463,8 +489,8 @@ CREATE INDEX IF NOT EXISTS idx_debug_traffic_ts ON debug_traffic(ts);
 ///
 /// ── 为什么用 ALTER 而不重建表 ────────────────────────────────
 /// 两张表的其它列与索引一个都不动，重建要「建新表 → 搬数据 → 删旧表 → 重建索引」，
-/// 而 `requests` 可能有几万行（`MAX_ENTRIES` = 20000）。ALTER ADD COLUMN 是
-/// SQLite 的元数据操作（常数时间、不重写数据），代价可以忽略。
+/// 而 `requests` 是全量保留的明细表（长期使用可达几万甚至几十万行）。
+/// ALTER ADD COLUMN 是 SQLite 的元数据操作（常数时间、不重写数据），代价可以忽略。
 ///
 /// ── 为什么这里不能写 IF NOT EXISTS ───────────────────────────
 /// SQLite 的 `ALTER TABLE ... ADD COLUMN` **不支持** `IF NOT EXISTS`（这是它与
@@ -495,11 +521,15 @@ ALTER TABLE requests ADD COLUMN sensitive_hits TEXT NOT NULL DEFAULT '[]';
 /// 版本 3：`request_raw` 表 —— 请求/响应的**下游侧**原始正文（预览对话功能的地基）。
 ///
 /// ── 它和 debug_traffic 表是什么关系 ──────────────────────────
-/// `debug_traffic`（调试报文）是**调试模式专用**的上游侧报文（头部脱敏、
-/// 有全局字节闸、开关关闭时完全不采集）；本表是**始终采集**的下游侧正文
-/// （客户端发来的请求体 + 网关下发的响应体），供请求日志的「预览对话」弹窗
-/// 用。两表按同一个 `id`（请求关联 id）各存各的，谁也不依赖谁 ——
-/// `core::debug_traffic` 的现有行为一字未动，本表是纯粹的并行补充。
+/// `debug_traffic`（调试报文）是调试模式的**上游侧**报文（头部脱敏、
+/// 有全局字节闸）；本表是**下游侧**正文（客户端发来的请求体 + 网关下发的
+/// 响应体），供请求日志的「预览对话」弹窗用。两表按同一个 `id`（请求关联 id）
+/// 各存各的，谁也不依赖谁。
+///
+/// ── 采集条件：与调试模式同一个开关（v13 起）───────────────────
+/// 正文**只在调试模式开启时采集**（对齐 OmniProxy 的口径：不开调试模式就不
+/// 保存任何原始正文）—— 关着时连截断转换都不做，采集路径零开销。v13 之前的
+/// 版本是无条件采集的，那批历史正文已由 v13 一次清空（见 [`SCHEMA_VERSION`]）。
 ///
 /// ── 为什么独立成表而不是给 requests 加两列 ────────────────────
 /// 正文是大字段（两侧各 128 KiB 上限），明细列表的每次分页都要取
@@ -517,10 +547,10 @@ ALTER TABLE requests ADD COLUMN sensitive_hits TEXT NOT NULL DEFAULT '[]';
 /// `sqlite3` 命令行里直接看（排障的主要用法）。
 ///
 /// ── 为什么没有索引（连 ts 都不建）────────────────────────────
-/// 本表只有两种读法：按主键 id 取单行（主键自带）、按「保留最新 N 行」裁剪
-/// （2000 行的表全排序是微秒级）。唯一会按 ts 范围查它的是清理预览的计数，
-/// 那条走的是 `id IN (SELECT id FROM requests ...)` 主键查找。表有行数硬闸，
-/// 不会长到大到需要索引。
+/// 本表只有两种读法：按主键 id 取单行（主键自带）、清理时按
+/// 「`id IN (SELECT id FROM requests …)`」定位（主键查找）。唯一的全表扫描是
+/// 用户手动清空（`DELETE FROM request_raw`），而正文只在调试模式开启期间写入
+/// —— 表的增长由那个开关天然约束，不会长到需要为检索建索引。
 const V3_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS request_raw (
   id            TEXT PRIMARY KEY,
@@ -727,27 +757,35 @@ CREATE INDEX IF NOT EXISTS idx_checkin_records_outcome ON checkin_records(outcom
 CREATE INDEX IF NOT EXISTS idx_checkin_records_provider ON checkin_records(provider);
 ";
 
-/// 版本 12：`requests` 补一列（schema v12）—— 本次请求的上游扣费 **Credits**。
+/// 版本 12：`requests` 补两列（schema v12，两条版本线撞号后合并）。
 ///
-/// ── 存什么 ──────────────────────────────────────────────────
+/// ── 本 fork 那份：单次请求的上游扣费 Credits ─────────────────
 /// 上游响应 `usage` 里返回的本次扣费（REAL，小数如 0.07 / 5.3），采集点在
 /// `core::upstream::usage::extract_usage` 的旁路（兼容 `credit`/`credits`/`cost`
 /// 三种别名），与 token 四件套同源同口径。**不是所有家都给** —— WorkBuddy
 /// 国内版实测非零，国际版与其余家多为 0；旧行 DEFAULT 0。
 ///
-/// ── 为什么与 token 分列、且不给 0 编语义 ─────────────────────
-/// 它是「花费」而不是「用量」，量纲不同、不该混进 token 列（前端按量纲分表
-/// 展示，见报表页的 Credits 环形图）。0 在这里就是「没上报 / 没花钱」，
-/// 不编一个「免费」的语义。
+/// 为什么与 token 分列、且不给 0 编语义：它是「花费」而不是「用量」，量纲不同、
+/// 不该混进 token 列（前端按量纲分表展示，见报表页的 Credits 环形图）。0 在这里
+/// 就是「没上报 / 没花钱」，不编一个「免费」的语义。
 ///
+/// ── 官方那份：来源客户端类型 ────────────────────────────────
+/// `client` 存入口从下游 `User-Agent` 判出的客户端类型（`core::client`），
+/// 请求日志的「客户端」列读它。DEFAULT ''：旧行与「请求没带 UA」的路径都是
+/// 空串 —— 两者在展示层的处理相同（占位符），不必分两种形态。
+///
+/// 两条 ALTER 都留在这一版：官方用户升级要有 `client` 列，fork 用户升级要有
+/// `credit` 列，缺任一条都会让某一侧的库永远补不上（见 [`reconcile`]）。
 /// 加列走 ALTER 的全部理由（为什么不动 v1 的 DDL、为什么不能写
 /// IF NOT EXISTS、幂等靠版本号）与 [`V2_SCHEMA`] 完全相同，不赘述。
 const V12_SCHEMA: &str = "
--- ── requests 补一列（schema v12）──────────────────────────────
+-- ── requests 补上游扣费列（schema v12，本 fork）────────────────
 ALTER TABLE requests ADD COLUMN credit REAL NOT NULL DEFAULT 0;
+-- ── requests 补来源客户端列（schema v12，官方）────────────────
+ALTER TABLE requests ADD COLUMN client TEXT NOT NULL DEFAULT '';
 ";
 
-/// 版本 13：`request_daily` 补一列（schema v13）—— 当天 Credits 合计。
+/// 版本 13：`request_daily` 补一列（schema v13，本 fork 那份）—— 当天 Credits 合计。
 ///
 /// 报表页只走聚合表（寿命独立于明细、`all` 可跨年），所以聚合行上也要有落点，
 /// 否则跨年区间会少一大段。列名用复数（与 `DailyEntry::credits` 同名）：
@@ -756,12 +794,18 @@ ALTER TABLE requests ADD COLUMN credit REAL NOT NULL DEFAULT 0;
 /// 里清零，所以这里累加的就是真产生扣费的那些请求。
 ///
 /// 加列走 ALTER 的全部理由与 [`V2_SCHEMA`] 完全相同，不赘述。
+///
+/// 官方那份 v13 是**数据动作**而不是结构变更（清空预览对话的历史正文，一次性
+/// 空间回收）。它没有常量：要在 [`apply_data_action`] 的 v13 分支里用 `execute`
+/// 拿被删行数，`migrate` 据此决定是否紧跟着 VACUUM（光 DELETE 不会让库文件缩小）。
+/// 合并后两条都在这一版里跑：本常量补 `credits` 列，分支里补那条 DELETE ——
+/// 结构变更与数据动作互不干扰。
 const V13_SCHEMA: &str = "
 -- ── request_daily 补一列（schema v13）────────────────────────
 ALTER TABLE request_daily ADD COLUMN credits REAL NOT NULL DEFAULT 0;
 ";
 
-/// 版本 14：travel_records 表 —— 派猫猫旅行的**每账号明细台账**。
+/// 版本 14：travel_records 表（本 fork 那份）—— 派猫猫旅行的**每账号明细台账**。
 ///
 /// 与 [`V11_SCHEMA`]（checkin_records）同一形态：每执行一次「真动作」的轮次
 /// （后台巡检 / 启动补跑 / 手动触发）里，每个**真动手的**账号落一行。列的口径：
@@ -784,6 +828,10 @@ ALTER TABLE request_daily ADD COLUMN credits REAL NOT NULL DEFAULT 0;
 /// 它取代了 config.json 的 `travelHistory`（每轮一行的轮次汇总）。
 ///
 /// 索引三个（ts / outcome / provider），与 checkin_records 同一取舍。
+///
+/// 官方那份 v14 是 `accounts.data` 改密文的**内容形态标记，没有任何 DDL** ——
+/// 加密逐行做（启动迁移），列与表都不变，所以合并后的 v14 分支只跑本表的建表；
+/// 官方的加密标记由版本号本身承载（见 [`SCHEMA_VERSION`] 的 v14 段）。
 const V14_SCHEMA: &str = "
 -- ── travel_records：派猫猫旅行每账号明细台账（schema v14）────
 CREATE TABLE IF NOT EXISTS travel_records (
@@ -807,27 +855,70 @@ CREATE INDEX IF NOT EXISTS idx_travel_records_provider ON travel_records(provide
 
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时仍做一次核对修复）。
 ///
+/// **库版本高于本程序时返回 `Err` 拒绝打开**（v14 起有意反转的一条既有决定，
+/// 完整论证见函数体里那个分支的注释）：加密后的 `accounts.data` 被旧程序当坏
+/// 数据跳过、再被它的差异写当成「内存里没有」删掉，静默放行等于「回退一次 =
+/// 账号被删」。库版本**低于**本程序则照常逐版本升级；**等于**则跳过版本循环
+/// 但**仍跑一遍 [`reconcile`]**（撞号库的版本号正好等于最新版，只有靠它才补得上）。
+///
 /// 返回 `rusqlite::Result` 而不是本模块自造的字符串错误：调用方 `Db::open`
 /// 是唯一消费点，它把错误包成一句人能读的话（`format!`）就够了；而这里需要
 /// 区分「读版本号失败 / 跑 DDL 失败 / 写版本号失败」三种，保留 rusqlite 的
-/// 错误类型（含 SQLite 的错误码与消息）才说得清是哪一步坏的。
+/// 错误类型（含 SQLite 的错误码与消息）才说得清是哪一步坏的。那句「库比程序新」
+/// 的拒绝理由用 `ToSqlConversionFailure` 承载（它的 `Display` 就是原话）。
 ///
-/// ── 为什么最后一定要跑一遍 [`reconcile`] ────────────────────
-/// 版本号是**推进**的依据，但不是唯一事实：本 fork 与官方上游曾各占一份
-/// v10/v11（本地是 Credits 两列、官方是 `requests.route` 与 `checkin_records`），
-/// 撞号之后会出现「版本号已经越过某版、它引入的列 / 表却缺失」的库 —— 对这类库
-/// 按版本号跑 DDL 永远补不上。`reconcile` 按**实际对象**核对最终形态，缺什么
-/// 补什么；它幂等，所以每次打开都跑，顺带成为「上一次修复中途失败、下次自动
-/// 重试」的兜底（即使版本号已经写成 `SCHEMA_VERSION`）。
+/// ── 为什么最后一定要跑一遍 [`reconcile`]（即使版本号已是最新）────
+/// 版本号是**推进**的依据，但不是唯一事实：本 fork 与官方上游反复各占同一批
+/// 版本号（v10/v11，以及 v3.0.4 的 v12/v13/v14），撞号之后会出现「版本号已经
+/// 越过某版、它引入的列 / 表却缺失」的库 —— 对这类库按版本号跑 DDL 永远补不上
+/// （版本号不会再回到那一版）。`reconcile` 按**实际对象**核对最终形态，缺什么
+/// 补什么；它幂等，所以 `current == SCHEMA_VERSION` 时**也要**跑（那种库的
+/// 版本号正好等于最新版，主循环是空的），顺带成为「上一次修复中途失败、下次
+/// 自动重试」的兜底。
+///
+/// 实现上不需要为「已是最新」单开分支：主循环区间是
+/// `(current + 1)..=SCHEMA_VERSION`，`current == SCHEMA_VERSION` 时它天然为空，
+/// 直接落到末尾的 `reconcile`。所以官方那版 `if current == SCHEMA_VERSION
+/// { return Ok(()) }` 的提前返回在这里**不能要** —— 它会跳过 reconcile。
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current > SCHEMA_VERSION {
-        // 版本比本二进制新（用户从新版回退到旧版）：**不报错、也不动库**。
-        // 报错会让旧版直接起不来（用户只是想回退一次），而「降级 schema」
-        // 意味着删列删表，那是不可逆的数据丢失 —— 两者都不该自动发生。
-        // （只有**严格**大于才跳过：等于时仍要走一遍 reconcile，见上面。）
-        return Ok(());
+        // ── 库比程序新：**拒绝打开**（本切片有意反转的一条既有决定）─────────
+        //
+        // 改造前这里的口径是「不报错、也不动库」：理由写的是「用户从新版回退到
+        // 旧版，报错会让旧版直接起不来，而他只是想回退一次」。那条理由在
+        // `accounts.data` 是明文的年代成立 —— 旧程序读不懂新库的新列/新表，
+        // 但账号那几张表它写得回去，最坏是丢一点新功能的数据。
+        //
+        // **本版起它不再成立**：`accounts.data` 是 `enc1:` 密文（v14 起），而旧程序
+        // （`SCHEMA_VERSION <= 13`）的 `decode_data` 只认明文 JSON —— 于是：
+        //   1. 旧程序读出每一行都会失败，把它们**当成坏数据跳过** → 界面上账号
+        //      全部消失；
+        //   2. 更致命的是写路径：旧程序的 `save_state` 按 id 做差异写，「库里有、
+        //      内存状态里没有」的行会被 `DELETE FROM accounts WHERE id = ?` ——
+        //      它读不出来的那些密文行**恰好**落进这个分支。于是「回退一次并触发
+        //      任意一次账号写入」= 把加密后的账号**静默删光**。
+        // 静默放行等于「回退一次 = 账号被删」，而账号数据丢了是不可逆的用户损失
+        // —— 所以这里改成明确失败：让启动在日志里说清原因，用户退回去用新版。
+        //
+        // 这不是「降级 schema」（那才需要删列删表、不可逆，本函数从没做过，也不
+        // 会做）：这里只是**在动手之前先拒绝**，库文件一个字节都不碰。
+        //
+        // 用什么承载这句错误：`ToSqlConversionFailure` 的 `Display` 就是里面那句
+        // 话的原文（本仓既有手法，见 `db::migrate::logs::assign_log_id` 的说明），
+        // 于是 `Db::open` 的 `format!("建表/升级 schema 失败: {error}")` 会把这段
+        // 话原样带到启动日志里。
+        return Err(rusqlite::Error::ToSqlConversionFailure(
+            format!(
+                "库 schema 版本（{current}）高于当前程序（{SCHEMA_VERSION}）：这通常是回退到了旧版本。\
+                 请使用更新的程序，或从备份恢复——用旧程序打开会把加密后的账号静默删除。"
+            )
+            .into(),
+        ));
     }
+    // v13 清掉的历史正文行数（0 = 这一轮什么都没删）：循环后据此决定是否
+    // VACUUM（见本函数尾部那段）。放循环外是因为 VACUUM 不能在事务里跑。
+    let mut cleaned_raw_rows = 0usize;
     for version in (current + 1)..=SCHEMA_VERSION {
         // 每个版本一个独立事务：DDL 与版本号必须一起生效或一起不生效，
         // 否则中断后会出现「表已建、版本号还是旧的」（下次启动重跑 DDL，
@@ -845,19 +936,40 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 不是靠 Rust 的独占借用。
         let tx = conn.unchecked_transaction()?;
         apply_version(&tx, version)?;
+        // 一次性数据动作（目前只有官方 v13 的正文清空）跟随同一版本事务执行；
+        // 它不可重放，所以不在 apply_version 里（那里会被 reconcile 反复重放）。
+        apply_data_action(&tx, version, &mut cleaned_raw_rows)?;
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    if cleaned_raw_rows > 0 {
+        // ── 删完之后顺手 VACUUM 一次（v13 的「省空间」在这里真正落地）──
+        // `DELETE` 只是把行标成空闲页，库文件**不会缩小** —— 对「升级后马上想
+        // 看到磁盘降下来」的用户，只有 VACUUM（重建整库文件）才把空闲页还给
+        // 文件系统。触发条件是 `cleaned_raw_rows > 0`：全新库（表本来就空）与
+        // 已升过级的库都删 0 行、不付这个代价；只有「确实有历史正文被清掉」的
+        // 那次升级会做一遍整库重建（几十 MB 的库通常秒级，一次性成本）。
+        //
+        // VACUUM 不能在事务里，所以放在循环外（每个版本的事务都已提交）；
+        // 失败**不报错**：数据已经删掉了，回收空间是尽力而为的优化 —— 用户
+        // 之后仍可在请求日志页的「清理」弹窗里手动压缩（那条路有后台线程与
+        // 进度状态，见 `RequestStats::compact`）。
+        let _ = conn.execute_batch("VACUUM;");
+    }
+    // 最后按实际对象核对一遍（详见 [`reconcile`] 与函数头注释）：版本号推进过
+    // 却缺列 / 缺表的撞号库靠这一步补上。放 VACUUM 之后，两者互不依赖。
     reconcile(conn)
 }
 
-/// 执行某个版本的 DDL。**新增版本时在这里加一个分支**，并在上面写好该版本的
-/// 建表/改表语句常量。
+/// 执行某个版本的**结构变更**（DDL）。**新增版本时在这里加一个分支**，
+/// 并在上面写好该版本的建表/改表语句常量。
 ///
 /// 执行一律经 [`apply_ddl`]：它把 DDL 按 `;` 拆成单句、逐句执行，撞到
 /// 「列已存在 / 表已存在」就跳过 —— 于是**加列类版本也变幂等**，撞号库里
 /// 「版本号越过某版、列却缺」与「列已补上、版本号又走到这一版」两种情形
 /// 都不会失败（前者正是 [`reconcile`] 要修的洞，后者是它修完之后的常态）。
+/// 这也是 `reconcile` 敢无条件重放全部版本的前提：**本函数只放可幂等重放的
+/// 语句**，一次性数据动作一律走 [`apply_data_action`]。
 ///
 /// `_` 分支返回 Ok 而不是 unreachable!：版本号是外部输入（库文件可能来自
 /// 更新的二进制，被旧版读到），越过 [`SCHEMA_VERSION`] 的版本不该 panic。
@@ -888,11 +1000,48 @@ fn apply_version(conn: &Connection, version: i64) -> rusqlite::Result<()> {
         10 => apply_ddl(conn, V10_SCHEMA),
         // v11：checkin_records 签到记录明细台账（签到记录页的数据源，见 V11_SCHEMA）
         11 => apply_ddl(conn, V11_SCHEMA),
-        // v12 / v13：上游扣费 Credits 两列（明细 + 当天合计，见 V12_SCHEMA / V13_SCHEMA）
+        // v12：requests 补两列（本 fork 的扣费 credit + 官方的来源客户端 client，
+        // 两条版本线在这一版撞号，见 V12_SCHEMA 的说明）
         12 => apply_ddl(conn, V12_SCHEMA),
+        // v13：`request_daily` 补当天 Credits 合计列（本 fork 那份）。
+        // 官方那份 v13 是一次数据动作（清空预览对话的历史正文），**不是 DDL**，
+        // 所以不放进这里：`reconcile` 会重放本函数，若把 DELETE 写在这就会每次
+        // 启动清一遍用户新采集的正文。它由 `migrate` 的版本循环在
+        // `allow_data_actions` 为真时单独执行（见本函数下两段的注释与 `migrate`）。
         13 => apply_ddl(conn, V13_SCHEMA),
-        // v14：travel_records 旅行记录明细台账（旅行记录页的数据源，见 V14_SCHEMA）
+        // v14：travel_records 旅行记录明细台账（本 fork 那份，见 V14_SCHEMA）。
+        // 官方那份 v14 是 `accounts.data` 改密文的**内容形态标记，无 DDL**
+        // （加密逐行做，挂在启动迁移里），所以这里只有 fork 的建表。
         14 => apply_ddl(conn, V14_SCHEMA),
+        _ => Ok(()),
+    }
+}
+
+/// 只有「一次性数据动作」的版本在这里分派（结构变更走 [`apply_version`]）。
+///
+/// 为什么要和 DDL 分开：`reconcile` 会**重放** `apply_version` 的全部版本，
+/// 而数据动作（删除、清空）不可重放 —— 重放一次就多删一遍用户的数据。
+/// 所以它只由 `migrate` 的版本循环调用，且只在真正跨过该版本的那一轮。
+///
+/// 目前只有官方的 v13（清空预览对话的历史正文）：`DELETE` 让它返回被删行数，
+/// `migrate` 据此决定是否紧跟着 VACUUM（光 DELETE 不会让库文件缩小，而「省空间」
+/// 正是那一版的目的）。其余版本返回 0。
+fn apply_data_action(
+    conn: &Connection,
+    version: i64,
+    cleaned_raw_rows: &mut usize,
+) -> rusqlite::Result<()> {
+    match version {
+        // 官方 v13：清空预览对话的历史正文（一次性空间回收，见 SCHEMA_VERSION
+        // 的 v13 段）。先重放 v3 建表：存量库里有「版本号不低、request_raw 表却
+        // 缺失」的个例（v4 就是为修它而加的）—— 对那种库直接 DELETE 会报
+        // 「no such table」并把整个版本事务回滚，迁移就卡死了。
+        // 用 `execute` 而不是 `execute_batch`：要拿被删行数带出去。
+        13 => {
+            conn.execute_batch(V3_SCHEMA)?;
+            *cleaned_raw_rows += conn.execute("DELETE FROM request_raw", [])?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -947,6 +1096,9 @@ fn apply_ddl(conn: &Connection, ddl: &str) -> rusqlite::Result<()> {
 /// ── 为什么可以每次都跑 ──────────────────────────────────────
 /// 全部 DDL 都经 [`apply_ddl`]，撞到已存在的对象即跳过，所以整体幂等。代价是
 /// 每次打开多跑一遍无改动的 DDL（都是元数据操作），相对一次启动可忽略。
+///
+/// 重放的是 [`apply_version`]，**不含** [`apply_data_action`]：那里是一次性
+/// 数据动作（删除），重放会重复删用户的数据。两条路的分工就是这一条。
 ///
 /// ── 为什么是「缺才补」而不是「多就删」────────────────────────
 /// 只补不删：多出来的列 / 表（比如官方比本 fork 多带的）是数据，删列删表都
@@ -1101,17 +1253,21 @@ mod tests {
         remove_temp(&path);
     }
 
-    /// 版本号比本二进制新时不改库（回退场景），也不因缺列而报错。
+    /// 版本号比本二进制新时**拒绝打开**（回退场景）——官方 v14 起反转的一条决定：
+    /// 加密后的账号被旧程序读到会被静默删光，所以宁可在动手前先失败。
     #[test]
-    fn newer_db_is_left_untouched() {
+    fn newer_db_is_rejected() {
         let path = temp_path("newer");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(V1_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 5)
             .unwrap();
-        migrate(&conn).expect("更新的库应当被原样放过");
+        assert!(
+            migrate(&conn).is_err(),
+            "版本更高的库应当被拒绝打开，而不是静默动它"
+        );
 
-        // 版本号不变，且没有把本二进制的列塞进去（说明确实没动库）。
+        // 库文件一个字节都不碰：版本号不变，也没塞进本二进制的新列。
         let uv: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

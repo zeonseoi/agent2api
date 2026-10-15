@@ -36,7 +36,6 @@ use std::sync::OnceLock;
 use rusqlite::params;
 use serde_json::{json, Value};
 
-use crate::server::config;
 use crate::server::core::beijing;
 use crate::server::db::Db;
 use crate::server::logging;
@@ -67,8 +66,7 @@ fn database() -> Option<&'static Db> {
 /// （派出行为空），`error` 是失败原因原文（成功行为空）。
 ///
 /// 一次调用 = 一次真动作（派出 / 领养 / 领回 / 失败），调用点在 `core::travel_auto`。
-pub fn record(
-    source: &str,
+pub fn record(    source: &str,
     reason: &str,
     account_id: &str,
     account_name: &str,
@@ -106,13 +104,17 @@ struct Entry {
     error: Option<String>,
 }
 
-/// 落一行 + 顺手按保留期裁超期行（一次事务）。失败打 verbose，不向上报
-/// （见模块头「写失败不报错」）。
+/// 落一行明细。失败打 verbose，不向上报（见模块头「写失败不报错」）。
+///
+/// ── 没有保留期裁剪（与 `checkin_records` 同口径）─────────────
+/// 官方从 v3.0.4 起把请求日志 / 按天聚合 / 签到记录都改成**全量保留**，保留天数
+/// 设置项一并移除。本表是 `checkin_records` 的同形兄弟（见模块头），跟着它走：
+/// 不再顺手 DELETE 超期行 —— 要清理时走「清空筛选结果」那条显式路径（见
+/// `clear_where`，与 `checkin_records` 的护栏同一条）。
 fn insert(entry: Entry) {
     let Some(db) = database() else { return };
     let ts = logging::now_ms();
     let date = beijing::today_key();
-    let cutoff = retention_cutoff();
     let failed = db
         .with_mut(|conn| -> Result<(), rusqlite::Error> {
             conn.execute(
@@ -134,9 +136,6 @@ fn insert(entry: Entry) {
                     entry.error,
                 ],
             )?;
-            // 保留期沿用「请求日志」的天数（不新增设置项）。旅行记账一天几轮、
-            // 每轮只记真动作的少数账号，顺手裁一条 DELETE 的代价可以忽略。
-            conn.execute("DELETE FROM travel_records WHERE date < ?1", [cutoff])?;
             Ok(())
         })
         .map(|result| result.is_err())
@@ -144,32 +143,6 @@ fn insert(entry: Entry) {
     if failed {
         logging::verbose("[Travel]", "旅行记录未能落库（库不可用或写入失败）");
     }
-}
-
-// ─── 保留期 ──────────────────────────────────────────────────
-
-/// 保留期的日期下界（北京时间键）：沿用「请求日志」的天数，口径与
-/// `checkin_records::retention_cutoff` 逐字相同（保留 N 天 = 含今天在内 N 个
-/// 自然日，往前推 N-1 天；下限 1 天、上限 10 年）。
-fn retention_cutoff() -> String {
-    let days = config::retention_settings().request_days.clamp(1, 3650);
-    let today = beijing::today_key();
-    match chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d") {
-        Ok(today) => (today - chrono::Duration::days(days - 1))
-            .format("%Y-%m-%d")
-            .to_string(),
-        Err(_) => today, // 系统时钟异常到连日期键都不是合法格式：不裁比乱裁好
-    }
-}
-
-/// 「立即清理」（设置页 / 保留期改小后）与外部裁剪入口。
-pub fn prune() {
-    let Some(db) = database() else { return };
-    let cutoff = retention_cutoff();
-    let _ = db.with_mut(|conn| {
-        conn.execute("DELETE FROM travel_records WHERE date < ?1", [cutoff])
-            .ok()
-    });
 }
 
 // ─── 查询与删除 ──────────────────────────────────────────────
