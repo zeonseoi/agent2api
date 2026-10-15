@@ -73,6 +73,7 @@ pub mod debug_traffic;
 pub mod degrade;
 pub mod egress;
 pub mod endpoints;
+pub mod growth_claim_auto;
 pub mod import_ccswitch;
 pub mod key_scope;
 pub mod limiter;

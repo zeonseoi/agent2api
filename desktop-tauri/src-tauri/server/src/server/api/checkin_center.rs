@@ -281,8 +281,8 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "travel": has_cn_account.then(|| {
             json!({
                 "enabled": crate::server::core::travel_auto::auto_enabled(),
-                // 成长任务到期前自动领取（独立开关，见 core::travel_auto）
-                "claimEnabled": crate::server::core::travel_auto::claim_auto_enabled(),
+                // 成长任务到期前自动领取（独立开关与独立调度，见 core::growth_claim_auto）
+                "claimEnabled": crate::server::core::growth_claim_auto::claim_auto_enabled(),
             })
         }),
         "history": checkin_history::list(),

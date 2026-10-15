@@ -692,6 +692,8 @@ pub fn shutdown(state: &AppState) {
     server::core::auto_checkin::stop_global();
     // 派猫猫旅行调度：同样在停服务之前停（独立的轮询任务，理由同上）。
     server::core::travel_auto::stop_global();
+    // 成长任务到期领取调度：独立的第三个轮询任务，同样先停（理由同上）。
+    server::core::growth_claim_auto::stop_global();
     // 代理内核（mihomo sidecar）：停服务之前先杀它 —— 它是独立子进程，
     // 父进程退出不会自动带走（Windows 上尤其如此），留着会占着监听端口，
     // 下次启动还得清理（启动时也有兜底清理，但正常退出就该在这里杀干净）。

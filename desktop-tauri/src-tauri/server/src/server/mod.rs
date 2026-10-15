@@ -160,6 +160,7 @@ use crate::port_conflict::{ConflictKind, PortConflict};
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
+use crate::server::core::growth_claim_auto::ClaimAuto;
 use crate::server::core::travel_auto::TravelAuto;
 use crate::server::core::billing::BillingService;
 use crate::server::core::login::LoginService;
@@ -220,6 +221,9 @@ pub struct ServerState {
     /// `Option`：handler 走 `state.travel_auto()` 拿它，取不到时降级为直接调用
     /// `core::travel_auto` 的自由函数（理论恒为 Some —— 启动时即初始化）。
     travel_auto: Option<TravelAuto>,
+    /// 成长任务到期领取句柄（WorkBuddy 国内版；**独立于旅行**的轮询调度）。
+    /// `Option` 与 `travel_auto` 同形：handler 取不到时降级为自由函数。
+    claim_auto: Option<ClaimAuto>,
     /// 软件更新句柄（GitHub Release 检测 / 安装包下载；内部 Mutex）
     update: UpdateManager,
     /// 请求统计存储句柄（明细 + 按天聚合，现在同居统一库的两张表）。
@@ -507,6 +511,9 @@ impl ServerState {
         // 旅行会真花掉账号的每日次数，要用户在签到中心显式开。上游调用交给官方的
         // `providers::workbuddy::growth::travel`，这里只持调度句柄。
         let travel_auto = Some(core::travel_auto::init_global(TravelAuto::new(store.clone())));
+        // 成长任务到期领取：与旅行**完全独立**的第二个调度（各有各的开关、循环
+        // 与防重入闸，关一个不影响另一个；见 core::growth_claim_auto 的模块头）。
+        let claim_auto = Some(core::growth_claim_auto::init_global(ClaimAuto::new(store.clone())));
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
 
@@ -582,6 +589,7 @@ impl ServerState {
             upstream,
             auto_checkin,
             travel_auto,
+            claim_auto,
             update,
             request_stats,
             db,
@@ -741,6 +749,11 @@ impl ServerState {
             logging::log("[Travel]", "🐾 派猫猫旅行自动调度已启用（每 2 小时一轮）");
             state.travel_auto().map(TravelAuto::start);
         }
+        // 成长任务到期领取：独立开关、独立调度（与旅行互不影响）。
+        if core::growth_claim_auto::claim_auto_enabled() {
+            logging::log("[Growth]", "🎁 成长任务到期领取已启用（每 2 小时一轮）");
+            state.claim_auto().map(ClaimAuto::start);
+        }
 
         // 间隔型定时任务（凭证自动维护 / 模型目录刷新）：
         // 起一个循环，按各自配置的开关与间隔重复执行。
@@ -814,6 +827,11 @@ impl ServerState {
     /// 派猫猫旅行句柄（/api/travel/* 路由 + 后台轮询）
     pub fn travel_auto(&self) -> Option<&TravelAuto> {
         self.travel_auto.as_ref()
+    }
+
+    /// 成长任务到期领取句柄（独立轮询；与旅行句柄互不影响）
+    pub fn claim_auto(&self) -> Option<&ClaimAuto> {
+        self.claim_auto.as_ref()
     }
 
     /// 软件更新句柄（/api/update/* 四条路由）

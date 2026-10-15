@@ -66,9 +66,6 @@ pub const TICK_MS: u64 = 2 * 60 * 60 * 1000;
 
 /// config.json 里承载自动旅行开关的键
 const CONFIG_KEY: &str = "travelAuto";
-/// config.json 里承载**成长任务自动领取**开关的键（独立于旅行开关，见
-/// [`claim_auto_enabled`]）
-const CLAIM_CONFIG_KEY: &str = "growthClaimAuto";
 /// config.json 里承载旅行状态缓存的键
 const CACHE_KEY: &str = "travelCache";
 
@@ -110,6 +107,13 @@ fn today_key() -> String {
 /// 旅行状态本身不缓存在本地（权威在上游），这里只留「今天已领回」这一笔 ——
 /// 跨日清掉即「次日自动恢复」，不必保留任何在途记录（未领的奖励在上游，
 /// 下一轮 `run_once` 自然会领）。
+///
+/// ── 曾经栽在这里（filter 方向写反）────────────────────────
+/// 跨日分支原本是 `.filter(|(_, entry)| is_done(entry))` —— **只保留已完成**，
+/// 于是「今天已领回」被原样带进新的一天：紧接着的 `collect` 就用 `is_done`
+/// 跳过这个账号，连上游都不打 —— 猫从此天天不派、奖励也永远不再领。
+/// 正确方向是**丢弃**已完成（`!is_done`），其余条目是什么状态都与恢复无关
+/// —— 权威在上游，下一轮 `run_once` 会重读（详见 `is_done` 的说明）。
 fn roll_cache_to_today(today: &str) -> Map<String, Value> {
     // 绑到局部变量：`config::current()` 返回临时值，`raw()` 借用它，
     // 直接 `.raw().get(...)` 会在语句结束时把临时值丢掉（借用悬空）
@@ -128,9 +132,12 @@ fn roll_cache_to_today(today: &str) -> Map<String, Value> {
     if same_day {
         return results;
     }
+    // 跨日的处置：丢掉「已完成」条目（`done` 只对当天有效），保留下一步要动手的
+    // 条目（在途 / 已到站 / 未派 / 出错）。写盘只是为了把 `date` 推进到今天 ——
+    // 少了这一步，同一天内的后续轮次会反复把 `same_day` 判成假，每轮都滚动一次。
     let kept: Map<String, Value> = results
         .into_iter()
-        .filter(|(_, entry)| is_done(entry))
+        .filter(|(_, entry)| !is_done(entry))
         .collect();
     config::update_raw_field(CACHE_KEY, json!({ "date": today, "results": kept }));
     kept
@@ -209,153 +216,6 @@ pub fn record_manual(account_id: &str, account_name: &str, report: &growth::trav
         &report.message,
         report.credit,
     );
-}
-
-// ─── 到期前自动领取成长任务 ──────────────────────────────────
-
-/// 自动领取的开关（config.json 的 `growthClaimAuto` 键，**独立于旅行开关**）。
-///
-/// ── 为什么与旅行开关分开 ────────────────────────────────────
-/// 两件事的风险不同：旅行会真花掉账号的每日次数（用户要显式开），任务领取是
-/// 把**已经该拿的奖励**领回来（动作更轻）。合成一个开关会让「只想派猫」的用户
-/// 被迫接受任务领取（或反之）。两个键各自读写，界面各一颗开关。
-pub fn claim_auto_enabled() -> bool {
-    config::current()
-        .raw()
-        .get(CLAIM_CONFIG_KEY)
-        .and_then(|value| value.get("enabled"))
-        .and_then(Value::as_bool)
-        == Some(true)
-}
-
-/// 写自动领取开关。
-pub fn set_claim_auto(enabled: bool) {
-    config::update_raw_field(CLAIM_CONFIG_KEY, json!({ "enabled": enabled }));
-}
-
-/// 任务是否「快到期」：`valid_end` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
-///
-/// `valid_end` 是 ISO 8601 带时区串（如 `2026-11-02T23:59:00+08:00`）。取它
-/// 的北京日期键，往前推一天得到「该领的那天」；今天到了或过了就返回 true
-/// （到期当天/之后仍会尝试，直到上游把它判成已领或任务下线）。
-///
-/// 无期限（`valid_end` 为 null）的任务**不碰** —— 用户要的是「有结束时间的任务」。
-fn due_for_claim(task: &Value) -> bool {
-    let Some(end) = task.get("valid_end").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(threshold) = claim_threshold_day(end) else {
-        return false;
-    };
-    // 日期键定长，字典序即时间序（见 beijing 模块的说明）
-    crate::server::core::beijing::today_key() >= threshold
-}
-
-/// `valid_end`（ISO 串）→ 「该领的那天」= 到期日 − 1 天的北京日期键。
-///
-/// 拆成纯函数便于单测：判据里只有它涉及日期运算，`due_for_claim` 只做一次
-/// 字符串比较（日期键 `YYYY-MM-DD` 定长、字典序即时间序）。
-/// 解析不出来（非法串 / 无时区）给 None，调用方按「不快到」保守处理。
-fn claim_threshold_day(end: &str) -> Option<String> {
-    let at = chrono::DateTime::parse_from_rfc3339(end).ok()?;
-    let end_day = at
-        .with_timezone(&crate::server::core::beijing::offset())
-        .date_naive();
-    Some((end_day - chrono::Days::new(1)).format("%Y-%m-%d").to_string())
-}
-
-/// 对一个账号扫一遍成长任务，领掉「快到期」的。
-///
-/// ── 判据与动作 ──────────────────────────────────────────────
-/// 只看 `valid_end` 非空、且今天 ≥ 到期日 − 1 天的任务；已 `claimed` 的跳过。
-/// 已完成 → 直接 claim；**未完成 → 先点亮（accept + 上报）再 claim**（用户选：
-/// 「未完成的也顺便点亮再领」）。未映射 / 不可伪造 / 未解锁的任务由官方
-/// `process_task` 自己保守跳过，这里不重复判。
-///
-/// ── 为什么复用 `process_task(auto_claim = true)` ─────────────
-/// 它已经是「accept → 上报 → 回读 → claim」的一体流程（含 accept 回读验证），
-/// 正是「点亮 + 领取」。这里只是把「挑哪几条」的逻辑放在外面。
-///
-/// 返回 `(领取成功数, 失败数)`，供轮次汇总日志用。
-async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usize) {
-    let accounts = cn_accounts(store);
-    let mut claimed = 0usize;
-    let mut failed = 0usize;
-    for account in &accounts {
-        let id = account.get("id").and_then(Value::as_str).unwrap_or("");
-        if id.is_empty() {
-            continue;
-        }
-        let name = account
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .unwrap_or(id);
-        let Some(account_ctx) = GrowthAccount::from_store(store, id) else {
-            continue;
-        };
-        // 两个口径都拉（小程序限定任务只在带 mp 头的列表里下发），合并去重
-        let mut tasks: Vec<Value> = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
-        for mp in [false, true] {
-            let Ok(list) = growth::list_tasks(&account_ctx, mp).await else {
-                continue;
-            };
-            for task in list {
-                let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
-                if code.is_empty() || seen.iter().any(|item| item == code) {
-                    continue;
-                }
-                seen.push(code.to_string());
-                tasks.push(task);
-            }
-        }
-        for task in &tasks {
-            let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
-            if code.is_empty() {
-                continue;
-            }
-            let status = task.get("accept_status").and_then(Value::as_str).unwrap_or("");
-            if status == "claimed" {
-                continue;
-            }
-            if !due_for_claim(task) {
-                continue;
-            }
-            let report = growth::process_task(&account_ctx, code, task, true).await;
-            match report.outcome {
-                growth::TaskOutcome::Done => {
-                    claimed += 1;
-                    travel_records::record(
-                        reason_source(reason),
-                        reason,
-                        id,
-                        name,
-                        WorkBuddyRegion::Cn.provider_id(),
-                        travel_records::OUTCOME_TASK_CLAIMED,
-                        Some(format!("{}（+{} 积分）", report.message, report.credit)),
-                        None,
-                    );
-                }
-                growth::TaskOutcome::Failed => {
-                    failed += 1;
-                    travel_records::record(
-                        reason_source(reason),
-                        reason,
-                        id,
-                        name,
-                        WorkBuddyRegion::Cn.provider_id(),
-                        travel_records::OUTCOME_FAILED,
-                        None,
-                        Some(format!("{code}：{}", report.message)),
-                    );
-                }
-                // Already / Skipped：不是事件（已领 / 未映射 / 不可伪造 / 未解锁）
-                _ => {}
-            }
-        }
-    }
-    (claimed, failed)
 }
 
 // ─── 一轮执行 ────────────────────────────────────────────────
@@ -734,10 +594,8 @@ impl TravelAuto {
 
     /// 跑一轮（自动循环与「立即执行」共用）。防重入：已在跑就跳过。
     ///
-    /// ── 一轮做两件事 ────────────────────────────────────────────
-    /// ① 猫猫旅行状态机（`collect`，受旅行开关控制，`collect` 内部自己判）；
-    /// ② 成长任务到期领取（受领取开关控制）。两者开关独立，但共用这一条循环
-    ///    与这一道防重入闸 —— 不新起第二个循环，避免两套生命周期与并发打上游。
+    /// 只做一件事 —— 跑旅行状态机 `collect`。成长任务到期领取是另一条独立
+    /// 循环（`core::growth_claim_auto`），两者各有各的开关与防重入闸，互不触发。
     ///
     /// ── 为什么用 Drop 守卫而不是手动复位 ────────────────────────
     /// `fire` 会在中途 await（网络请求）。若这一轮正跑着，用户把开关关掉，`stop()`
@@ -755,29 +613,11 @@ impl TravelAuto {
             RunningGuard { inner: self.inner.clone() }
         };
         let _ = collect(&self.store, TravelMode::Act, reason).await;
-        // 成长任务到期领取：独立开关，开才跑（本轮已打上游，顺带扫描不额外起循环）
-        if claim_auto_enabled() {
-            let (claimed, failed) = claim_due_tasks(&self.store, reason).await;
-            if claimed > 0 || failed > 0 {
-                logging::log(
-                    "[Growth]",
-                    &format!(
-                        "🎁 成长任务到期领取（{reason}）：领回 {claimed} 项{}",
-                        if failed > 0 { format!("，失败 {failed} 项") } else { String::new() },
-                    ),
-                );
-            }
-        }
     }
 
-    /// 手动「立即执行一轮」（界面按钮）：旅行一轮 + 到期任务领取（各受自己
-    /// 的开关控制），与后台循环 [`Self::fire`] 同口径。
+    /// 手动「立即执行一轮」（界面按钮）：跑一轮旅行状态机。
     pub async fn run_now(&self) -> Value {
-        let data = collect(&self.store, TravelMode::Act, "手动触发").await;
-        if claim_auto_enabled() {
-            let _ = claim_due_tasks(&self.store, "手动触发").await;
-        }
-        data
+        collect(&self.store, TravelMode::Act, "手动触发").await
     }
 }
 
@@ -830,40 +670,49 @@ mod tests {
         assert_eq!(reason_source("开启自动"), "auto");
     }
 
-    /// 「该领的那天」= 到期日 − 1 天的北京日期键（`due_for_claim` 的核心判据）。
+    /// 跨日滚动的**方向**（本次 bug 的回归保护）：
+    /// `roll_cache_to_today("2026-10-15")` 面对缓存的 10-14 数据时，必须**丢掉**
+    /// 已完成的条目（昨天领回过的），留下未完成的 —— 否则 `collect` 会以为
+    /// 「今天也已完成」而跳过账号，猫天天不派、奖励不再入账。
     ///
-    /// 上游 `valid_end` 是带时区的 ISO 串，取**北京日期**再减一天：晚 23:59 的
-    /// 时刻不能被时区差推到次日（那会让「前一天」算错），所以先换到 +08:00 再取日。
+    /// 注意这里不能只断言 kept 非空/为空：旧代码 `filter(is_done)` 返回的正是
+    /// 那条 done 条目（非空但内容全错），所以断言必须落到**保留的是哪一条**。
     #[test]
-    fn claim_threshold_is_one_day_before_expiry() {
-        assert_eq!(
-            claim_threshold_day("2026-11-02T23:59:00+08:00").as_deref(),
-            Some("2026-11-01")
-        );
-        // 跨月边界：11-01 的前一天是 10-31
-        assert_eq!(
-            claim_threshold_day("2026-11-01T00:00:00+08:00").as_deref(),
-            Some("2026-10-31")
-        );
-        // 非 +08:00 的来源：按北京日期换算后再减一天
-        assert_eq!(
-            claim_threshold_day("2026-11-02T16:30:00Z").as_deref(),
-            Some("2026-11-02")
-        );
+    fn roll_cache_to_today_drops_done_and_keeps_pending() {
+        // 直接把跨日滚动要读的缓存快照装进内存配置（不经库，单测无 Db）
+        let accounts = json!({
+            "acc-closed": { "state": "idle", "done": true, "buddyName": "猫A" },
+            "acc-traveling": { "state": "traveling", "buddyName": "猫B" },
+            "acc-arrived": { "state": "arrived", "buddyName": "猫C" },
+            "acc-pending": { "state": "idle", "done": false, "buddyName": "猫D" },
+            "acc-plain": { "state": "idle", "buddyName": "猫E" },
+        });
+        config::update_raw_field(CACHE_KEY, json!({ "date": "2026-10-14", "results": accounts }));
+
+        let kept = roll_cache_to_today("2026-10-15");
+
+        // 已完成被丢掉，未完成全部留下
+        assert!(!kept.contains_key("acc-closed"), "done 条目必须跨日丢弃");
+        for id in ["acc-traveling", "acc-arrived", "acc-pending", "acc-plain"] {
+            assert!(kept.contains_key(id), "{id} 不应被判成已完成");
+        }
+        // 留下的条目内容原样保留（不被改写）
+        assert_eq!(kept["acc-traveling"]["buddyName"], json!("猫B"));
     }
 
-    /// 非法 / 无时区的串给 None（调用方据此保守不领）。
+    /// 同一天内的第二轮：`date` 已是今天，`same_day` 直接返回原表，
+    /// **不重置任何东西** —— 这正是「一个账号一天只领一次」的实现：
+    /// 领回后缓存里的 `done:true` 要在当天剩下的每一轮都持续生效。
     #[test]
-    fn claim_threshold_rejects_unparseable() {
-        assert_eq!(claim_threshold_day("").as_deref(), None);
-        assert_eq!(claim_threshold_day("2026-11-02").as_deref(), None);
-        assert_eq!(claim_threshold_day("not-a-date").as_deref(), None);
-    }
+    fn roll_cache_to_today_keeps_done_within_same_day() {
+        let accounts = json!({
+            "acc-a": { "state": "idle", "done": true, "buddyName": "猫A" },
+        });
+        config::update_raw_field(CACHE_KEY, json!({ "date": "2026-10-15", "results": accounts }));
 
-    /// 无 `valid_end` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
-    #[test]
-    fn due_for_claim_ignores_tasks_without_valid_end() {
-        assert!(!due_for_claim(&json!({ "task_code": "x" })));
-        assert!(!due_for_claim(&json!({ "valid_end": Value::Null })));
+        let kept = roll_cache_to_today("2026-10-15");
+
+        assert!(kept.contains_key("acc-a"), "同一天内 done 必须继续生效");
+        assert_eq!(kept["acc-a"]["buddyName"], json!("猫A"));
     }
 }
