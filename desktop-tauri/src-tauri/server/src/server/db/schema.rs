@@ -816,8 +816,10 @@ ALTER TABLE request_daily ADD COLUMN credits REAL NOT NULL DEFAULT 0;
 ///   - `reason`：给日志看的那句（轮次触发原因，如「后台巡检」「手动触发」）；
 ///   - `account_id` / `account_name` / `provider`：账号三件套；
 ///   - `outcome`：`departed`（派出旅途）/ `claimed`（领回奖励）/
-///     `failed`（派出或领取失败）；
-///   - `ok`：`departed|claimed → 1` 的布尔投影（SQL 过滤列）；
+///     `adopted`（领养，无猫时的第一步）/ `task_claimed`（成长任务到期自动领取）/
+///     `failed`（猫猫旅行失败）/ `task_failed`（成长任务领取失败）——
+///     字面集合见 `core::travel_records` 的 `OUTCOME_*`；
+///   - `ok`：`departed|claimed|adopted|task_claimed → 1` 的布尔投影（SQL 过滤列）；
 ///   - `message`：领取收益文案（如 `+12 积分`），派出行为空；
 ///   - `error`：失败原因原文（失败行）。
 ///

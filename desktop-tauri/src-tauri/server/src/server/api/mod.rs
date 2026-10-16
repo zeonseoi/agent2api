@@ -59,6 +59,10 @@ pub mod checkin_center;
 // 签到记录明细台账（GET/DELETE /api/checkin-records）：每账号一行的成败与
 // 收益明细，记账点在 `core::billing::checkin::run_checkin`，见该文件模块头
 pub mod checkin_records;
+// 合并台账（GET/DELETE /api/checkin-ledger）：把 checkin_records 与
+// travel_records（猫猫旅行 + 成长任务领取）合并成一张表返回，界面用的那一条，
+// 见该文件模块头
+pub mod checkin_ledger;
 // 定时签到的**条目**（GET/POST /api/checkin-schedules + {id}/delete|run）：
 // 总开关仍在 /api/auto-checkin，条目 CRUD 在这里，见该文件模块头
 pub mod checkin_schedules;
@@ -115,7 +119,6 @@ pub mod storage_api;
 pub mod subscriptions;
 pub mod timeouts_api;
 pub mod travel;
-pub mod travel_records;
 pub mod update;
 pub mod upgrade_api;
 // 活动套餐通道的人机验证令牌池（界面铸造 → 网关消费），见该文件模块头

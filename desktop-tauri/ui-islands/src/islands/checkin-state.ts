@@ -97,26 +97,31 @@ export type SchedulesSnapshot = AutoCheckinState & {
   schedules?: ScheduleEntry[]
 }
 
-/** 一条签到记录（/api/checkin-records 的行；字段可能缺） */
+/** 一条签到记录（/api/checkin-ledger 的行；字段可能缺） */
 export type CheckinRecordRow = {
-  rowId?: number
+  /** 带来源前缀的行号（`c123` = checkin_records / `g45` = travel_records）——
+   *  合并台账里两张表的 row_id 各自自增，直接透出会撞号（React key）。 */
+  rowId?: string
   ts?: number
   /** 北京时间的自然日（上游的「哪天的签到」） */
   date?: string
-  /** schedule / startup / manual / single / activity */
+  /** 签到：schedule / startup / manual / single / activity；
+   *  猫猫旅行与成长任务：auto / startup / manual */
   source?: string
   reason?: string
   accountId?: string
   accountName?: string
   provider?: string
-  /** success / already / pending / failed */
+  /** 签到：success / already / pending / failed；
+   *  猫猫旅行：departed / claimed / adopted / failed；
+   *  成长任务：task_claimed / task_failed */
   outcome?: string
-  /** 「今日已完成」投影（success|already） */
+  /** 「今日已完成」投影（签到 success|already，旅行与任务的成功档） */
   ok?: boolean
   /** 收益 / 上游文案（「今日积分 +100」在这里） */
   message?: string | null
   error?: string | null
-  /** 国际版保活成功 */
+  /** 国际版保活成功（只有签到行会为真，旅行行恒 false） */
   keptActive?: boolean
 }
 
@@ -144,32 +149,6 @@ export type CheckinCenterSnapshot = {
    *  `enabled` = 自动派猫猫旅行，`claimEnabled` = 到期前自动领取成长任务 */
   travel?: { enabled: boolean; claimEnabled?: boolean }
   history: CheckinHistoryEntry[]
-}
-
-/**
- * 旅行记录明细台账的一行（签到中心「旅行记录」页；与后端 travel_records 同形）。
- *
- * 单账号的**实时**旅行状态（有没有猫 / 在途 / 可领）由官方「成长任务」行的
- * 展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块）—— 本页只展示
- * 历史动作明细（派出 / 领养 / 领回 / 失败）。
- */
-export type TravelRecordRow = {
-  rowId?: number | null
-  ts?: number | null
-  date?: string | null
-  /** 触发来源：auto / startup / manual */
-  source?: string | null
-  /** 触发原因（后台巡检 / 启动补跑 / 手动触发…） */
-  reason?: string | null
-  accountId?: string | null
-  accountName?: string | null
-  provider?: string | null
-  /** departed（派出）/ claimed（领回）/ adopted（领养）/ failed（失败） */
-  outcome?: string | null
-  ok?: boolean | null
-  /** 收益文案（如 `+12 积分`），派出行为空 */
-  message?: string | null
-  error?: string | null
 }
 
 /**
@@ -287,9 +266,10 @@ type CheckinBridge = {
   saveCheckinSchedule?(patch: Record<string, unknown>): Promise<SchedulesSnapshot | null | undefined>
   deleteCheckinSchedule?(id: string): Promise<{ success?: boolean } | null | undefined>
   runCheckinSchedule?(id: string): Promise<(CheckinHistoryEntry & SchedulesSnapshot) | null | undefined>
-  /** 签到记录明细台账（查询 / 清空；参数对象里空值桥层自动不带） */
-  getCheckinRecords?(params: Record<string, unknown>): Promise<{ records?: CheckinRecordRow[]; total?: number } | null | undefined>
-  clearCheckinRecords?(params: Record<string, unknown>): Promise<{ success?: boolean; removed?: number } | null | undefined>
+  /** 签到记录明细台账（GET /api/checkin-ledger，后端合并 checkin_records 与
+   *  travel_records；参数对象里空值桥层自动不带） */
+  getCheckinLedger?(params: Record<string, unknown>): Promise<{ records?: CheckinRecordRow[]; total?: number } | null | undefined>
+  clearCheckinLedger?(params: Record<string, unknown>): Promise<{ success?: boolean; removed?: number } | null | undefined>
   /** WorkBuddy 国际版日活保活的模型链（读 / 存；与 bridge.rs、web_shim.rs 三处成对） */
   getCheckinKeepalive?(): Promise<KeepaliveState>
   saveCheckinKeepalive?(models: string[]): Promise<KeepaliveState>
@@ -355,12 +335,6 @@ type CheckinBridge = {
     enabled?: boolean
     claimEnabled?: boolean
   } | null | undefined>
-  /** 旅行记录明细台账（GET /api/travel-records；与 bridge.rs、web_shim.rs 三处成对） */
-  getTravelRecords?(params: Record<string, unknown>): Promise<{
-    records?: TravelRecordRow[]
-    total?: number
-  } | null | undefined>
-  clearTravelRecords?(params: Record<string, unknown>): Promise<{ removed?: number } | null | undefined>
   /**
    * Qoder UMID 组件（设备风控身份）的状态与安装（与 bridge.rs、web_shim.rs 三处成对）。
    *
@@ -391,12 +365,12 @@ function accountsView(): { wbAccountsView?: { refreshUsageAfterCheckin?: (id?: s
 
 /* ─── 页内标签页（签到中心 / 定时签到 / 签到记录）────────── */
 
-export type CheckinTab = 'center' | 'schedule' | 'records' | 'travel'
+export type CheckinTab = 'center' | 'schedule' | 'records'
 
 /** 持久化键（命名仿 settings 页的 workbuddy-desktop-settings-cat） */
 const TAB_STORAGE_KEY = 'workbuddy-desktop-checkin-tab'
 
-const CHECKIN_TABS: readonly CheckinTab[] = ['center', 'schedule', 'records', 'travel']
+const CHECKIN_TABS: readonly CheckinTab[] = ['center', 'schedule', 'records']
 
 /** 上次停留的标签页（没存过 / 值不认 → 签到中心）。localStorage 挂了给缺省。 */
 function readStoredTab(): CheckinTab {

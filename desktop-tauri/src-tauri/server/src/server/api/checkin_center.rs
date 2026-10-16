@@ -289,7 +289,7 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         // 键不给**（值为 null），界面据此不渲染那张卡 —— 与「不显示用不上的
         // 功能」一致。单账号的旅行状态（有没有猫 / 在途 / 可领）由官方「成长
         // 任务」行的展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块），
-        // 不再进本快照；明细台账走独立的 /api/travel-records 分页接口。
+        // 不再进本快照；明细台账走 /api/checkin-ledger 分页接口（与签到记录合并）。
         "travel": has_cn_account.then(|| {
             json!({
                 "enabled": crate::server::core::travel_auto::auto_enabled(),

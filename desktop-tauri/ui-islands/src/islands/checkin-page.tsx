@@ -14,7 +14,6 @@ import {
 } from './checkin-state'
 import { ScheduleTab } from './checkin-schedule-tab'
 import { RecordsTab } from './checkin-records-tab'
-import { TravelRecordsTab } from './checkin-travel-tab'
 import { openZcodePlans } from './accounts-data'
 import { t } from '../i18n'
 
@@ -27,7 +26,8 @@ import { t } from '../i18n'
  *   · **签到中心**（本文件 CenterTab）：总览卡 + 每日签到 + 新手福利（Loomy /
  *     小浣熊 / CodeArts，惰性查询）+ 活动福利（ZCode）；
  *   · **定时签到**（checkin-schedule-tab）：总开关 + 多条定时条目 + 保活模型链；
- *   · **签到记录**（checkin-records-tab）：每账号一行的明细台账（schema v11）。
+ *   · **签到记录**（checkin-records-tab）：每账号一行的明细台账 —— 后端把
+ *     签到记录与猫猫旅行 / 成长任务的动作合并成一张表（见 core::checkin_ledger）。
  * 数据从哪来：快照走 `GET /api/checkin-center` 一次拉全（load）；后端快照的
  * `auto` 段与 GET /api/auto-checkin 同形（含条目数组 schedules），总览卡直接读。
  * 页面零轮询：签到动作完成后由动作层重拉快照，主状态刷新交给 wbApp.refresh。
@@ -66,7 +66,6 @@ const CHECKIN_TAB_OPTIONS = [
   { value: 'center', label: t('签到中心') },
   { value: 'schedule', label: t('定时签到') },
   { value: 'records', label: t('签到记录') },
-  { value: 'travel', label: t('成长记录') },
 ] as const
 
 /* ─── 小组件 ───────────────────────────────── */
@@ -709,16 +708,17 @@ function EmptyProviderRow({ group }: { group: CheckinProviderGroup }) {
  */
 function CenterTab({ store }: { store: CheckinStore }) {
   const snapshot = store.snapshot
-  // 「累计签到记录」卡的读数：签到动作后随快照一起重取（只取 1 行拿 total）
+  // 「累计签到记录」卡的读数：动作后随快照一起重取（只取 1 行拿 total）。
+  // 走合并台账，数字与「签到记录」页一致（签到 + 猫猫旅行 / 成长任务的动作）。
   const [recordTotal, setRecordTotal] = React.useState<number | null>(null)
   React.useEffect(() => {
     let alive = true
     void (async () => {
       try {
         const api = shared().workbuddyDesktop as {
-          getCheckinRecords?: (params: Record<string, unknown>) => Promise<{ total?: number } | null | undefined>
+          getCheckinLedger?: (params: Record<string, unknown>) => Promise<{ total?: number } | null | undefined>
         } | undefined
-        const data = await api?.getCheckinRecords?.({ limit: 1 })
+        const data = await api?.getCheckinLedger?.({ limit: 1 })
         if (alive) setRecordTotal(Number(data?.total) || 0)
       } catch { /* 总览卡是锦上添花：拉不到显示 —，不挡签到 */ }
     })()
@@ -964,7 +964,6 @@ function CheckinPage() {
       {store.tab === 'center' ? <CenterTab store={store} /> : null}
       {store.tab === 'schedule' ? <ScheduleTab /> : null}
       {store.tab === 'records' ? <RecordsTab /> : null}
-      {store.tab === 'travel' ? <TravelRecordsTab /> : null}
     </div>
   )
 }

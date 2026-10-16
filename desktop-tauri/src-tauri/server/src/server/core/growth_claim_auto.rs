@@ -201,7 +201,7 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
                         id,
                         name,
                         WorkBuddyRegion::Cn.provider_id(),
-                        travel_records::OUTCOME_FAILED,
+                        travel_records::OUTCOME_TASK_FAILED,
                         None,
                         Some(format!("{code}：{}", report.message)),
                     );

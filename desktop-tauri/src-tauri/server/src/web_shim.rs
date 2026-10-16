@@ -1106,24 +1106,27 @@ pub fn shim_js() -> &'static str {
     getTravelAuto: function () { return call('GET', '/api/travel/auto'); },
     setTravelAuto: function (patch) { return call('POST', '/api/travel/auto', patch); },
     runTravelNow: function () { return call('POST', '/api/travel/run', {}); },
-    // 旅行记录明细台账（查询 / 清空；参数对象里空值不带，与 bridge.rs 成对）
-    getTravelRecords: function (params) {
+    // 合并台账（签到记录页实际用的那条，与 bridge.rs 同名方法成对）：后端把
+    // checkin_records 与 travel_records（猫猫旅行 + 成长任务领取）合并成一张表
+    // 返回，见 api::checkin_ledger。上面那对 getCheckinRecords /
+    // clearCheckinRecords 是上游的原接口（只含签到行），界面已不用它。
+    getCheckinLedger: function (params) {
       const query = new URLSearchParams();
       for (const key of Object.keys(params || {})) {
         const value = params[key];
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
       }
       const text = query.toString();
-      return call('GET', '/api/travel-records' + (text ? '?' + text : ''));
+      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
     },
-    clearTravelRecords: function (params) {
+    clearCheckinLedger: function (params) {
       const query = new URLSearchParams();
       for (const key of Object.keys(params || {})) {
         const value = params[key];
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
       }
       const text = query.toString();
-      return call('DELETE', '/api/travel-records' + (text ? '?' + text : ''));
+      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
     },
 
     // ── 间隔型定时任务 ──

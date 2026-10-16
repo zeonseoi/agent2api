@@ -607,22 +607,25 @@ const BRIDGE_JS: &str = r#"
     getTravelAuto: () => call('GET', '/api/travel/auto'),
     setTravelAuto: patch => call('POST', '/api/travel/auto', patch),
     runTravelNow: () => call('POST', '/api/travel/run', {}),
-    // 旅行记录明细台账（与 web_shim.rs 的同名方法成对）
-    getTravelRecords: params => {
+    // 合并台账（签到记录页实际用的那条，与 web_shim.rs 的同名方法成对）：
+    // 后端把 checkin_records 与 travel_records（猫猫旅行 + 成长任务领取）合并成
+    // 一张表返回，见 api::checkin_ledger。上面那对 getCheckinRecords /
+    // clearCheckinRecords 是上游的原接口（只含签到行），界面已不用它。
+    getCheckinLedger: params => {
       const query = new URLSearchParams();
       for (const [key, value] of Object.entries(params || {})) {
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
       }
       const text = query.toString();
-      return call('GET', '/api/travel-records' + (text ? '?' + text : ''));
+      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
     },
-    clearTravelRecords: params => {
+    clearCheckinLedger: params => {
       const query = new URLSearchParams();
       for (const [key, value] of Object.entries(params || {})) {
         if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
       }
       const text = query.toString();
-      return call('DELETE', '/api/travel-records' + (text ? '?' + text : ''));
+      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
     },
 
     // ── 间隔型定时任务（凭证自动维护 / 定时查询积分 / 模型刷新 / 两个前端自动刷新）──

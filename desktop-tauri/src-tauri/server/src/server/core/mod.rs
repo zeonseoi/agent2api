@@ -69,6 +69,7 @@ pub mod beijing;
 pub mod billing;
 pub mod capability;
 pub mod checkin_history;
+pub mod checkin_ledger;
 pub mod checkin_records;
 pub mod checkin_schedules;
 pub mod clash;

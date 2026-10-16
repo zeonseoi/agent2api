@@ -622,15 +622,16 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         .route("/api/checkin-records/", any(api::logs_api::not_found))
         .route("/api/checkin-records/{*rest}", any(api::logs_api::not_found))
-        // 旅行记录明细台账（签到中心「旅行记录」页）：与 /api/checkin-records
-        // 同形（GET 查询 / DELETE 清空，全清护栏 all=1）。挂 protected：明细里
-        // 有账号名与收益文案，敏感度与 /api/logs 一致。
+        // 合并台账（签到中心「签到记录」页用的那个）：把 checkin_records 与
+        // travel_records（猫猫旅行 + 成长任务领取）合并成一张表返回，见
+        // core::checkin_ledger。与 /api/checkin-records 同形（GET 查询 /
+        // DELETE 清空，全清护栏 all=1）—— 上面那条是它的子集视图，界面只认这一条。
         .route(
-            "/api/travel-records",
-            get(api::travel_records::query_records).delete(api::travel_records::clear_records),
+            "/api/checkin-ledger",
+            get(api::checkin_ledger::query_records).delete(api::checkin_ledger::clear_records),
         )
-        .route("/api/travel-records/", any(api::logs_api::not_found))
-        .route("/api/travel-records/{*rest}", any(api::logs_api::not_found))
+        .route("/api/checkin-ledger/", any(api::logs_api::not_found))
+        .route("/api/checkin-ledger/{*rest}", any(api::logs_api::not_found))
         // ── 签到中心的聚合快照 ──
         // 只读一条：分组与「今日已签」的判定复用批量签到同一对判据
         // （CHECKIN_PROVIDERS ∩ supports_checkin），见 api::checkin_center 的模块头。

@@ -382,18 +382,25 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-records-filters > .panel-sub { margin-left: auto; }
 .ck-records-scroll { overflow-x: auto; }
 
-/* 列宽。table-layout: fixed 下按 colgroup 分配：时间列是**定宽 px**（它装的是
-   formatTime 的完整输出，宽窄窗口都要一行放下），其余五列按百分数吃掉剩余宽度
-   （合计 100%）。没拖过的列走这里的默认值；拖过的列由 table-columns.js 把覆盖
-   宽度写成 <col> 的 inline width，优先于这里的默认值。改默认列宽时与
-   checkin-records-tab.tsx 的 RECORD_COLUMNS 一起看（那边是列的集合与顺序） */
+/* 列宽。table-layout: fixed 下按 colgroup 分配。**时间列与结果列是定宽 px**，
+   其余四列按百分数吃掉剩余宽度（百分数是相对「扣掉定宽列后的剩余宽度」算的，
+   四列合计 100%）。没拖过的列走这里的默认值；拖过的列由 table-columns.js 把
+   覆盖宽度写成 <col> 的 inline width，优先于这里的默认值。改默认列宽时与
+   checkin-records-tab.tsx 的 RECORD_COLUMNS 一起看（那边是列的集合与顺序）。
+
+   结果列为什么也用定宽而不是百分数：合并台账后这列要装最长的徽章「成长任务领取
+   失败」（量到的盒子 ~130px，加 24px 内边距要 ~154px）。百分数跟着窗口缩 ——
+   13%（合并前的默认值，当时最长徽章只有「成功领取」四字）在 740px 宽的表里只剩
+   99px、在最小窗口（lib.rs 的 WIN_MIN_WIDTH 820，表宽约 640px）只剩 ~75px，都会
+   把徽章裁成半截。这列内容宽度有上界（就那几个档位），给足定宽、把弹性让给说明列
+   更稳；多出来的份额从说明列扣（48% → 61%）。 */
 .ck-records-table { table-layout: fixed; }
 .ck-records-table col.ck-col-time { width: 160px; }
 .ck-records-table col.ck-col-account { width: 18%; }
 .ck-records-table col.ck-col-provider { width: 10%; }
 .ck-records-table col.ck-col-source { width: 11%; }
-.ck-records-table col.ck-col-outcome { width: 13%; }
-.ck-records-table col.ck-col-detail { width: 48%; }
+.ck-records-table col.ck-col-outcome { width: 158px; }
+.ck-records-table col.ck-col-detail { width: 61%; }
 /* 表头格是列宽把手的定位锚（.col-grip 绝对定位挂在它的右缘，见 components.css） */
 .ck-records-table thead th { position: relative; }
 /* 内容超出列宽就裁掉，不压到相邻列上：列宽可以拖，要看全就把这一列拖宽

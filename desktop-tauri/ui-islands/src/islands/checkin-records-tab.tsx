@@ -14,26 +14,37 @@ import { t } from '../i18n'
 import { getCheckinStore, type CheckinRecordRow } from './checkin-state'
 
 /**
- * 签到中心的「签到记录」标签页：每账号一行的**明细台账**（schema v11）。
+ * 签到中心的「签到记录」标签页：每账号一行的**明细台账**。
  *
  * ── 这页回答什么 ────────────────────────────────────────────
  * 「到底领到了没、失败的话错在哪、领了多少」—— 这些在改造前只有一条聚合的
- * lastResult 快照与转瞬即逝的运行日志，现在每执行一次签到（定时条目 / 启动补签 /
- * 手动批量 / 单账号 / 国际版活动），每个账号落一行：时间、来源、账号、提供商、
- * 结果档位、收益与错误原文。判据在后端唯一（复用签到执行体的同一对函数），
- * 界面只按 `outcome` 上色，不自己再判一遍。
+ * lastResult 快照与转瞬即逝的运行日志，现在每执行一次动作，每个账号落一行：
+ * 时间、来源、账号、提供商、结果档位、收益与错误原文。判据在后端唯一（签到复用
+ * 签到执行体的同一对函数），界面只按 `outcome` 上色，不自己再判一遍。
+ *
+ * ── 后端是**合并台账**（两表合一）────────────────────────────
+ * 数据源 `GET /api/checkin-ledger`：后端把 `checkin_records`（每次签到，schema v11）
+ * 与 `travel_records`（猫猫旅行的派出 / 领回 / 领养 + 成长任务到期领取，schema v14）
+ * `UNION ALL` 成一张表返回，按时间倒序混排、统一分页（见 `core::checkin_ledger`）。
+ * 改造前这是「签到记录」「成长记录」两个并排标签页，列与筛选逐字相同 —— 合并后
+ * 一处看全。两来源的结果档位互不重叠，靠结果徽章就能分清是哪条线：
+ *   · 签到：成功领取 / 今日已领 / 等待窗口 / 失败
+ *   · 猫猫旅行：派猫猫旅行 / 领取猫猫旅行积分 / 领养猫猫 / 猫猫旅行失败
+ *   · 成长任务：领取成长任务 / 成长任务领取失败
+ * 行上的 `rowId` 带来源前缀（`c123` / `g45`）—— 两张表的 row_id 各自自增，
+ * 不带前缀会在合并结果里撞号（React key）。
  *
  * ── 数据 ────────────────────────────────────────────────────
- * GET /api/checkin-records（limit / offset 真分页 + outcome / provider / keyword /
- * start 筛选），响应 `{records, total}`：total 是同条件总数（页脚读数与「清空」共用）。
+ * 响应 `{records, total}`：total 是同条件的两表之和（页脚读数与「清空」共用）。
  * 时间档位与请求日志同款（今天 / 7 天 / 30 天 / 本月 / 全部，默认全部），落到 start
  * 毫秒下界交给后端；筛选 / 档位 / 每页条数任一变化都重拉。挂载时拉一次；无轮询 ——
- * 签到动作后切回本页（重新挂载）即刷新，或手点「刷新」。
+ * 动作后切回本页（重新挂载）即刷新，或手点「刷新」。
  *
  * ── 清空的护栏 ──────────────────────────────────────────────
- * 与运行日志同一条规则：带筛选 = 只删筛选命中的（后端与查询共用同一份过滤链）；
- * 不带筛选必须显式 `all=1`（后端护栏），且前端先过 wbConfirm —— Tauri 的
- * WebView 里原生 confirm 不弹窗直接放行，危险确认一律走自绘弹窗（见 confirm-dialog）。
+ * 与运行日志同一条规则：带筛选 = 只删筛选命中的（后端与查询共用同一份过滤链，
+ * 两表都作用）；不带筛选必须显式 `all=1`（后端护栏），且前端先过 wbConfirm ——
+ * Tauri 的 WebView 里原生 confirm 不弹窗直接放行，危险确认一律走自绘弹窗
+ * （见 confirm-dialog）。
  *
  * ── 列设置与列宽（与其他四张表同一套）─────────────────────────
  * 显隐 / 顺序 / 对齐走 wbColSettings（table-col-settings.tsx，「列设置」按钮由
@@ -114,21 +125,65 @@ function numericSize(choice: PageSizeChoice): number {
   return typeof choice === 'number' && choice > 0 ? choice : DEFAULT_PAGE_SIZE
 }
 
-/** 结果档位的界面文案与徽章变体（outcome 由后端判，这里只管长得不一样） */
+/**
+ * 结果档位的界面文案与徽章变体。**按字面量**索引，供筛选下拉用 —— 下拉选的是
+ * `outcome` 这个值本身，而 `failed` 两张表共用（选它会同时筛出签到失败与猫猫
+ * 旅行失败），所以这一份里它只能写中性的「失败」。
+ *
+ * 行上的徽章另有更细的一层：见 [`outcomeView`] —— 它按行来源把 `failed` 再分成
+ * 「签到失败」/「猫猫旅行失败」。
+ */
 const OUTCOME_VIEW: Record<string, { label: string; variant: 'success' | 'brand' | 'warning' | 'destructive' }> = {
+  // ── 签到 ──
   success: { label: '成功领取', variant: 'success' },
   already: { label: '今日已领', variant: 'brand' },
   pending: { label: '等待窗口', variant: 'warning' },
   failed: { label: '失败', variant: 'destructive' },
+  // ── 猫猫旅行 ──
+  departed: { label: '派猫猫旅行', variant: 'brand' },
+  claimed: { label: '领取猫猫旅行积分', variant: 'success' },
+  adopted: { label: '领养猫猫', variant: 'success' },
+  // ── 成长任务 ──
+  task_claimed: { label: '领取成长任务', variant: 'success' },
+  task_failed: { label: '成长任务领取失败', variant: 'destructive' },
 }
 
-/** 触发来源的界面文案（source 由后端给，值集合见 core::checkin_records 的模块头） */
+/** 行是否来自猫猫旅行 / 成长任务那张表（行号前缀 `g`；见文件头） */
+function fromTravel(rowId: string | undefined): boolean {
+  return (rowId ?? '').startsWith('g')
+}
+
+/**
+ * 一行结果档位的展示形态 —— 比 [`OUTCOME_VIEW`] 多分一层 `failed`。
+ *
+ * `failed` 是两张表共用的字面量（签到失败与猫猫旅行失败各写各的，值相同），
+ * 光看值分不出是哪条线，得看行来源（`rowId` 前缀）：「签到失败」/「猫猫旅行失败」。
+ * 其余档位直接查表；认不出的原样透出（后端加了新档位时不至于显示空白）。
+ */
+function outcomeView(row: CheckinRecordRow): { label: string; variant: 'success' | 'brand' | 'warning' | 'destructive' | 'outline' } {
+  const outcome = row.outcome ?? ''
+  if (outcome === 'failed') {
+    return fromTravel(row.rowId)
+      ? { label: '猫猫旅行失败', variant: 'destructive' }
+      : { label: '签到失败', variant: 'destructive' }
+  }
+  return OUTCOME_VIEW[outcome] ?? { label: outcome || '—', variant: 'outline' }
+}
+
+/**
+ * 触发来源的界面文案（source 由后端给）。
+ * 签到那份：`schedule / startup / manual / single / activity`（见 core::checkin_records）；
+ * 旅行与任务那份：`auto / startup / manual`（见 core::travel_records）。
+ */
 const SOURCE_LABEL: Record<string, string> = {
   schedule: '定时',
   startup: '补签',
   manual: '手动',
   single: '单签',
   activity: '活动',
+  // 旅行的 startup 与签到同义（启动补跑），上面的「补签」对它也读得通；
+  // auto 是旅行 / 任务独有的「后台循环」。
+  auto: '后台',
 }
 
 /**
@@ -197,7 +252,7 @@ function recordCell(row: CheckinRecordRow, column: RecordColumn & { align: Align
         </td>
       )
     case 'outcome': {
-      const outcome = OUTCOME_VIEW[row.outcome ?? ''] ?? { label: row.outcome || '—', variant: 'outline' as const }
+      const outcome = outcomeView(row)
       return (
         <td key={column.key} className={className}>
           <Badge variant={outcome.variant} shape='tag'>{outcome.label}</Badge>
@@ -267,9 +322,9 @@ function RecordsTab(): React.ReactElement {
     setError('')
     try {
       const api = shared().workbuddyDesktop as {
-        getCheckinRecords?: (params: Record<string, unknown>) => Promise<{ records?: CheckinRecordRow[]; total?: number } | null | undefined>
+        getCheckinLedger?: (params: Record<string, unknown>) => Promise<{ records?: CheckinRecordRow[]; total?: number } | null | undefined>
       } | undefined
-      const data = await api?.getCheckinRecords?.({
+      const data = await api?.getCheckinLedger?.({
         limit: target.size,
         offset: (target.page - 1) * target.size,
         outcome: target.filters.outcome,
@@ -379,11 +434,11 @@ function RecordsTab(): React.ReactElement {
     if (!(await ask({ title: t('清空签到记录'), html: message, okText: t('清空'), okClass: 'danger' }))) return
     try {
       const api = shared().workbuddyDesktop as {
-        clearCheckinRecords?: (params: Record<string, unknown>) => Promise<{ removed?: number } | null | undefined>
+        clearCheckinLedger?: (params: Record<string, unknown>) => Promise<{ removed?: number } | null | undefined>
       } | undefined
       // 与后端护栏对齐：无筛选必须显式 all=1（漏传会被 400 拦下，这里不给它机会）；
       // 带筛选时把时间档位一并给它 —— 删除与查询共用同一份过滤链，「筛出什么就删什么」
-      await api?.clearCheckinRecords?.(filtered
+      await api?.clearCheckinLedger?.(filtered
         ? { outcome: filters.outcome, provider: filters.provider, keyword: filters.keyword, start: rangeStart(range) }
         : { all: '1' })
       toast('签到记录已清空')
@@ -398,7 +453,7 @@ function RecordsTab(): React.ReactElement {
     <section className='panel'>
       <div className='panel-head'>
         <h2>{t('签到记录')}</h2>
-        <span className='panel-sub'>{t('每执行一次签到 · 每个账号一条明细 · 结果与收益以后端落账为准')}</span>
+        <span className='panel-sub'>{t('每执行一次签到 / 猫猫旅行 / 成长任务 · 每个账号一条明细 · 结果与收益以后端落账为准')}</span>
         <div ref={actionsRef} className='ml-auto flex items-center gap-2'>
           {/* 「列设置」按钮由 wbColSettings.register 插进这个容器的最前面（命令式，
               本岛只留容器；切标签页重建时靠重新登记插回，见上方 effect） */}
@@ -476,7 +531,7 @@ function RecordsTab(): React.ReactElement {
       {rows.length === 0 && !loading ? (
         <div className='ck-empty'>{filtered
           ? t('没有符合筛选条件的签到记录')
-          : t('还没有签到记录 —— 手动签到或等定时条目执行后，明细会出现在这里。')}</div>
+          : t('还没有签到记录 —— 手动签到、猫猫旅行 / 成长任务执行后，明细会出现在这里。')}</div>
       ) : (
         <div className='ck-records-scroll'>
           {/* colgroup / thead 按列设置现渲染（不是字面量）：本标签页切走即卸载重建，
