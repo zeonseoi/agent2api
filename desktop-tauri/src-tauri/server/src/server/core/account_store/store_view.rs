@@ -355,6 +355,12 @@ impl AccountStore {
             // 之类与它无关的空字段，而「刷新 Token」按钮靠的 hasRefreshToken
             // 只是**恰好**在兜底形状里也算得出来 —— 那不是设计，是巧合。
             self.to_officeace_public_account(record)
+        } else if record.provider() == super::orcaterm_accounts::ORCATERM_PROVIDER_ID {
+            // OrcaTerm（腾讯云遨驰终端桌面客户端）：单一入口（粘贴 accessToken /
+            // 导入桌面端登录态），公开形态带 uid(=userId) / loginName(=昵称) /
+            // tokenTail / tokenExpireAt（续期是否在工作可被肉眼校验，见
+            // `orcaterm_accounts.rs`）
+            self.to_orcaterm_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)
