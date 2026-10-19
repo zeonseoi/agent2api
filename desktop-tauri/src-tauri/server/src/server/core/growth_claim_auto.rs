@@ -1,7 +1,7 @@
 //! WorkBuddy 成长任务的**到期前自动领取**：独立的后台轮询调度。
 //!
 //! ── 为什么独立成模块 ────────────────────────────────────────
-//! 它曾是 `core::travel_auto` 里搭在旅行循环上的一段（共用那条 2 小时循环、
+//! 它曾是本 fork 旅行循环上搭着的一段（共用那条 2 小时循环、
 //! 共用一个启停）。但两件事的**触发条件与风险都不同**：旅行会真花掉账号当日
 //! 的派猫次数（用户要显式开），任务领取是把**已经该拿的奖励**领回来（动作更
 //! 轻）。合成一条循环会带来两个副作用 —— 「只开领取」时循环根本不起（启停
@@ -37,13 +37,13 @@ use crate::server::core::providers::workbuddy::Region as WorkBuddyRegion;
 use crate::server::core::travel_records;
 use crate::server::logging;
 
-/// 轮询间隔：2 小时（与旅行循环同频；领取判据按天，这个间隔足够早地撞上
-/// 「到期前一天」，且大幅减少对上游的请求次数）。
+/// 轮询间隔：2 小时（领取判据按天，这个间隔足够早地撞上「到期前一天」，
+/// 且大幅减少对上游的请求次数）。
 ///
-/// 与旅行不同：软件刚启动时不等这一轮 —— `start()` 会先补跑一轮（见那里）。
+/// 软件刚启动时不等这一轮 —— `start()` 会先补跑一轮（见那里）。
 pub const TICK_MS: u64 = 2 * 60 * 60 * 1000;
 
-/// config.json 里承载本功能开关的键（独立于旅行开关 `travelAuto`）。
+/// config.json 里承载本功能开关的键（独立于官方旅行排程 `growthSchedule`）。
 const CONFIG_KEY: &str = "growthClaimAuto";
 
 // ─── 开关 ────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ fn claim_threshold_day(end: &str) -> Option<String> {
 /// 国内版账号（成长任务只对这些账号有意义；判据与 `growth::supports_growth`
 /// 同源）。
 ///
-/// 与 `core::travel_auto::cn_accounts` 是同一段过滤。**不去共用一个公共函数**
+/// 与官方旅行排程的账号过滤是同一段判据。**不去共用一个公共函数**
 /// ——两个调度器要彼此完全独立，共享一个辅助函数会把它们的生命周期重新绑在一起
 /// （改一处影响两处）。这段只有 5 行，重复比耦合划算。
 fn cn_accounts(store: &AccountStore) -> Vec<Value> {
@@ -232,7 +232,7 @@ struct Inner {
 }
 
 /// 抢到「执行中」标记的守卫：无论正常返回还是中途被 abort，Drop 时都复位
-/// `running`（对应 `travel_auto::RunningGuard` / `auto_checkin::RunningGuard`）。
+/// `running`（对应 `auto_checkin::RunningGuard` / `auto_checkin::RunningGuard`）。
 struct RunningGuard {
     inner: Arc<Mutex<Inner>>,
 }
@@ -345,7 +345,7 @@ impl ClaimAuto {
 
     /// 跑一轮（自动循环与「立即执行」共用）。防重入：已在跑就跳过。
     ///
-    /// 只做一件事 —— 领取到期任务。旅行是另一条独立循环（`core::travel_auto`），
+    /// 只做一件事 —— 领取到期任务。旅行是官方的定点排程（`core::growth_scheduler`），
     /// 两者不共享闸、不互相触发。
     pub async fn fire(&self, reason: &str) {
         let _guard = {
@@ -387,7 +387,7 @@ impl ClaimAuto {
     }
 }
 
-/// 全局单例（`init_global` / `stop_global` 与 `travel_auto` 同一模式）。
+/// 全局单例（`init_global` / `stop_global` 与 `auto_checkin` 同一模式）。
 static GLOBAL: std::sync::OnceLock<ClaimAuto> = std::sync::OnceLock::new();
 
 /// 装入全局句柄（重复调用忽略）。

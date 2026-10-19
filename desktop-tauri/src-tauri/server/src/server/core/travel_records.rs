@@ -1,14 +1,14 @@
 //! 派猫猫旅行与成长任务领取的**每账号明细台账**（`travel_records` 表，schema v14）。
 //!
 //! ── 解决什么问题（与 `checkin_records` 同一动机）────────────────
-//! 旅行的执行结果是逐账号状态缓存（`travelCache`，给界面读数用），只反映
-//! 「此刻每个账号什么状态」，回看不出「谁哪一轮被派出去 / 领回了多少 / 谁失败了」。
+//! 官方旅行排程只把上一轮摘要写进配置（`growthSchedule.lastResult`），只反映
+//! 「刚刚那轮做了什么」，回看不出「谁哪一天被派出去 / 领回了多少 / 谁失败了」。
 //! 签到记录页要的是**可翻阅的明细**：哪个账号、哪天、什么来源触发、
 //! 派出还是领回、领了多少、失败错在哪 —— 这张表就是那个落点。它取代了改造前
 //! config.json 的 `travelHistory`（只记「每轮一行」的汇总，看不见账号粒度）。
 //!
 //! ── 只记「真动作」────────────────────────────────────────────
-//! 旅行每 2 小时一轮、跨小时才领，多数轮次对多数账号是「在途等待」或「当天已领满
+//! 旅行一趟跨小时才领，多数轮次对多数账号是「在途等待」或「当天已领满
 //! 跳过」—— 那些不是事件。只把 `departed`（真派出）/ `claimed`（真领回）/
 //! `failed`（真失败）记下来，台账才可读（与旧 `travel_history` 的取舍一致）。
 //!
@@ -24,7 +24,7 @@
 //!
 //! ── source 的字面集合 ────────────────────────────────────────
 //! `auto` 后台循环 / `startup` 启动补跑 / `manual` 手动「立即执行」与单账号
-//! 「派猫猫 / 领回」。前者由 `travel_auto::collect` 与 `growth_claim_auto::
+//! 「派猫猫 / 领回」。前者由 `travel_ledger`（官方旅行排程的记账点）与 `growth_claim_auto::
 //! claim_due_tasks` 按 `reason` 归并，后两者从 `api::growth::travel_run` 进来。
 //!
 //! ── 写失败不报错 ─────────────────────────────────────────────
@@ -50,7 +50,7 @@ pub const OUTCOME_DEPARTED: &str = "departed";
 pub const OUTCOME_CLAIMED: &str = "claimed";
 /// 领养成功（无猫 → 有猫；官方状态机的 `adopt` 档，同时入账 +300 积分）
 pub const OUTCOME_ADOPTED: &str = "adopted";
-/// 成长任务到期前的自动领取（不经猫猫旅行，落同一张表；见 `core::travel_auto`
+/// 成长任务到期前的自动领取（不经猫猫旅行，落同一张表；见 `core::growth_claim_auto`
 /// 的到期领取扫描）。message 是收益文案（如 `+300 积分`）。
 pub const OUTCOME_TASK_CLAIMED: &str = "task_claimed";
 /// 猫猫旅行的失败（派出 / 领回 / 领养任一步报错）。
@@ -73,7 +73,7 @@ fn database() -> Option<&'static Db> {
 /// （派出行为空），`error` 是失败原因原文（成功行为空）。
 ///
 /// 一次调用 = 一次真动作（派出 / 领养 / 领回 / 领任务 / 失败），调用点在
-/// `core::travel_auto` 与 `core::growth_claim_auto`。
+/// `core::travel_ledger` 与 `core::growth_claim_auto`。
 pub fn record(
     source: &str,
     reason: &str,

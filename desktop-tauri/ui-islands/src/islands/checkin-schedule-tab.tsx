@@ -3,8 +3,9 @@ import { Badge, Button, Checkbox, Input, Spinner, Switch } from '@ui'
 import { formatTime, shared, toast } from './accounts-shared'
 import { t } from '../i18n'
 import {
-  getCheckinStore, setClaimAuto, setKeepaliveDraft, setTravelAuto, submitKeepaliveModels, subscribeCheckinStore,
-  type CheckinStore,
+  getCheckinStore, setClaimAuto, setKeepaliveDraft, submitKeepaliveModels, subscribeCheckinStore,
+  runTravelScheduleNow, saveTravelSchedule,
+  type CheckinStore, type TravelScheduleState,
 } from './checkin-state'
 import {
   deleteSchedule, getSchedulesStore, loadSchedules, runScheduleNow, saveSchedule,
@@ -308,44 +309,32 @@ function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: Sched
   )
 }
 
-/* ─── WorkBuddy 成长任务（自动派猫猫旅行 + 到期自动领取）──── */
+/* ─── WorkBuddy 成长任务（到期前自动领取）──────────────────── */
 
 /**
- * WorkBuddy 成长中心的自动开关卡（挂在「定时签到」页的定时签到面板下方）。
+ * WorkBuddy 成长中心的「到期前自动领取」开关卡（挂在「定时签到」页）。
  *
- * ── 两颗开关、各自独立 ──────────────────────────────────────
- * ① 「自动派猫猫旅行」：后台每 2 小时派 / 领猫猫旅行（会真花掉每日次数）；
- * ② 「到期前自动领取任务」：把快到期（今天 ≥ 到期日 − 1 天）的成长任务领回来
- *    （已完成直接领；未完成先点亮再领）。两者风险不同、开关分开。
+ * ── 为什么只剩一颗开关 ──────────────────────────────────────
+ * 「自动派猫猫旅行」已由官方的「猫猫旅行定时排程」卡接管（`autoCheckin` 与
+ * `growthSchedule` 是两个独立排程，见 `core::growth_scheduler`）—— 这里不再
+ * 重复给开关，否则同一件事有两处入口、还可能两个调度同时派猫。
+ * 「到期前自动领取」是官方没有的一档（按任务的 `valid_end` 提前一天领），
+ * 仍由本 fork 的独立循环负责（见 `core::growth_claim_auto`）。
  *
  * ── 数据 ────────────────────────────────────────────────────
- * 开关读数取签到中心快照的 `travel.enabled` / `travel.claimEnabled`，写走
- * `setTravelAuto` / `setClaimAuto`（POST /api/travel/auto，起停后端轮询）。
- * 仅 WorkBuddy 国内版有成长中心：没有 travel 段（无国内版账号）时整卡不渲染。
+ * 开关读数取签到中心快照的 `claimAuto.enabled`，写走 `setClaimAuto`
+ * （POST /api/claim-auto，起停后端轮询）。没有国内版账号时后端不给这段，
+ * 整卡不渲染。
  */
-function TravelAutoCard({ store }: { store: CheckinStore }) {
-  const enabled = store.snapshot?.travel?.enabled === true
-  const claimEnabled = store.snapshot?.travel?.claimEnabled === true
+function ClaimAutoCard({ store }: { store: CheckinStore }) {
+  const claimEnabled = store.snapshot?.claimAuto?.enabled === true
   return (
     <section className='panel ck-growth-card'>
       <div className='panel-head'>
         <h2>{t('WorkBuddy 成长任务')}</h2>
-        <span className='tip-q' data-tip={t('后台每 2 小时检查一次：空闲的账号自动派出猫猫旅行、到点自动领回积分；另可开启「到期前自动领取」，把快过期的成长任务领回来（仅 WorkBuddy 国内版）。两项各自独立，会真发起写请求，请确认后再开。')}></span>
-        <Badge className='ml-auto' variant={enabled || claimEnabled ? 'success' : 'outline'}>
-          {enabled || claimEnabled ? t('已开启') : t('已关闭')}
-        </Badge>
+        <span className='tip-q' data-tip={t('后台每 2 小时检查一次：把快过期（今天 ≥ 到期日 − 1 天）的成长任务领回来（已完成直接领；未完成先点亮再领）。仅 WorkBuddy 国内版；会真发起写请求，请确认后再开。')}></span>
       </div>
       <div className='p-4'>
-        <div className='ck-set-line'>
-          <span className='ck-set-k'>{t('自动派猫猫旅行')}</span>
-          <span className='ck-set-v'>
-            <Switch
-              checked={enabled}
-              disabled={store.travelSaving}
-              onCheckedChange={next => void setTravelAuto(next)}
-            />
-          </span>
-        </div>
         <div className='ck-set-line'>
           <span className='ck-set-k'>{t('到期自动领取')}</span>
           <span className='ck-set-v'>
@@ -357,7 +346,7 @@ function TravelAutoCard({ store }: { store: CheckinStore }) {
           </span>
         </div>
         <div className='ck-note'>
-          {t('旅行要几小时才回来，所以领取由后台按固定间隔轮询（不是每天一次）；开启后无需手动操作，也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。到期自动领取对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「签到记录」。')}
+          {t('对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「签到记录」。也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。')}
         </div>
       </div>
     </section>
@@ -648,7 +637,7 @@ function ScheduleTab(): React.ReactElement {
       {/* WorkBuddy 成长任务（自动派猫猫旅行 + 到期自动领取）：挂在定时签到面板
           下方（它与定时签到同页，但周期语义不同，仍是独立小卡）。仅 WorkBuddy
           国内版有成长中心：没有 travel 段时不渲染。 */}
-      {checkin.snapshot?.travel ? <TravelAutoCard store={checkin} /> : null}
+      {checkin.snapshot?.claimAuto ? <ClaimAutoCard store={checkin} /> : null}
 
       <KeepalivePanel
         models={chainModels}
@@ -656,7 +645,124 @@ function ScheduleTab(): React.ReactElement {
         dirty={chainDirty}
         saving={checkin.keepaliveSaving}
       />
+
+      <TravelPanel
+        travel={checkin.snapshot?.travel}
+        saving={checkin.travelSaving}
+        running={checkin.travelRunning}
+      />
     </div>
+  )
+}
+
+/* ─── 猫猫旅行定时排程 ─────────────────────── */
+
+/**
+ * 猫猫旅行定时排程面板（国内版）。
+ *
+ * ── 为什么与「定时签到」分卡 ────────────────────────────────
+ * 两个排程完全独立（`autoCheckin` vs `growthSchedule`）：用户可能只想自动
+ * 签到、不想自动派猫，或反过来。合成一张卡会让「关掉旅行」变成「关掉签到」
+ * 的副作用（参考项目也是两套开关与时刻）。
+ *
+ * ── 时刻怎么编 ──────────────────────────────────────────────
+ * 用逗号分隔的 `HH:MM` 列表（缺省 `09:00, 21:00`）：早上派出、晚上领奖。
+ * 保存时后端归一化（排序去重、校验范围），界面以后端返回为准。
+ */
+function TravelPanel({
+  travel,
+  saving,
+  running,
+}: {
+  travel?: TravelScheduleState
+  saving: boolean
+  running: boolean
+}): React.ReactElement {
+  const enabled = travel?.enabled === true
+  const times = Array.isArray(travel?.times) ? travel!.times : []
+  const fired = new Set(Array.isArray(travel?.firedToday) ? travel!.firedToday : [])
+  const [draft, setDraft] = React.useState<string | null>(null)
+  const text = draft ?? times.join(', ')
+  const dirty = draft !== null && draft.replace(/\s+/g, '') !== times.join(',')
+  const last = travel?.lastResult
+  const actions = Array.isArray(last?.actions) ? last!.actions! : []
+  const submit = (): void => {
+    const list = text
+      .split(/[,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    void saveTravelSchedule({ times: list }).then(() => setDraft(null))
+  }
+  return (
+    <section className='panel'>
+      <div className='panel-head'>
+        <h2>{t('猫猫旅行定时排程')}</h2>
+        <span
+          className='tip-q'
+          data-tip={t(
+            '每天按这里的时刻自动巡检一遍 WorkBuddy 国内版账号：没有猫就领养、在家就派出、到站就领奖。一趟只推进一步，所以建议留两个时刻（早上派出、晚上领奖）。企业版与国际版账号自动跳过。',
+          )}
+        ></span>
+        <span className='panel-sub'>{t('每天定点巡检 · 一趟推进一步 · 与签到排程互相独立')}</span>
+        <Button
+          size='sm'
+          variant='outline'
+          className='ml-auto flex-none'
+          disabled={running}
+          onClick={() => void runTravelScheduleNow()}
+        >
+          {running ? t('巡检中…') : t('立即巡检全部')}
+        </Button>
+      </div>
+      <div className='p-4'>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('开关')}</span>
+          <span className='ck-set-v flex items-center gap-2'>
+            <Switch
+              checked={enabled}
+              disabled={saving}
+              onCheckedChange={next => void saveTravelSchedule({ enabled: next === true })}
+            />
+            <span className='text-subtle text-xs'>
+              {enabled ? t('开着：按下面的时刻自动巡检') : t('关着：不自动巡检（仍可手动巡检）')}
+            </span>
+          </span>
+        </div>
+        <div className='ck-set-line'>
+          <span className='ck-set-k'>{t('时刻')}</span>
+          <span className='ck-set-v flex items-center gap-2'>
+            <Input
+              value={text}
+              disabled={saving}
+              placeholder='09:00, 21:00'
+              onChange={event => setDraft(event.target.value)}
+            />
+            <Button size='sm' variant='outline' disabled={!dirty || saving} onClick={submit}>
+              {t('保存')}
+            </Button>
+          </span>
+        </div>
+        <div className='ck-fold-note'>
+          {t('北京时间 · 逗号分隔 · 最多 6 条 · 到点后最多晚 30 秒执行；错过时点开机后会补跑一轮。')}
+          {fired.size > 0
+            ? ` ${t('今天已执行：{list}', { list: Array.from(fired).join(' / ') })}`
+            : ''}
+        </div>
+        {last && actions.length > 0 ? (
+          <div className='ck-fold-note'>
+            {t('上一轮（{time}）：{n} 个动作，+{credit} 积分', {
+              time: last.at ? formatTime(Number(last.at)) : '',
+              n: actions.length,
+              credit: Number(last.credit) || 0,
+            })}
+            {actions
+              .slice(0, 6)
+              .map(action => ` · ${action.name ?? action.accountId ?? ''}: ${action.message ?? action.outcome ?? ''}`)
+              .join('')}
+          </div>
+        ) : null}
+      </div>
+    </section>
   )
 }
 

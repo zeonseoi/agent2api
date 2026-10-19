@@ -161,7 +161,6 @@ use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
 use crate::server::core::growth_claim_auto::ClaimAuto;
-use crate::server::core::travel_auto::TravelAuto;
 use crate::server::core::billing::BillingService;
 use crate::server::core::login::LoginService;
 use crate::server::core::models::ModelCatalog;
@@ -217,12 +216,8 @@ pub struct ServerState {
     upstream: UpstreamService,
     /// 定时签到句柄（轮询调度 + 启动补签；内部 Mutex + 后台任务）
     auto_checkin: AutoCheckin,
-    /// 派猫猫旅行句柄（WorkBuddy 国内版成长中心；独立轮询 + 跨日缓存）。
-    /// `Option`：handler 走 `state.travel_auto()` 拿它，取不到时降级为直接调用
-    /// `core::travel_auto` 的自由函数（理论恒为 Some —— 启动时即初始化）。
-    travel_auto: Option<TravelAuto>,
-    /// 成长任务到期领取句柄（WorkBuddy 国内版；**独立于旅行**的轮询调度）。
-    /// `Option` 与 `travel_auto` 同形：handler 取不到时降级为自由函数。
+    /// 成长任务到期领取句柄（WorkBuddy 国内版；独立于旅行排程的轮询调度）。
+    /// `Option`：handler 取不到时降级为自由函数（理论恒为 Some）。
     claim_auto: Option<ClaimAuto>,
     /// 软件更新句柄（GitHub Release 检测 / 安装包下载；内部 Mutex）
     update: UpdateManager,
@@ -377,14 +372,18 @@ impl ServerState {
         // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
         // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
-        // 旅行记录的明细台账：装句柄即可，记账点在 `core::travel_auto`（真动作处）
-        // 与 `core::growth_claim_auto`（成长任务领取），全量保留。它取代了
+        // 旅行记录的明细台账：装句柄即可，记账点在 `core::growth_scheduler`
+        // （官方旅行排程，经 core::travel_ledger）与 `core::growth_claim_auto`
+        // （成长任务领取），全量保留。它取代了
         // config.json 的 travelHistory。**读侧不单独开接口** —— 签到记录页把这张表
         // 与 checkin_records 合并成一张表展示（见 core::checkin_ledger）。
         core::travel_records::install(db.clone());
         // 合并台账的读侧（GET/DELETE /api/checkin-ledger）：查询 / 删除同时作用于
         // 上面两张表（见 core::checkin_ledger 模块头）。
         core::checkin_ledger::install(db.clone());
+        // AI 助手的对话会话（左边那列历史会话）：装句柄即可，写入发生在每轮
+        // 回答之后（见 `core::assistant_sessions` 的模块头）。
+        core::assistant_sessions::install(db.clone());
         // 定时签到的「签到范围」一次性补齐：把加入版本晚于配置里那一版的家补进
         // 每条条目的范围（用户的期望是 OfficeAce 果办 / CodeArts 默认开启）。
         // 放在这里是因为它要读写配置快照（`config::init` 已在上方就位），且必须早于
@@ -540,13 +539,8 @@ impl ServerState {
             store.clone(),
             billing.clone(),
         ));
-        // 派猫猫旅行：独立后台调度（WorkBuddy 国内版成长中心，见 core::travel_auto）。
-        // 与自动签到同一模式（进程级句柄，stop() 从停机路径调到），但**默认关闭** ——
-        // 旅行会真花掉账号的每日次数，要用户在签到中心显式开。上游调用交给官方的
-        // `providers::workbuddy::growth::travel`，这里只持调度句柄。
-        let travel_auto = Some(core::travel_auto::init_global(TravelAuto::new(store.clone())));
-        // 成长任务到期领取：与旅行**完全独立**的第二个调度（各有各的开关、循环
-        // 与防重入闸，关一个不影响另一个；见 core::growth_claim_auto 的模块头）。
+        // 成长任务到期领取：与官方旅行排程**完全独立**的调度（各有各的开关、
+        // 循环与防重入闸，关一个不影响另一个；见 core::growth_claim_auto 的模块头）。
         let claim_auto = Some(core::growth_claim_auto::init_global(ClaimAuto::new(store.clone())));
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
@@ -621,7 +615,6 @@ impl ServerState {
             models,
             upstream,
             auto_checkin,
-            travel_auto,
             claim_auto,
             update,
             request_stats,
@@ -776,13 +769,7 @@ impl ServerState {
             state.auto_checkin.start();
         }
 
-        // 派猫猫旅行：开关开启时才起调度（默认关闭，见 core::travel_auto 的模块头）。
-        // 与自动签到同处启动末尾 —— 循环与 HTTP 监听独立，早点起没意义。
-        if core::travel_auto::auto_enabled() {
-            logging::log("[Travel]", "🐾 派猫猫旅行自动调度已启用（每 2 小时一轮）");
-            state.travel_auto().map(TravelAuto::start);
-        }
-        // 成长任务到期领取：独立开关、独立调度（与旅行互不影响）。
+        // 成长任务到期领取：独立开关、独立调度（与官方旅行排程互不影响）。
         if core::growth_claim_auto::claim_auto_enabled() {
             logging::log("[Growth]", "🎁 成长任务到期领取已启用（每 2 小时一轮）");
             state.claim_auto().map(ClaimAuto::start);
@@ -808,6 +795,20 @@ impl ServerState {
         // 服务器停机时进程会结束，任务随之消失。用 crate::spawn_task
         // （与 auto_checkin 同一理由）保证从非 tokio 上下文调用也能进入全局运行时。
         core::scheduled_tasks::spawn(state.store.clone(), state.update.clone());
+        // 猫猫旅行定时排程（国内版）：每天定点巡检一趟（无猫领养 / idle 派出 /
+        // arrived 领奖）。与上面的间隔型任务不是同一个形状（每天定点 vs 等间隔），
+        // 理由见 `core::growth_scheduler` 的模块头。默认开启、09:00 与 21:00 两趟
+        // —— 早上派出、晚上领奖，与参考项目 `TravelHours` 同口径。
+        {
+            let (enabled, times) = core::growth_scheduler::settings();
+            if enabled {
+                logging::log(
+                    "[Travel]",
+                    &format!("猫猫旅行定时排程已启用：每天 {} 执行", times.join(" / ")),
+                );
+                core::growth_scheduler::spawn(state.store.clone());
+            }
+        }
         // ZCode 活动套餐的「推理要不要验证码令牌」由上游配置说，每 5 分钟同步一次
         // （判据、代价与三条口径见 `providers::zcode::config_sync` 的模块头）。
         // 不进上面那张定时任务表：它没有「用户可配的间隔」、也不产生任何运行状态
@@ -855,11 +856,6 @@ impl ServerState {
     /// 定时签到句柄（/api/auto-checkin* 三条路由 + 启动调度）
     pub fn auto_checkin(&self) -> &AutoCheckin {
         &self.auto_checkin
-    }
-
-    /// 派猫猫旅行句柄（/api/travel/* 路由 + 后台轮询）
-    pub fn travel_auto(&self) -> Option<&TravelAuto> {
-        self.travel_auto.as_ref()
     }
 
     /// 成长任务到期领取句柄（独立轮询；与旅行句柄互不影响）

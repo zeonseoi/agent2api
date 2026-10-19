@@ -53,7 +53,7 @@
 //! 当前配置项（`apiKeys` / `modelRules` / `logRetentionDays` / `debugMode` /
 //! `sanitizeBlacklistFingerprints` / `promptMode` / `promptFile` /
 //! `scheduledTasks` / `autoCheckin` / `locale` / `lastRequestModel` /
-//! `providerRoute` / `updateProxy` / 三个 `*Dir` / 三个 `*RetentionDays` /
+//! `providerRoute` / `updateProxy` / `updateBeta` / 三个 `*Dir` / 三个 `*RetentionDays` /
 //! 三个 `retry*` / 六条 `scheduledTasks.*` 子键 / 三个 `*Imported` 标记 /
 //! 旧字段 `apiKey`）与固定键**无冲突**，逐项核对过（全仓 `update_raw_field` /
 //! `raw.insert` / `KEY_*` 常量的取值集合 vs 下面的 `RESERVED_KV_KEYS`）。
@@ -80,6 +80,9 @@ use rusqlite::Connection;
 /// 「功能已删、数据留着」的键，登记它们的唯一目的就是让配置写入别去动它。
 pub const RESERVED_KV_KEYS: &[&str] = &[
     // 账号优先级的全局作用域（core::account_store::sql）
+    // 「Agent」页的用户配置：{ clientId: [Profile] } 整份 JSON 一个键
+    // （core::agents）。零散状态，与 desktopSettings 同一类。
+    "agentProfiles",
     "priorityScope",
     // 事件日志的下一个 id 水位（logs_store::sql）
     "logsNextId",
@@ -270,7 +273,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 这一版号本身成为「库里的 data 列是密文」的事实来源 —— 与 fork 的建表
 /// 共用同一个版本号，两条线的库都能拿到各自需要的东西（见 [`reconcile`]）。
 /// 它是签到中心「旅行记录」页的数据源：每执行一轮真动作，每个真动手的账号一行
-/// （派出 / 领回 / 失败）。写入方是 `core::travel_records`（记账点在 `core::travel_auto`）。
+/// （派出 / 领回 / 失败）。写入方是 `core::travel_records`（记账点在 `core::travel_ledger`）。
 ///
 /// ── 为什么 migrate 末尾还要跑一遍 [`reconcile`]（版本线撞号的统一修复）──
 /// 本 fork 与官方上游**反复各占同一批版本号**：v10 / v11 曾撞号（fork 拿它们
@@ -288,7 +291,36 @@ pub fn is_reserved(key: &str) -> bool {
 /// 分支注释）—— 那比「跳过迁移」还糟，等于 fork 与官方再也无法共用一个库。
 /// 而把官方的版本号排在 fork 之后，两条线合并时又必然再次撞号。按实际对象
 /// 核对是唯一对两条线都成立的判据。
-pub const SCHEMA_VERSION: i64 = 14;
+///
+/// ── 版本 15：requests 补两条索引（官方 v3.1.0）───────────────
+/// 见 [`V15_SCHEMA`]。两条索引都来自同一次实测：明细三万余行、库已经四百多
+/// MB 的库上，两个最热的读路径分别在整表扫描与逐行回表。
+///
+///   · `idx_requests_status`：`SELECT COUNT(*) FROM requests WHERE status = 0`
+///     在**没有任何索引可用**时对整表做 `SCAN`（实测 3 万行 50 ms 量级，
+///     而命中的通常只有个位数行）。这条语句不属于报表 —— 它是前端「进行中」
+///     徽标的全局轮询（每 5 秒一次，与当前停在哪个页面无关，见 `ui/app.js`
+///     的 `syncRunningRequests`）与请求日志列表每次查询的一部分。加索引后
+///     按 status 直接定位，不再扫全表。
+///   · `idx_requests_summary`：`/api/stats/summary` 的近 24 小时明细窗口
+///     （`request_stats::sql::select_summary_rows`）只需要 6 列，而非覆盖索引
+///     必须逐行回表 —— 明细行里躺着 KB 级的 `route` / `attempt_details`，
+///     回表读回来的几乎全是被随后丢掉的字节。这条索引让该查询变成**纯索引
+///     扫描**（列序与那条 SELECT 的列序一致，改动任一侧都要回来对一眼）。
+///
+/// 两条都是 `CREATE INDEX IF NOT EXISTS`（与其余版本的幂等纪律一致）：在存量库
+/// 上建索引要扫一遍表，代价与表大小成正比、只付一次；`requests` 只有几万行时
+/// 在百毫秒量级，不会让启动明显变慢。**不要把这两条往 [`V1_SCHEMA`] 里补**：
+/// 新库按 1→16 依次跑，v15 那一步同样会建出来，而 v1 里多写一份等于同一条索引
+/// 有了两处定义 —— 将来改一处忘一处，正是 `V4_SCHEMA` 那类错位的来源。
+///
+/// ── v16：AI 助手的对话会话（[`V16_SCHEMA`]）──────────────────
+/// 助手从「一次性对话」变成「有历史记录的会话」：左边一列会话、右边一条消息流，
+/// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
+/// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
+/// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
+pub const SCHEMA_VERSION: i64 = 16;
+
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -858,6 +890,65 @@ CREATE INDEX IF NOT EXISTS idx_travel_records_provider ON travel_records(provide
 
 /// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时仍做一次核对修复）。
 ///
+/// 官方那份「已是最新就直接返回」的提前返回**不能要** —— 它会跳过 [`reconcile`]，
+/// 而撞号库的版本号正好等于最新版。见下面「为什么最后一定要跑一遍 reconcile」。
+/// 版本 15：requests 补两条索引（schema v15，官方）。
+///
+/// 与 v9 同一形态（既有表加索引，`CREATE INDEX IF NOT EXISTS`，幂等靠版本号）。
+/// 两条索引各自的来历与代价见 [`SCHEMA_VERSION`] 的 v15 段。
+///
+/// `idx_requests_summary` 的列序 = `sql::SUMMARY_COLUMNS` 的列序**加前缀
+/// `ts, is_test`**：`ts` 在最前才能支撑 `WHERE ts >= ? AND ts <= ?` 的范围扫描，
+/// `is_test` 紧随其后是为了在索引内就过滤掉模型测试行（不必回表才知道要丢）。
+/// 其余 5 列（`model` / `upstream_model` / `total_tokens` / `cache_read_tokens`
+/// / `prompt_tokens`）就是报表要读的全部内容 —— 少一列就要回表，多一列白占
+/// 空间与写入开销。
+const V15_SCHEMA: &str = "
+-- ── requests 补 status 索引（schema v15）─────────────────────
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+-- ── requests 补报表窄列覆盖索引（schema v15）─────────────────
+CREATE INDEX IF NOT EXISTS idx_requests_summary ON requests(
+  ts, is_test, model, upstream_model, total_tokens, cache_read_tokens, prompt_tokens
+);
+";
+
+/// 版本 16：AI 助手的对话会话表（schema v16）。
+///
+/// ── 存什么 ──────────────────────────────────────────────────
+/// 一条会话一行。列的口径：
+///   - `id`：会话 id（前端生成，`crypto.randomUUID()` 形态的字符串）。让前端
+///     生成而不是自增：新建会话时前端立刻要用这个 id 挂消息，等一次往返再拿到
+///     它会让「点新建 → 立刻发第一句」出现一个必须等待的中间态；
+///   - `title`：侧边栏显示的名字。取第一条用户消息的前若干字（前端算好传上来），
+///     用户没改过就一直是它 —— 后端不做「自动起标题」那种额外一次上游调用；
+///   - `messages`：**整条消息流的 JSON 原文**（`[{role, content, toolCalls?,
+///     toolCallId?}, …]`，与发给上游的 wire 形态同构）。存原文而不是拆列的理由
+///     见 [`SCHEMA_VERSION`] 的 v16 段；
+///   - `model` / `reasoning`：这条会话最后用的模型与思考等级。存**会话级**而不是
+///     每条消息各带一份：用户换模型是「这条对话从现在起换个模型」，不是逐条
+///     指定；重开一条会话时前端从这两个字段恢复选择器；
+///   - `created_at` / `updated_at`：毫秒时间戳。侧边栏按 `updated_at` 倒序排
+///     （最近聊过的在最上面），`updated_at` 每次保存都刷新。
+///
+/// ── 索引 ────────────────────────────────────────────────────
+/// 只有一条 `updated_at` 倒序索引：侧边栏的全部查询就是「按最近更新排序列出」，
+/// 没有按标题 / 模型检索的需求（会话量级是几十条，前端一次全取即可）。
+const V16_SCHEMA: &str = "
+-- ── assistant_sessions：AI 助手的对话会话（schema v16）───────
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL DEFAULT '',
+  messages    TEXT NOT NULL DEFAULT '[]',
+  model       TEXT,
+  reasoning   TEXT,
+  created_at  INTEGER NOT NULL DEFAULT 0,
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_sessions_updated ON assistant_sessions(updated_at DESC);
+";
+
+/// 把库升到 [`SCHEMA_VERSION`]（幂等：已是最新版时仍做一次核对修复）。
+///
 /// **库版本高于本程序时返回 `Err` 拒绝打开**（v14 起有意反转的一条既有决定，
 /// 完整论证见函数体里那个分支的注释）：加密后的 `accounts.data` 被旧程序当坏
 /// 数据跳过、再被它的差异写当成「内存里没有」删掉，静默放行等于「回退一次 =
@@ -957,7 +1048,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 失败**不报错**：数据已经删掉了，回收空间是尽力而为的优化 —— 用户
         // 之后仍可在请求日志页的「清理」弹窗里手动压缩（那条路有后台线程与
         // 进度状态，见 `RequestStats::compact`）。
+        //
+        // VACUUM 前后各做一次 checkpoint（与 `RequestStats::compact` 同形，理由
+        // 见那边模块注释）：WAL 模式下 VACUUM 的整库重建会全部落进 `-wal`，
+        // 少了尾部那次截零，空间只是从主库搬到 WAL、总占用不降反升（issue #297）。
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let _ = conn.execute_batch("VACUUM;");
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
     // 最后按实际对象核对一遍（详见 [`reconcile`] 与函数头注释）：版本号推进过
     // 却缺列 / 缺表的撞号库靠这一步补上。放 VACUUM 之后，两者互不依赖。
@@ -1016,6 +1113,10 @@ fn apply_version(conn: &Connection, version: i64) -> rusqlite::Result<()> {
         // 官方那份 v14 是 `accounts.data` 改密文的**内容形态标记，无 DDL**
         // （加密逐行做，挂在启动迁移里），所以这里只有 fork 的建表。
         14 => apply_ddl(conn, V14_SCHEMA),
+        // v15：requests 补两条索引（官方 v3.1.0，见 V15_SCHEMA）
+        15 => apply_ddl(conn, V15_SCHEMA),
+        // v16：assistant_sessions 助手对话会话表（官方 v3.1.0，见 V16_SCHEMA）
+        16 => apply_ddl(conn, V16_SCHEMA),
         _ => Ok(()),
     }
 }
@@ -1045,6 +1146,22 @@ fn apply_data_action(
             *cleaned_raw_rows += conn.execute("DELETE FROM request_raw", [])?;
             Ok(())
         }
+        // v14：账号 `data` 列改为密文（`enc1:` 信封）。
+        // **这一版没有 DDL**，所以是空操作：加密是逐行的内容变换（由启动迁移
+        // `account_store::store_admin::encrypt_legacy_accounts` 把存量明文行就地
+        // 加密），没有列要加、没有表要建、也没有历史行要删（`cleaned_raw_rows`
+        // 保持 0，不触发 VACUUM）。版本号的作用在**旧程序那一侧**：它让旧程序
+        // 读到 v14 库时明确失败（见 `migrate` 的拒绝分支），而不是把密文当坏
+        // 数据跳过后又删掉。完整说明见 [`SCHEMA_VERSION`] 的 v14 段。
+        // 本 fork 那份 v14 的 `travel_records` 建表在 `apply_version` 的 v14 分支 ——
+        // 那是可幂等重放的 DDL，不属于这里。
+        14 => Ok(()),
+        // v15：requests 补两条索引（status 的定位 + 报表窄列的覆盖，见
+        // V15_SCHEMA 与 SCHEMA_VERSION 的 v15 段）。
+        15 => apply_ddl(conn, V15_SCHEMA),
+        // v16：assistant_sessions 助手对话会话表（见 V16_SCHEMA 与
+        // SCHEMA_VERSION 的 v16 段）。新表用 CREATE IF NOT EXISTS，幂等。
+        16 => apply_ddl(conn, V16_SCHEMA),
         _ => Ok(()),
     }
 }
@@ -1132,6 +1249,12 @@ mod tests {
     fn build_fork_v11(path: &Path) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(V1_SCHEMA).unwrap();
+        // 真实的 fork v11 库里 v2~v9 的列都在（那些版本 fork 同样跑过），
+        // 这里只补后续断言关心的、以及 v15 索引要引用的列 —— 少了 is_test，
+        // v15 的 `CREATE INDEX ... (ts, is_test, ...)` 会报 no such column。
+        conn.execute_batch(V2_SCHEMA).unwrap();
+        conn.execute_batch(V6_SCHEMA).unwrap();
+        conn.execute_batch(V7_SCHEMA).unwrap();
         conn.execute_batch(
             "ALTER TABLE requests ADD COLUMN credit REAL NOT NULL DEFAULT 0;\
              ALTER TABLE request_daily ADD COLUMN credits REAL NOT NULL DEFAULT 0;",

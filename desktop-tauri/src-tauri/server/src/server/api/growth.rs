@@ -380,8 +380,8 @@ pub async fn travel_run(state: &ServerState, account_id: &str) -> Response {
     };
     let report = travel::run_once(&account).await;
     // 明细台账：官方这个手动「巡检一次」也落一行（source = manual）——
-    // 台账是旅行这一路的统一日志，不分手动与自动（见 core::travel_auto 的模块头）。
-    crate::server::core::travel_auto::record_manual(account_id, &account.nick, &report);
+    // 台账是旅行这一路的统一日志，不分手动与自动（见 core::travel_ledger 的模块头）。
+    crate::server::core::travel_ledger::record_manual(account_id, &account.nick, &report);
     ok_json(json!({
         "id": account_id,
         "outcome": report.outcome,

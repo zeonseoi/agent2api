@@ -221,6 +221,33 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // OfficeAce 的「新手任务」与每日签到是同一个上游动作（见 officeace::onboarding），
     // 所以它也在这张分组表里 —— 前端按 server 给的 extras.onboarding 驱动，不硬编码家。
     onboarding_rows.extend(onboarding_rows_of("officeace"));
+    // 智谱清言的新手任务是任务中心里的 `newbie` 分类（见 `chatglm::tasks`）。
+    // 它的**每日**任务与每日登录积分一起走上面的每日签到链，两块互不重复 ——
+    // 与 CodeArts「一次性归新手福利、每日归签到」同一分法。
+    //
+    // **访客排除**：本家的任务中心只对登录账号开放（访客实测 401），列进来会让
+    // 「签到后自动补领」每次都为它白打一次注定失败的查询。
+    onboarding_rows.extend(
+        accounts
+            .iter()
+            .filter(|account| {
+                account_text(account, "provider") == "chatglm"
+                    && !crate::server::core::providers::chatglm::tasks::is_guest_account(
+                        state.store(),
+                        &account_text(account, "id"),
+                    )
+            })
+            .map(|account| {
+                let id = account_text(account, "id");
+                json!({
+                    "id": id,
+                    "name": Value::from(account_display_name(account)),
+                    "provider": "chatglm",
+                    "settled": super::onboarding::settled_view(state.store(), &id, "chatglm")
+                        .unwrap_or(Value::Null),
+                })
+            }),
+    );
     // ZCode 的福利行带**本地领取台账**（`account.claimPlans`）—— 后端落盘的本地
     // 事实，带出来零上游请求，不违反「快照零上游」；界面的「今天领过哪几份」按它
     // 逐份比对（北京时间的日界判定在前端，不在后端再抄一份）。
@@ -284,18 +311,13 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "auto": state.auto_checkin().state(),
         // WorkBuddy 国际版日活保活的模型链（签到中心可编辑；空清单回落缺省链）
         "keepalive": crate::server::core::billing::keepalive::state(),
-        // 派猫猫旅行的**自动开关**（仅 WorkBuddy 国内版有成长中心）：这里只给
-        // 开关读数（「定时签到」页那张自动派猫卡读它）。**没有国内版账号时整个
-        // 键不给**（值为 null），界面据此不渲染那张卡 —— 与「不显示用不上的
-        // 功能」一致。单账号的旅行状态（有没有猫 / 在途 / 可领）由官方「成长
-        // 任务」行的展开面板呈现（`GET /api/accounts/{id}/growth` 的 travel 块），
-        // 不再进本快照；明细台账走 /api/checkin-ledger 分页接口（与签到记录合并）。
-        "travel": has_cn_account.then(|| {
-            json!({
-                "enabled": crate::server::core::travel_auto::auto_enabled(),
-                // 成长任务到期前自动领取（独立开关与独立调度，见 core::growth_claim_auto）
-                "claimEnabled": crate::server::core::growth_claim_auto::claim_auto_enabled(),
-            })
+        // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
+        // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
+        // 成长任务的「到期前自动领取」是官方没有的一档，单独挂在 `claimAuto` 下
+        // （独立开关与独立调度，见 core::growth_claim_auto）。
+        "travel": crate::server::core::growth_scheduler::state(),
+        "claimAuto": has_cn_account.then(|| {
+            json!({ "enabled": crate::server::core::growth_claim_auto::claim_auto_enabled() })
         }),
         "history": checkin_history::list(),
     }))
