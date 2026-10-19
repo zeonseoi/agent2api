@@ -275,25 +275,52 @@
    56px 下限，名字列跟着收到放得下的宽度 —— 列轨是 minmax(0, max-content)，
    上限只是「不许长过」，放不下时它自己会缩，所以这里不需要额外断点。 */
 
-/* ─── 用量环形图（模型 / 提供商两张并排）───
-   两张卡各占一半宽度，与上面两张排行卡同一取舍：它们回答的是同一个问题的
-   两个维度（用量花在哪个模型 / 落到哪家），并排放才便于对照。
-   用 flex + flex-basis 而不是 grid：两张卡**各自独立决定显隐**（models 是新增
-   字段，旧后端不返回），flex-wrap 下藏掉一张时剩下一张自动铺满整行；
-   grid 的固定两列会留下半行空白。与 .report-rank-grid 同一手法。
+/* ─── 用量环形图（每行最多三张：模型 / 提供商 / 账号）───
+   六张卡由页面按**量纲**分成两个容器（Token 一行、Credits 一行），这里只管
+   单行的排布：宽窗口三列、中等窗口两列、窄屏一列。
 
-   align-items: stretch（同 .report-rank-grid）：同一行两张卡等高 —— Token 的
-   环卡与 Credits 的空态卡并排时，空态卡被拉到与环卡同高，底边对齐。 */
+   用 grid + auto-fit 而不是 flex：三个维度各自独立决定显隐（旧后端可能不返回
+   某一维），`auto-fit` 会把没有内容的列轨收掉 —— 少一张时剩下两张均分整行，
+   不会像 flex-wrap 那样出现「最后一张单独占满一整行」的超宽卡。
+
+   align-items: stretch（同 .report-rank-grid）：同一行的卡等高 —— 一环一空态
+   并排时，空态卡被拉到与环卡同高，底边对齐。 */
 .report-donut-grid {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   align-items: stretch;
   gap: 14px;
+  margin-bottom: 14px;
+  /* 供下面的容器查询用：折行判断必须跟着网格**自己的宽度**，不能跟视口 ——
+     两侧留白与侧栏会吃掉两百多像素，按视口写的断点会在中间一段里判错 */
+  container: donut / inline-size;
 }
 
+/* 行间距统一由上面的 gap 给：.panel 自带的 margin-bottom 在网格里会再叠一层，
+   两行卡之间就成了 28px，比行内间距松一倍 */
 .report-donut-grid > .panel {
-  flex: 1 1 320px;
   min-width: 0;
+  margin-bottom: 0;
+}
+
+/* 中窗口（放不下三列、又不止一列）时三张卡会自动折成「2 + 1」，
+   第三张落在左半边、右边留下半个空列，看着像排版塌了一块。
+   把它跨满整行再按半宽居中：两侧留白对称，仍看得出「这一行归它」。
+
+   两条前提缺一不可：
+   · 容器宽 ≥ 654（2×320 + 14）—— 否则只有一列（手机），半宽会把它压成窄条；
+   · 视口 ≥ 768 —— 手机断点那条 `grid-template-columns: 1fr !important`（见
+     mobile.css）会把网格强制成单列，而那时容器宽度可能正好落在 654–987 之间。
+   上限 988 与 `minmax(320px, …)` 同源（3×320 + 2×14），到它就排得下三列了。
+   另外只在恰好三张时套用 —— 少一维时两张均分整行，不需要这条。 */
+@media (min-width: 768px) {
+  @container donut (min-width: 654px) and (max-width: 987px) {
+    .report-donut-grid > .panel:last-child:nth-child(3) {
+      grid-column: 1 / -1;
+      justify-self: center;
+      width: calc(50% - 7px);
+    }
+  }
 }
 
 /* 上面给 .panel 写了 flex 显示，就压过了浏览器对 hidden 的默认 display:none ——

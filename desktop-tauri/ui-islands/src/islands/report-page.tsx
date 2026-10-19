@@ -123,6 +123,8 @@ const TIP_MODELS = t('所选范围内每个模型各消耗了多少 Token，按�
 const TIP_PROVIDERS_PIE = t('所选范围内每个提供商各消耗了多少 Token，按用量从多到少排，扇区角度即占比。同一个模型名可能有多家都能提供，网关按设置页「转发路由」的优先级依次尝试，所以占比也反映了实际落到谁身上。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该提供商的 Token 用量与百分比。「未知」是指那批请求没记下承载它的提供商 —— 主要是记录提供商这个功能上线之前的旧明细，其次是请求在选定上游之前就失败了。')
 const TIP_MODELS_CREDITS = t('所选范围内每个模型各消耗了多少 Credits，按 Credits 用量从多到少排，扇区角度即占比。中心是这一维的 Credits 合计（等于概览里的总 Credits），右侧每行给出该模型的 Credits 用量与百分比。Credits 来自上游响应的 usage，与 Token 用量同源同区间；不是所有上游都上报，没上报的家记 0，它们在图上也会是 0。')
 const TIP_PROVIDERS_CREDITS = t('所选范围内每个提供商各消耗了多少 Credits，按 Credits 用量从多到少排，扇区角度即占比。中心是这一维的 Credits 合计（等于概览里的总 Credits），右侧每行给出该提供商的 Credits 用量与百分比。Credits 来自上游响应的 usage，与 Token 用量同源同区间；不是所有上游都上报，没上报的家记 0。同一家可以挂多个账号，这一维按提供商归并。')
+const TIP_ACCOUNTS_PIE = t('所选范围内每个账号各消耗了多少 Token，按用量从多到少排，扇区角度即占比。账号是比提供商更细的一维：同一家可以挂多个账号，转发时按优先级在候选链上依次尝试，所以这一维回答的是「具体哪个登录态在出力」。中心是这一维的合计（等于概览里的总 Token），右侧每行给出该账号的 Token 用量与百分比。「未知账号」是指那批请求没有账号身份：走默认登录态转发（未配置账号列表）时会这样；这一维上线前写出的旧聚合行也会留在这里，除非明细仍在、升级时已按明细补算回来。')
+const TIP_ACCOUNTS_CREDITS = t('所选范围内每个账号各消耗了多少 Credits，按 Credits 用量从多到少排，扇区角度即占比。中心是这一维的 Credits 合计（等于概览里的总 Credits），右侧每行给出该账号的 Credits 用量与百分比。Credits 来自上游响应的 usage，与 Token 用量同源同区间；不是所有上游都上报，没上报的家记 0。同一家可以挂多个账号，这一维按账号分开，所以能把花费落到具体登录态上。')
 const TIP_CACHE_RATES = t('命中率 = 缓存读取 Token / 输入 Token（promptTokens）。窗口越短越贴近「此刻」：上游把缓存读取与输入分开上报时，该比值合法地可能超过 100%，此处不夹取值、如实展示。')
 const TIP_DAILY_TREND = t('每天的总 Token 用量（输入 + 输出）。柱顶标出当天的读数；区间很长、柱子挤到放不下时只标最高的那几天，其余悬停柱子即可读到。')
 /**
@@ -835,10 +837,15 @@ function ReportPage() {
         ) : null}
       </div>
 
-      {/* ── 用量环形图：模型 / 提供商各两张（Token 一张、Credits 一张）──
-           每张卡各自独立判断显隐（后端可能不返回该维，或这一维没有数据）。
-           Credits 的两张排在 Token 两张之后：先看用量、再看花费，与概览卡片
-           「总 Token 在前、总 Credits 在后」的顺序一致。 */}
+      {/* ── 用量环形图：模型 / 提供商 / 账号各两张（Token 一张、Credits 一张）──
+           按**量纲分成两行**（Token 一行、Credits 一行），而不是六张混在一个流里：
+           混排时每行放下的张数随窗口变，最后一行常剩 2 张被拉成超宽卡，环与
+           图例之间空出一大截。分两行后每行最多三张、宽度一致，也顺带保留
+           「先看用量、再看花费」的阅读顺序（与概览卡片一致）。
+           每张卡各自独立判断显隐（后端可能不返回该维，或这一维没有数据）：少一张时
+           同一行剩下的自动均分宽度，行本身不会留空洞。
+           行内按「粗→细」排：模型 → 提供商 → 账号（账号是最细的一维，
+           Top 账号那张排行卡也是同一个口径）。 */}
       <div className='report-donut-grid'>
         {modelList ? (
           <DonutPanel panelId='report-models-panel' listId='report-models-donut' title={t('模型用量')}
@@ -850,6 +857,15 @@ function ReportPage() {
             tip={TIP_PROVIDERS_PIE} ariaLabel={t('提供商用量占比')} centerLabel={t('总 Token')}
             view={donutView(providerList, t('未知'), 'tokens')} emptyText={t('所选范围内还没有提供商用量')} />
         ) : null}
+        {accountList ? (
+          <DonutPanel panelId='report-accounts-pie-panel' listId='report-accounts-donut' title={t('账号用量')}
+            tip={TIP_ACCOUNTS_PIE} ariaLabel={t('账号用量占比')} centerLabel={t('总 Token')}
+            view={donutView(accountList, t('未知账号'), 'tokens')} emptyText={t('所选范围内还没有账号用量')} />
+        ) : null}
+      </div>
+
+      {/* Credits 一行：与上一行同序（模型 → 提供商 → 账号），两行对位上下一一对应 */}
+      <div className='report-donut-grid'>
         {modelList ? (
           <DonutPanel panelId='report-models-credits-panel' listId='report-models-credits-donut'
             title={t('模型 Credits 用量')} tip={TIP_MODELS_CREDITS} ariaLabel={t('模型 Credits 用量占比')}
@@ -861,6 +877,12 @@ function ReportPage() {
             title={t('提供商 Credits 用量')} tip={TIP_PROVIDERS_CREDITS} ariaLabel={t('提供商 Credits 用量占比')}
             centerLabel={t('总 Credits')}
             view={donutView(providerList, t('未知'), 'credits')} emptyText={t('所选范围内还没有提供商 Credits 用量')} />
+        ) : null}
+        {accountList ? (
+          <DonutPanel panelId='report-accounts-credits-panel' listId='report-accounts-credits-donut'
+            title={t('账号 Credits 用量')} tip={TIP_ACCOUNTS_CREDITS} ariaLabel={t('账号 Credits 用量占比')}
+            centerLabel={t('总 Credits')}
+            view={donutView(accountList, t('未知账号'), 'credits')} emptyText={t('所选范围内还没有账号 Credits 用量')} />
         ) : null}
       </div>
 
