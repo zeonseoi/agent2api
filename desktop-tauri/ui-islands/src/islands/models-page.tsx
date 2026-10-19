@@ -1067,7 +1067,7 @@ function ModelsPage() {
             </div>
             <div className='models-table-wrap'>
               {/* 表骨架（colgroup + thead）是**字面量**、永远按 index.html 的原始顺序渲染全部
-                  8 列、不随任何状态变化：列的显隐与顺序由 wbColSettings.syncStaticHead 就地
+                  10 列、不随任何状态变化：列的显隐与顺序由 wbColSettings.syncStaticHead 就地
                   重排（隐藏 = 从 DOM 摘掉，不能重建 —— <col> 上带着拖出来的列宽、<th> 里插着
                   列宽把手）。React 只在同一位置同类型的子节点上做属性 diff，除勾选列外这几个
                   th 的 props 与文本逐字不变，重渲染时一次 DOM 写都不会发生，摘掉的列不会被塞
@@ -1079,6 +1079,7 @@ function ModelsPage() {
                   <col className='c-check' data-col='check' />
                   <col className='c-model' data-col='model' />
                   <col className='c-rate' data-col='rate' />
+                  <col className='c-description' data-col='description' />
                   <col className='c-visibility' data-col='visibility' />
                   <col className='c-source' data-col='source' />
                   <col className='c-budget' data-col='budget' />
@@ -1090,6 +1091,7 @@ function ModelsPage() {
                   <th data-col='check'>{allPickNode}</th>
                   <th data-col='model'>{t('上游模型')}</th>
                   <th data-col='rate'>{t('倍率')}</th>
+                  <th data-col='description'>{t('简介')}</th>
                   <th data-col='visibility' title={t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）')}>{t('可见性')}</th>
                   <th data-col='source'>{t('来源')}</th>
                   {/* 表头只留短标题，完整口径进问号提示（原括号长标题让表头喧宾夺主）。

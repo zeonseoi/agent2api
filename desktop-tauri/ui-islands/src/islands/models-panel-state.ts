@@ -251,6 +251,9 @@ const COLUMNS: ColumnDecl[] = [
   { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
+  // 简介：上游清单里的中文介绍（`descriptionZh`），紧跟在倍率后 ——
+  // 两列都是「这一行模型是什么」的说明性信息，放一起便于对照
+  { key: 'description', label: t('简介') },
   // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
   // 认不认它），并排放读起来才连贯。没判据的家显示 `—`（见 models-page 的
   // `visibilityCell`）—— 那是「这家没这个信息」，不是「确认可见」。

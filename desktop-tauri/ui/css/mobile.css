@@ -1896,13 +1896,20 @@
     margin: 0;
   }
   .models-table tr:not(.tr-group) > td.cell-rate,
-  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 2; }
+  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 3; }
   .models-table tr:not(.tr-group) > td.cell-rate { grid-column: 1; }
   .models-table tr:not(.tr-group) > td.cell-visibility { grid-column: 2 / -1; }
   .models-table tr:not(.tr-group) > td.cell-source,
-  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 3; }
+  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 4; }
   .models-table tr:not(.tr-group) > td.cell-source { grid-column: 1; }
   .models-table tr:not(.tr-group) > td.cell-budget { grid-column: 2 / -1; }
+
+  /* 简介是整句说明，两列里放不下 —— 单独占一整行、紧跟模型名之下
+     （读起来是「这个模型是什么」，先看简介再看读数） */
+  .models-table tr:not(.tr-group) > td.cell-description {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 
   /* ── 详情整行 ── */
   .models-table tr:not(.tr-group) > td.cell-caps,
@@ -1910,9 +1917,9 @@
   .models-table tr:not(.tr-group) > td.cell-act {
     grid-column: 1 / -1;
   }
-  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 4; }
-  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 5; }
-  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 6; }
+  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 5; }
+  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; }
+  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 7; }
 
   /* 能力：四个小图标横排，标签同排，不再单独占两行 */
   .models-table tr:not(.tr-group) > td.cell-caps {
@@ -2154,11 +2161,11 @@
      可以并排 —— 但两者都是长内容，并排会挤。
      改为：能力并进「操作」行（都是低信息量的一行），省下 39px。 */
   .models-table tr:not(.tr-group) > td.cell-caps {
-    grid-row: 4;
+    grid-row: 5;
     grid-column: 1 / 2;
   }
   .models-table tr:not(.tr-group) > td.cell-act {
-    grid-row: 4;
+    grid-row: 5;
     grid-column: 2 / -1;
   }
   /* 能力格在左半列：标签与图标挤在一行，图标可以换行 */
@@ -2169,8 +2176,8 @@
   /* 操作格在右半列：按钮铺满这一列 */
   .models-table tr:not(.tr-group) > td.cell-act .row-actions { width: 100%; }
   .models-table tr:not(.tr-group) > td.cell-act button { width: 100%; }
-  /* 映射从第 5 行提到第 4 行之后的第 5 行不变 */
-  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 5; }
+  /* 映射从第 6 行（简介占第 2 行，能力与操作在第 5 行） */
+  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; }
 
   /* 头部：模型名是这张卡的身份信息，必须拿满宽度。
      之前「上游模型」这个标签占掉一半，「raccoon-chat-ml-5-5」只剩 50px
@@ -2194,14 +2201,14 @@
        第 2 行：倍率 | 来源
        第 3 行：可见性 | 上下文
      省一整行 39px。 */
-  .models-table tr:not(.tr-group) > td.cell-rate { grid-row: 2; grid-column: 1; }
-  .models-table tr:not(.tr-group) > td.cell-source { grid-row: 2; grid-column: 2 / -1; }
-  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 3; grid-column: 1; }
-  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 3; grid-column: 2 / -1; }
-  /* 能力与操作保持第 4 行，映射第 5 行 */
-  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 4; }
-  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 4; }
-  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 5; }
+  .models-table tr:not(.tr-group) > td.cell-rate { grid-row: 3; grid-column: 1; }
+  .models-table tr:not(.tr-group) > td.cell-source { grid-row: 3; grid-column: 2 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 4; grid-column: 1; }
+  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 4; grid-column: 2 / -1; }
+  /* 能力与操作保持第 5 行，映射第 6 行（简介占第 2 行，读数整体下移一行） */
+  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 5; }
+  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 5; }
+  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; }
 }
 
 @media (max-width: 767.98px) {
