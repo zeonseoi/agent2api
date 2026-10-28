@@ -63,7 +63,9 @@ impl RequestStats {
             let tx = conn.transaction()?;
             // 先删命中的正文（明细删完就再也找不到要陪葬的正文 id 了）
             sql::delete_raw_matching(&tx, &plan)?;
-            sql::delete_matching(&tx, &plan)
+            let removed = sql::delete_matching(&tx, &plan)?;
+            tx.commit()?;
+            Ok(removed)
         })
         .unwrap_or(0)
     }

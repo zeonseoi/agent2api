@@ -128,8 +128,10 @@ import {
   SelectValue,
   Switch,
   cn,
-} from '@ui'
-import { poolItemAddress } from './accounts-shared'
+  TableRow, TableCell, Card, CardHeader, ResponsiveSheet, Table, TableHeader, TableHead, TableBody } from '@ui'
+import {
+  isPortlessSubscription, kernelInstalled, poolItemAddress, portlessSubscriptionLabel,
+} from './accounts-shared'
 import {
   batchRemove, batchTest, clearSelection, durationText, enableHint,
   formatTime, getSnapshot, isDisabledSubscriptionItem, isMirrorOffItem, isOrphanSubscriptionItem,
@@ -148,6 +150,8 @@ import {
 } from './proxies-columns'
 import { TableFooter, useClientPaging } from './table-shell'
 import { t } from '../i18n'
+import { hasProxyUsage, proxyServiceLabels } from '../../../ui-shared/proxy-usage'
+import { Badge } from '@ui'
 
 /* ─── 页面 ───────────────────────────────────── */
 
@@ -294,7 +298,7 @@ function ProxiesPage() {
     )
   }
 
-  /** 名称列第二行：协议 + 引用它的账号数（地址在隔壁的「地址」列，不在这里挤） */
+  /** 名称列第二行：协议 + 账号数与服务用途（地址在隔壁的「地址」列） */
   function nameMeta(item: ProxyPoolItem): React.ReactNode {
     const used = item.usedBy || []
     const parts: React.ReactNode[] = []
@@ -306,6 +310,9 @@ function ProxiesPage() {
           {t('{n} 个账号在用', { n: used.length })}
         </span>,
       )
+    }
+    for (const service of proxyServiceLabels(item, t)) {
+      parts.push(<span className='text-warn' key={service}>{service}</span>)
     }
     if (!parts.length) return null
     return (
@@ -328,38 +335,46 @@ function ProxiesPage() {
    * `data-copy` 给文本，`.copy-btn` 负责「⧉ → ✓」那一下反馈。
    */
   function addrCell(item: ProxyPoolItem): React.ReactNode {
+    // 内核装没装：池列表响应是首选真相源（与账号页下拉同一个），拿不到时退回
+    // 订阅接口的快照；两个都没有就是 null，此时不下「没装」的结论
+    const installed = kernelInstalled() ?? (subKernel() ? subKernel()!.installed !== false : null)
     // 禁用中的订阅节点：监听端口已随禁用一起收掉，这一格说明的是**为什么**
-    // 没有地址 —— 落到下面的「未分配端口」分支会把话说成「还没有账号引用它」，
-    // 而这条其实可能是用户自己关的
-    if (isDisabledSubscriptionItem(item) && (item.port === null || item.port === undefined)) {
+    // 没有地址 —— 落到下面的「未被使用」分支会把话说成「还没有账号用它」，
+    // 而这条其实可能是用户自己关的。**内核没装时先不提它**（见下面的说明）
+    if (installed !== false && isDisabledSubscriptionItem(item)
+      && (item.port === null || item.port === undefined)) {
       return <span className='text-subtle'>{t('已禁用（未开监听端口）')}</span>
     }
     // 解析失败：错误原文挂在 title 上（这一格铺不下详情，但用户需要知道为什么）。
-    // 例外是**还没分配端口的订阅节点** —— 那是 lazy listeners 的正常状态
-    // （没有账号引用它），不是「坏了」：画成红色「解析失败」会让整列看着像
-    // 出了事故（实测整页全红，其实一个能用的都没少）。按中性「未分配端口」
-    // 显示，原因照旧挂 title。
+    // 例外是**还没有端口的订阅节点** —— 那是 lazy listeners 的正常状态
+    // （没有账号用它 / 端口正在补建 / 所属订阅已删），不是「坏了」：画成红色
+    // 「解析失败」会让整列看着像出了事故（实测整页全红，其实一个能用的都没少）。
+    // 按中性文案显示（分档见 portlessSubscriptionLabel），原因照旧挂 title。
     if (item.resolveError) {
-      const portless = item.source === 'subscription' && (item.port === null || item.port === undefined)
+      const portless = isPortlessSubscription(item)
       return (
         <span className={portless ? 'text-subtle' : 'text-destructive'}
           title={item.resolveError}>
-          {portless ? t('未分配端口') : t('解析失败')}
+          {portless ? portlessSubscriptionLabel(item, installed) : t('解析失败')}
         </span>
       )
     }
-    // lazy listeners：订阅节点还没有监听端口（未被账号引用，或刚引用上、内核还没补建完）
+    // lazy listeners：订阅节点还没有监听端口（未被账号引用，或刚引用上、内核还没补建完）。
+    // 标签与内核状态由共享函数统一判定（与账号页下拉同一套口径）；
+    // 测试**不需要**端口（走统一测试口，见后端 pool_test），所以 title 说的是
+    // 「端口什么时候会有」—— 按成因分档，与后端 resolve_item 同口径
     if (isUnprovisionedItem(item)) {
-      // 测试**不需要**端口（走统一测试口，见后端 pool_test），所以这里说的是
-      // 「地址什么时候会有」：内核没装（没下过 / 刚被删）时说「先去下载内核」，
-      // 否则说清「引用它并保存后内核自动开端口」—— 与后端 resolve_item 同口径
-      const noKernel = subKernel()?.installed === false
+      const label = portlessSubscriptionLabel(item, installed)
       return (
         <span className='text-subtle'
-          title={noKernel
-            ? t('代理内核未安装（在「订阅管理」里下载内核后，节点会自动分配监听端口）')
-            : t('还没有监听端口（还没有账号引用它 —— 在账号里选它并保存后，内核会自动开端口）')}>
-          {poolItemAddress(item) || t('未分配端口')}
+          title={installed === false
+            ? t('代理内核未安装（下载内核后，被账号或服务线路引用的节点会自动开监听端口）')
+            : item.orphan
+              ? t('所属订阅已删除，这条节点不会再分配端口 —— 可以删除它')
+              : hasProxyUsage(item)
+                ? t('已有账号或服务线路引用它，监听端口尚未就绪；请稍等，或检查内核状态')
+                : t('还没有账号或服务线路使用它；在账号或更新设置中选中并保存后，内核会自动开端口')}>
+          {label}
         </span>
       )
     }
@@ -452,14 +467,14 @@ function ProxiesPage() {
     const busy = snapshot.pending.has(item.id)
     const picked = isPicked(item.id)
     return (
-      <tr key={item.id} className={cn(item.enabled ? '' : 'off', picked && 'bg-primary-soft')}
+      <TableRow key={item.id} className={cn(item.enabled ? '' : 'off', picked && 'bg-primary-soft')}
         data-id={item.id}>
         {columns.map(column => (
-          <td key={column.key} className={`ta-${column.align}`}>
+          <TableCell key={column.key} className={`ta-${column.align}`}>
             {cell(column.key, item, busy, picked)}
-          </td>
+          </TableCell>
         ))}
-      </tr>
+      </TableRow>
     )
   }
 
@@ -474,24 +489,24 @@ function ProxiesPage() {
   function body(): React.ReactNode {
     if (!rows.length) {
       return (
-        <tr>
-          <td colSpan={columns.length} className='empty'>
+        <TableRow>
+          <TableCell colSpan={columns.length} className='empty'>
             {ready
               ? t('还没有代理。点右上角「＋ 新增代理」手填一个，或在「订阅管理」里导入订阅节点、同步 Clash Verge 的出口。')
               : t('加载中…')}
-          </td>
-        </tr>
+          </TableCell>
+        </TableRow>
       )
     }
     if (!shown.length) {
       return (
-        <tr>
-          <td colSpan={columns.length} className='empty'>
+        <TableRow>
+          <TableCell colSpan={columns.length} className='empty'>
             {keyword
               ? t('没有匹配「{kw}」的出口', { kw: kw.trim() })
               : t('没有匹配当前筛选的出口')}
-          </td>
-        </tr>
+          </TableCell>
+        </TableRow>
       )
     }
     const blocks: React.ReactNode[] = []
@@ -502,13 +517,13 @@ function ProxiesPage() {
         current = key
         const group = groups().find(entry => entry.key === key)
         blocks.push(
-          <tr className='tr-group' key={`group:${key}:${blocks.length}`}>
-            <td colSpan={columns.length}>
+          <TableRow className='tr-group' key={`group:${key}:${blocks.length}`}>
+            <TableCell colSpan={columns.length}>
               <span className='prov-tag'>{group?.label ?? key}</span>
               {t('{n} 个', { n: groupCounts.get(key) ?? 0 })}
               {group?.note ? <span className='font-normal'>　·　{group.note}</span> : null}
-            </td>
-          </tr>,
+            </TableCell>
+          </TableRow>,
         )
       }
       blocks.push(row(item))
@@ -518,24 +533,8 @@ function ProxiesPage() {
 
   return (
     <>
-      <section className='panel'>
-        {/* 窄屏筛选抽屉的遮罩与标题栏（桌面 display:none，不占位）。
-            四个筛选控件由 CSS 搬进 .px-filter-group，这里只放壳。 */}
-        <div className={cn('px-filter-scrim', filterOpen && 'open')} onClick={() => setFilterOpen(false)} />
-        <div className={cn('px-filter-head', filterOpen && 'open')}>
-          <span className='px-filter-title'>{t('筛选')}</span>
-          <Button variant='ghost' size='sm' className='px-filter-clear'
-            disabled={!kw && vendorFilter === 'all' && srcFilter === 'all' && stFilter === 'all'}
-            onClick={() => {
-              setKw('')
-              pickVendor('all')
-              pickSource('all')
-              setStFilter('all')
-            }}>{t('清空')}</Button>
-          <Button variant='ghost' size='sm' className='px-filter-close'
-            onClick={() => setFilterOpen(false)} aria-label={t('关闭')}>✕</Button>
-        </div>
-        <div className='panel-head'>
+      <Card render={<section />} className='panel'>
+        <CardHeader className='panel-head'>
           <h2>{t('代理池')}</h2>
           <span className='panel-sub'>
             {ready ? t('{n} 个出口', { n: rows.length }) : t('加载中…')}
@@ -546,13 +545,13 @@ function ProxiesPage() {
           <span className='text-[11px] text-subtle'>{t('订阅与 Clash 的出口自动镜像进来')}</span>
         <div className='head-actions'>
           {/* 窄屏「筛选」入口：桌面隐藏（CSS 控制）。角标是生效的筛选条数 */}
-          <button type='button' className='px-filter-open' onClick={() => setFilterOpen(true)}
+          <Button size='default' variant='ghost' type='button' className='px-filter-open hidden max-[767px]:inline-flex' onClick={() => setFilterOpen(true)}
             aria-label={t('打开筛选')}>
             {t('筛选')}
             {(kw ? 1 : 0) + (vendorFilter !== 'all' ? 1 : 0) + (srcFilter !== 'all' ? 1 : 0) + (stFilter !== 'all' ? 1 : 0) > 0
-              ? <span className='px-filter-badge'>{(kw ? 1 : 0) + (vendorFilter !== 'all' ? 1 : 0) + (srcFilter !== 'all' ? 1 : 0) + (stFilter !== 'all' ? 1 : 0)}</span>
+              ? <Badge variant='brand' shape='tag' className='px-filter-badge'>{(kw ? 1 : 0) + (vendorFilter !== 'all' ? 1 : 0) + (srcFilter !== 'all' ? 1 : 0) + (stFilter !== 'all' ? 1 : 0)}</Badge>
               : null}
-          </button>
+          </Button>
           {/* 设置放在最左：低频配置项（端口范围 / 测试网址），不必挤在主操作旁边。
               弹窗是打开时才读设置（loadSettings 在弹窗内部），这里只负责开门 */}
           <Button variant='outline' disabled={snapshot.batchBusy}
@@ -574,7 +573,7 @@ function ProxiesPage() {
           <Button variant='default' disabled={snapshot.batchBusy}
             onClick={() => setModal({ item: null })}>{t('＋ 新增代理')}</Button>
         </div>
-      </div>
+      </CardHeader>
 
       {/* 内核状态条：本机内核与节点端口是全局的事（端口用尽也报在这里），
           不跟着订阅表一起收进弹窗 */}
@@ -615,7 +614,11 @@ function ProxiesPage() {
            窄屏这四个控件收进右侧抽屉（见 css/mobile.css 的 .px-filter-group），
            工具条只留一个「筛选」按钮 —— 否则面板头 + 筛选区在 812px 屏上占掉
            近一半高度，表格只剩 200px 可看。 */
-        <div className={cn('flex flex-wrap items-center gap-2.5 border-b border-border px-4 py-[10px]', 'px-filter-group', filterOpen && 'open')}>
+        <ResponsiveSheet open={filterOpen} onOpenChange={setFilterOpen} title={t('筛选')}
+          inlineClassName='flex flex-wrap items-center gap-2.5 border-b border-border px-4 py-[10px]'
+          bodyClassName='proxy-filter-body' actions={<Button variant='ghost' size='sm'
+            disabled={!kw && vendorFilter === 'all' && srcFilter === 'all' && stFilter === 'all'}
+            onClick={() => { setKw(''); pickVendor('all'); pickSource('all'); setStFilter('all') }}>{t('清空')}</Button>}>
           <InputGroup className='w-[clamp(150px,22vw,220px)]'>
             <InputGroupInput type='search' value={kw} aria-label={t('搜索节点')}
               placeholder={t('搜索名称 / 地址 / 端口')}
@@ -653,11 +656,11 @@ function ProxiesPage() {
           <span className='ml-auto text-[11px] text-subtle'>
             {t('显示 {n} / 共 {total} 个出口', { n: shown.length, total: rows.length })}
           </span>
-        </div>
+        </ResponsiveSheet>
       )}
 
       <div className='models-table-wrap'>
-        <table className='models-table proxies-table'>
+        <Table container={false} className='models-table proxies-table'>
           {/* colgroup 与 thead 的顺序都跟着列设置走，data-col 一个不少：列设置的就地
               重排、列宽把手（table-columns.js 按 data-col 定位 <col> 与 <th>）都要读它。
               默认列宽写在 <col> 的类上（没拖过的列走它），拖过的列由列宽层写 inline width */}
@@ -667,10 +670,10 @@ function ProxiesPage() {
                 className={COL_CLASS[column.key] || undefined} />
             ))}
           </colgroup>
-          <thead>
-            <tr>
+          <TableHeader>
+            <TableRow>
               {columns.map(column => (
-                <th key={column.key} data-col={column.key} className={`ta-${column.align}`}>
+                <TableHead key={column.key} data-col={column.key} className={`ta-${column.align}`}>
                   {column.key === 'pick' ? (
                     /* 全选在表头（表格的常规位置），作用域是当前筛出来的行 */
                     <Checkbox checked={allPicked} indeterminate={somePicked}
@@ -678,12 +681,12 @@ function ProxiesPage() {
                       aria-label={t('全选当前筛选出的出口')}
                       onCheckedChange={next => setAllPicked(shownIds, next)} />
                   ) : column.label}
-                </th>
+                </TableHead>
               ))}
-            </tr>
-          </thead>
-          <tbody>{body()}</tbody>
-        </table>
+            </TableRow>
+          </TableHeader>
+          <TableBody>{body()}</TableBody>
+        </Table>
       </div>
 
       <TableFooter
@@ -728,7 +731,7 @@ function ProxiesPage() {
       {subsOpen ? (
         <SubscriptionManagerDialog onClose={() => setSubsOpen(false)} />
       ) : null}
-      </section>
+      </Card>
     </>
   )
 }

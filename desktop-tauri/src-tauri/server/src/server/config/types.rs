@@ -46,6 +46,8 @@ pub const KEY_LOG_RETENTION_DAYS: &str = "logRetentionDays";
 pub const KEY_REQUEST_RETENTION_DAYS: &str = "requestLogRetentionDays";
 /// 按天聚合（统一库的 `request_daily` 表）保留天数（改名理由同上）
 pub const KEY_DAILY_RETENTION_DAYS: &str = "dailyAggregateRetentionDays";
+pub const KEY_LOG_RETENTION_COUNT: &str = "logRetentionCount";
+pub const KEY_REQUEST_RETENTION_COUNT: &str = "requestLogRetentionCount";
 
 /// 事件日志的保存目录（config.json 键）。
 ///
@@ -67,20 +69,10 @@ pub const KEY_DEBUG_DIR: &str = "debugDir";
 /// `resolve_account_proxy`），这里只存取。
 pub const KEY_UPDATE_PROXY: &str = "updateProxy";
 
-/// 「加入 beta 版」开关（config.json 键，**缺省 = 关**）。
+/// 「关注 beta 版更新」开关（config.json 键，缺省关）。
 ///
-/// 开启后「检查更新」改问 GitHub 的 Release **列表**，把预发布版（beta）一并
-/// 纳入候选、取版本号最高的一个；关闭时仍问 `/releases/latest`（GitHub 自己
-/// 排除预发布与草稿）。检查结果同时喂给面板、侧栏徽标与下载安装包三条路，
-/// 所以拨一下开关不用重启，下一次检查就换通道（含定时任务）。
-///
-/// **默认关**：beta 版由 beta 分支构建、可能不稳定，只有明确想尝鲜的人才会打开
-/// （与 `debugMode` 同一取向 —— 默认关的代价只是「功能对没打开的人不存在」）。
-///
-/// 与之配套的一条约定：**beta 版的版本号必须与 tag 一致**（tag `v3.1.0-beta.1`
-/// 就要把应用版本写成 `3.1.0-beta.1`），否则版本比较会把「当前 beta」判成比
-/// 「待装的 beta」新，通道打开也收不到更新 —— 比较规则见
-/// `core::update::version` 的预发布段处理。
+/// 与 `updateStable` 共同筛选 Release，当前安装版本不改变关注范围。
+/// beta 版本号必须与 tag 的语义化版本一致，否则无法判断更新先后。
 pub const KEY_UPDATE_BETA: &str = "updateBeta";
 
 /// 代理内核（mihomo）的**存放目录**（config.json 键）。
@@ -208,7 +200,24 @@ pub const KEY_STRIP_NEWLINE_KEEPALIVE: &str = "stripNewlineKeepalive";
 /// `parse::env_captcha_enabled`）—— Docker 想从第一次启动就关掉校验的，
 /// 在 compose / `.env` 里设它即可；设置页改过一次之后以库里的值为准
 /// （优先级「配置里的值 > 环境变量」）。
+///
+/// ── 分端（2026-10 起）──────────────────────────────────────
+/// 本键是**旧版的单开关**，现在只作为两端的共同默认值：读取时优先看
+/// [`KEY_CAPTCHA_DESKTOP`] / [`KEY_CAPTCHA_WEB`]，两者都没有才回落它。
+/// 升级时两个分端键缺省即回落旧值 —— 老用户改过的开关状态不会丢。
 pub const KEY_CAPTCHA_ENABLED: &str = "captchaEnabled";
+
+/// 桌面端（Tauri 壳）的机器人校验开关。
+///
+/// 桌面形态默认**开启**（与旧单开关一致）：登录 / 注册端点对局域网里的
+/// 其他设备同样开放，ALTCHA 是同一道门槛。用户可在设置里单独关掉 ——
+/// 本机访问而嫌算力开销时，关掉只影响桌面形态。
+pub const KEY_CAPTCHA_DESKTOP: &str = "captchaDesktop";
+
+/// 网页端（headless / Docker / 浏览器面板）的机器人校验开关。
+///
+/// headless 形态默认**开启**：这是暴露在真实网络上的登录页，暴破成本最低。
+pub const KEY_CAPTCHA_WEB: &str = "captchaWeb";
 
 /// models.dev 模型元数据开关的键（config.json 键，见 `core::model_meta`）。
 ///
@@ -302,6 +311,22 @@ pub const KEY_PROMPT_GATEWAY: &str = "promptGateway";
 ///
 /// 删掉某家 = 把这个键从对象里去掉（接口侧传 `null`）= 回到官方原文。
 pub const KEY_PROMPT_GATEWAY_TEXT: &str = "promptGatewayText";
+
+/// 插件侧读「网关自带提示词开关」时用的**约定键名**（`settings.get` 的 `key`）。
+///
+/// ── 为什么插件不能直接读 `KEY_PROMPT_GATEWAY` ────────────────
+/// `settings.get` 的默认口径是「读 `plugin.<provider>.<key>` 这条**插件私有**
+/// 配置」，而提示词开关是网关自己的用户配置（存在顶层 `promptGateway` 表里、
+/// 按 provider id 索引）。给这两个键名开一条专用回答，插件就能读到同一份用户
+/// 配置 —— 否则界面上拨了开关、实际发出去的请求不变。
+pub const PLUGIN_SETTING_GATEWAY_PROMPT: &str = "gatewayPrompt";
+
+/// 插件侧读「网关自带提示词正文覆盖」时用的约定键名（与
+/// [`PLUGIN_SETTING_GATEWAY_PROMPT`] 同一处置）。
+///
+/// 回答的形状是 `{identity, stable, dynamic}`（只含用户改过的段，缺的段回
+/// `Null` 表示「用官方原文」）。
+pub const PLUGIN_SETTING_GATEWAY_PROMPT_TEXT: &str = "gatewayPromptText";
 
 /// 写入**某一家**的提示词覆盖时的载荷（`set_prompt_provider` 的入参）。
 ///
@@ -403,6 +428,10 @@ pub struct ProviderPrompt {
 pub const DEFAULT_LOG_RETENTION_DAYS: i64 = 30;
 pub const DEFAULT_REQUEST_RETENTION_DAYS: i64 = 99999;
 pub const DEFAULT_DAILY_RETENTION_DAYS: i64 = 99999;
+pub const DEFAULT_LOG_RETENTION_COUNT: i64 = 10_000;
+pub const DEFAULT_REQUEST_RETENTION_COUNT: i64 = 1_000_000;
+pub const RETENTION_MIN_COUNT: i64 = 1;
+pub const RETENTION_MAX_COUNT: i64 = 100_000_000;
 
 /// **历史**路由优先级键：`{"workbuddy": 10, "raccoon": 20}`。
 ///
@@ -416,26 +445,23 @@ pub const KEY_PROVIDER_ROUTE: &str = "providerRoute";
 /// 上限即「近似无限」的默认值 99999 天 —— 再往上没有语义（99999 天已约 274 年），
 /// 又能防手改 config.json 写个天文数字让裁剪逻辑空转。
 ///
-/// **写侧（`stats_api::parse_days`）与读侧（`days_field`）共用这两个常量**：
+/// **写侧（`stats_api::parse_retention_value`）与读侧（`days_field`）共用这两个常量**：
 /// 若两边各写一套数字，手改文件与走接口设值就会出现两套口径
 /// （比如接口拒绝 5000 而读侧接受它）。两侧的处理方式不同是有意的：
 /// 走接口的非法值给 400（用户当场能改），手改文件的非法值回落到默认（不打扰）。
 pub const RETENTION_MIN_DAYS: i64 = 1;
 pub const RETENTION_MAX_DAYS: i64 = 99999;
 
-/// 三档保留天数（设置页「数据保留」区域）。
-///
-/// 请求日志与按天聚合的默认 99999 天是**故意的近似无限**：默认行为与
-/// 「全量保留」一致，但用户随时可以把某一项改小 —— 保存后立即裁剪
-/// （`stats_api::put_retention`），不用去各页面手动清。事件日志维持 30 天默认
-/// 不变。保留结构而不直接摊成三个函数：GET / PUT 与日志存储的回调都按
-/// 「一份 `Copy` 值」的形状传，将来若再加保留项，调用方不必跟着改签名。
+/// 数据保留设置。日志与请求明细同时受天数和数量限制，按天聚合只按天数保留。
+/// 保存后立即裁剪；缩减请求明细不会重算或删除按天聚合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionSettings {
     /// 事件日志保留天数
     pub log_days: i64,
+    pub log_count: i64,
     /// 请求日志保留天数
     pub request_days: i64,
+    pub request_count: i64,
     /// 按天聚合保留天数
     pub daily_days: i64,
 }
@@ -444,7 +470,9 @@ impl Default for RetentionSettings {
     fn default() -> Self {
         Self {
             log_days: DEFAULT_LOG_RETENTION_DAYS,
+            log_count: DEFAULT_LOG_RETENTION_COUNT,
             request_days: DEFAULT_REQUEST_RETENTION_DAYS,
+            request_count: DEFAULT_REQUEST_RETENTION_COUNT,
             daily_days: DEFAULT_DAILY_RETENTION_DAYS,
         }
     }
@@ -455,7 +483,9 @@ impl Default for RetentionSettings {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RetentionPatch {
     pub log_days: Option<i64>,
+    pub log_count: Option<i64>,
     pub request_days: Option<i64>,
+    pub request_count: Option<i64>,
     pub daily_days: Option<i64>,
 }
 

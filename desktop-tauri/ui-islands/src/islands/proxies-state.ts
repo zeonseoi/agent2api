@@ -20,11 +20,13 @@
  */
 
 import { t } from '../i18n'
+import { proxyServiceLabels, type ProxyUsage } from '../../../ui-shared/proxy-usage'
+import { acceptProxyPool } from './proxy-pool-cache'
 
 /* ─── 后端形态 ───────────────────────────────── */
 
 /** 一条池条目（`api::proxies::pool_payload` 的 item；写操作返回同形全量列表） */
-export type ProxyPoolItem = {
+export type ProxyPoolItem = ProxyUsage & {
   id: string
   name: string
   /** manual（手填）| clash（Clash Verge 同步来的只读镜像） */
@@ -63,8 +65,6 @@ export type ProxyPoolItem = {
   providerId?: string
   /** 订阅节点在机场清单里的原始节点名（池条目的展示名可能被改过） */
   node?: string
-  /** 引用这条的账号（后端在本机账号表里查出来的） */
-  usedBy?: Array<{ id?: string; name?: string; enabled?: boolean }>
   /** 孤儿订阅节点：所属订阅已不存在（后端标注），只读镜像的**唯一例外** —— 可手动删除 */
   orphan?: boolean
 }
@@ -96,6 +96,8 @@ export type ProxyClashSnapshot = {
 export type ProxyPoolPayload = {
   items?: ProxyPoolItem[]
   clash?: ProxyClashSnapshot
+  /** 内核装没装（见 accounts-shared 的 portlessSubscriptionLabel） */
+  kernelInstalled?: boolean
   /** 删除响应里带被删条目的名称（toast 文案用） */
   removed?: string
   /** 同步响应里的本次变更数（「同步 Clash Verge」按钮要报「更新了几项」） */
@@ -410,12 +412,20 @@ export function clearSelection(): void {
  * 写操作返回的整份列表就地替换（与模型管理页同一约定）。
  * 勾选状态跟着收敛：条目已不在列表里的（被删 / Clash 侧删了出口）从 selected
  * 里剔除 —— 留着会让「已选 N 个」里混进幽灵，批量删除时还会拿它去请求。
+ *
+ * 同一份列表**同时写进共享缓存**（`proxy-pool-cache.ts`）：账号页的代理下拉
+ * 读的就是它。这一页的每个读 / 写路径都经过这里（加载、启停、删除、批量、
+ * 订阅增删改后的 `refreshPool`、同步 Clash），所以「在这里写一次」就覆盖了
+ * 全部会让池变化的操作 —— 账号页因此不必等切页，禁用 / 删除立刻反映到下拉。
  */
 export function accept(payload: ProxyPoolPayload | null | undefined): void {
   if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) return
   const alive = new Set(payload.items.map(item => item.id))
   const selected = new Set([...state.selected].filter(id => alive.has(id)))
   patch({ data: payload, error: '', selected })
+  // 内核安装状态一起写进共享缓存：账号页下拉与这一页的地址列都按它区分
+  // 「未被使用」与「内核未安装」（见 accounts-shared 的 portlessSubscriptionLabel）
+  acceptProxyPool(payload.items, payload.kernelInstalled)
 }
 
 /* ─── 取数与单条动作 ─────────────────────────── */
@@ -585,11 +595,15 @@ export async function removeItem(item: ProxyPoolItem): Promise<void> {
         names: used.map(entry => escapeHtml(String(entry.name || entry.id || ''))).join(t('、')),
       })}</p>`
     : ''
+  const services = proxyServiceLabels(item, t)
+  const serviceHtml = services.length
+    ? `<p style="margin-top:6px">${t('此代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.map(escapeHtml).join(t('、')) })}</p>`
+    : ''
   const ok = await wb().wbConfirm?.ask?.({
     title: t('删除代理'),
     html: t('确定删除「<strong>{name}</strong>」？{used}', {
       name: escapeHtml(itemName(item)),
-      used: usedHtml,
+      used: usedHtml + serviceHtml,
     }),
     okText: t('删除'),
     okClass: 'danger',
@@ -692,12 +706,16 @@ export async function batchRemove(): Promise<void> {
   const usedHtml = usedCount
     ? `<p style="margin-top:6px">${t('其中 <strong>{n}</strong> 条正被账号使用 —— 删除后那些账号会回退直连。', { n: usedCount })}</p>`
     : ''
+  const services = [...new Set(deletable.flatMap(item => proxyServiceLabels(item, t)))]
+  const serviceHtml = services.length
+    ? `<p style="margin-top:6px">${t('选中的代理用于{services}；删除后这些线路将不可用，不会自动回退直连。', { services: services.map(escapeHtml).join(t('、')) })}</p>`
+    : ''
   const skipHtml = skipped
     ? `<p style="margin-top:6px">${t('另有 {n} 条是同步来的只读条目（Clash / 订阅），将跳过。', { n: skipped })}</p>`
     : ''
   const ok = await wb().wbConfirm?.ask?.({
     title: t('批量删除代理'),
-    html: `${t('确定删除选中的 <strong>{n}</strong> 个代理？', { n: deletable.length })}<p style="margin-top:6px">${namesText}</p>${usedHtml}${skipHtml}`,
+    html: `${t('确定删除选中的 <strong>{n}</strong> 个代理？', { n: deletable.length })}<p style="margin-top:6px">${namesText}</p>${usedHtml}${serviceHtml}${skipHtml}`,
     okText: t('删除'),
     okClass: 'danger',
   })

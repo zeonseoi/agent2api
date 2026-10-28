@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
-# 发版收尾脚本：v* tag 的 build 工作流跑完后，一条命令挂上 GitHub Release。
+# 发版收尾脚本：v* tag 的构建跑完后，一条命令挂上 GitHub Release。
 #
-#   bash scripts/release.sh vX.Y.Z            # 自动找该 tag 的成功 build run
+#   bash scripts/release.sh vX.Y.Z            # 自动找该 tag 的可用构建 run
 #   bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
 #
+# ── 2026-10：构建与发布都在独立构建仓库 ────────────────────────
+# 编译已搬到 `Agent2Builder/agent2api-releases`（主仓库推 tag 只发一条
+# `repository_dispatch`，见 `.github/workflows/build.yml`）。所以本脚本
+# 找 run、下载 artifact、建 Release 全部指向**构建仓库**，不是当前目录的
+# origin。目标仓库可用 `BUILD_REPO` 环境变量覆盖：
+#
+#   BUILD_REPO=SomeOwner/some-repo bash scripts/release.sh v3.2.0
+#
+# 之所以不写死成「当前 origin」：本脚本在源码仓库里运行，而 run 在构建仓库里。
+# 这个值与 `desktop-tauri/src-tauri/server/src/server/core/update/version.rs`
+# 的 `DEFAULT_REPO`、以及索引仓库 `app.json` 的 `app.repo` 必须指向同一个
+# 地方 —— 三处不一致的症状是「Release 建出来了，但没有人收到更新」。
+#
 # 做三件事：
-#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal /
-#      linux-desktop，以及 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
+#   1. 下载构建工作流的产物 artifact（windows-nsis / macos-universal /
+#      linux-desktop / android-apk / ios-ipa，以及 linux-server-amd64 / -arm64
+#      两个容器内更新包）到 dist/；
 #   2. 用 tag 所指提交的提交信息（= 更新日志，见 .agents/skills/release-flow/SKILL.md
 #      第 5 节）创建 / 更新 GitHub Release 并挂全部附件；
 #   3. 打印验收提示。
 #
 # ── artifact 与新老 tag 的关系 ──────────────────────────────────
-# 三类 artifact 都是分阶段加上的，老 tag 的 run 里可能缺：
+# 各类 artifact 都是分阶段加上的，老 tag 的 run 里可能缺：
 #   · linux-server-*（容器内一键更新，v3.0.4 起）
-#   · linux-desktop（Linux 桌面端 deb / AppImage，本次新增）
+#   · linux-desktop（Linux 桌面端 deb / AppImage，v3.0.9 起）
+#   · android-apk（手机端 APK）
+#   · ios-ipa（手机端 iOS 包，未签名 / 已签名两种都可能）
 # 缺任一类时脚本**只提醒、不中断** —— 历史 tag 仍可重跑收尾。
 #
 # 幂等可重跑：附件 `--clobber` 覆盖上传。
@@ -23,6 +39,25 @@ set -euo pipefail
 
 TAG="${1:?用法: scripts/release.sh vX.Y.Z [build-run-id]}"
 RUN_ID="${2:-}"
+
+# 构建 run 与 Release 所在的仓库（见文件头）。默认值与 `version.rs` 的
+# `DEFAULT_REPO` 一致；换构建仓库时三处一起改。
+BUILD_REPO="${BUILD_REPO:-Agent2Builder/agent2api-releases}"
+export BUILD_REPO
+
+# ── 两个仓库、两把凭据 ────────────────────────────────────────
+# 构建仓库属于专用构建账号，源码仓库属于主账号 —— 它们的 Release 各自只能
+# 由**有权限的那一方**创建 / 修改。早先脚本只用一个 `GH_TOKEN`，结果用主账号
+# 的 token 去 edit 构建仓库的 Release，报 `HTTP 404: Not Found`
+# （GitHub 对无权限的仓库回 404 而不是 403，看着像「Release 不存在」）。
+#
+# `BUILD_TOKEN`：对构建仓库有 contents:write 的 token（默认取当前 gh 活动账号）
+# `SOURCE_TOKEN`：对源码仓库有 contents:write 的 token（同上）
+#
+# 两者都省略时，脚本假定当前 `gh auth` 的账号对两个仓库都有权限 —— 单一账号
+# 管两个仓库的部署（fork、自建）就是这样，不必额外配。
+BUILD_TOKEN="${BUILD_TOKEN:-${GH_TOKEN:-}}"
+SOURCE_TOKEN="${SOURCE_TOKEN:-${GH_TOKEN:-}}"
 
 case "$TAG" in
   v*) ;;
@@ -69,9 +104,9 @@ if [ -z "$RUN_ID" ]; then
   echo "→ 查找 $TAG 触发的 build 工作流…"
   # 不按 run 整体 conclusion 过滤：只验「两个安装包 artifact 是否齐全」，
   # 构建成功但别处失败的 run 里安装包照旧可用
-  for id in $(gh run list --workflow=build --limit 30 --json databaseId,headBranch \
+  for id in $(GH_TOKEN="$BUILD_TOKEN" gh run list --workflow=release --repo "$BUILD_REPO" --limit 30 --json databaseId,headBranch \
       | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{JSON.parse(s).filter(r=>r.headBranch===process.argv[1]).forEach(r=>process.stdout.write(r.databaseId+"\n"))})' "$TAG"); do
-    if gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/actions/runs/$id/artifacts" \
+    if GH_TOKEN="$BUILD_TOKEN" gh api "repos/$BUILD_REPO/actions/runs/$id/artifacts" \
          --jq 'any(.artifacts[].name; . == "macos-universal") and any(.artifacts[].name; . == "windows-nsis")' >/dev/null 2>&1; then
       RUN_ID=$id
       break
@@ -85,7 +120,7 @@ fi
 echo "→ build run: $RUN_ID"
 
 rm -rf dist
-gh run download "$RUN_ID" -D dist
+GH_TOKEN="$BUILD_TOKEN" gh run download "$RUN_ID" --repo "$BUILD_REPO" -D dist
 EXE=$(ls dist/windows-nsis/*.exe)
 DMG=$(ls dist/macos-universal/*.dmg)
 echo "→ 已下载 $(basename "$EXE") / $(basename "$DMG")"
@@ -149,18 +184,61 @@ else
   echo "    Release 将不含 Windows 服务端包，Windows Server 用户只能自己编译"
 fi
 
+# ── 手机端安装包：默认**不挂** Release ────────────────────────
+# `INCLUDE_MOBILE=1` 才把 APK / IPA 挂上去。
+#
+# 为什么默认关：手机端还在收尾（2026-10 用户明确要求先不发布）。构建照常
+# 产出 artifact，需要时在 Actions 页面下载；只是不挂到公开 Release 上 ——
+# 挂上去就等于对外承诺「这个包能用」，而现在还不能。
+#
+# 恢复发布时：`INCLUDE_MOBILE=1 bash scripts/release.sh vX.Y.Z`，或把默认值
+# 改成 1。安装文档里关于 APK / IPA 的段落也要跟着恢复。
+INCLUDE_MOBILE="${INCLUDE_MOBILE:-0}"
+
+if [ "$INCLUDE_MOBILE" = "1" ]; then
+  # Android APK（build 工作流的 android job 上传，含 .sha256）。
+  # 接入 CI 之前的 tag 没有这个 artifact —— 提醒一句继续走。
+  #
+  # 与前面几个包不同，APK 的附件名**就是用户看到的文件名**：安装文档里写的是
+  # `Agent2API-<版本>.apk`，android job 已按这个形状重命名，这里原样上传即可。
+  if [ -d dist/android-apk ]; then
+    for file in dist/android-apk/*; do
+      ASSETS+=("$file")
+    done
+    echo "→ 已下载 $(basename "$(ls dist/android-apk/*.apk)")（含 .sha256）"
+  else
+    echo "⚠️  这个 run 里没有 android-apk 产物（APK 接入 CI 之前的 tag？）——"
+    echo "    Release 将不含手机端安装包，Android 用户只能从旧版本或自行编译获取"
+  fi
+
+  # iOS IPA（build 工作流的 ios job 上传，含 .sha256）。
+  # 默认是**未签名**包：用户拿 AltStore / SideStore 用自己的 Apple ID 重签后安装；
+  # 配齐 iOS 签名 secret 的仓库出的是已签名包。两种都能挂 Release，脚本不区分。
+  if [ -d dist/ios-ipa ]; then
+    for file in dist/ios-ipa/*; do
+      ASSETS+=("$file")
+    done
+    echo "→ 已下载 $(basename "$(ls dist/ios-ipa/*.ipa)")（含 .sha256）"
+  else
+    echo "⚠️  这个 run 里没有 ios-ipa 产物（iOS 接入 CI 之前的 tag？）——"
+    echo "    Release 将不含 iOS 安装包，iPhone 用户只能走 PWA 或自行编译"
+  fi
+else
+  echo "→ 手机端安装包按设置不挂 Release（INCLUDE_MOBILE=0）；构建产物仍在 Actions 的 artifact 里"
+fi
+
 # ── 2. 更新日志 = tag 所指提交的提交信息 ──────────────────────
 NOTES_FILE=$(mktemp)
 trap 'rm -f "$NOTES_FILE"' EXIT
 git log -1 --format=%B "$TAG" > "$NOTES_FILE"
 
 echo "→ GitHub Release"
-if gh release view "$TAG" >/dev/null 2>&1; then
+if GH_TOKEN="$BUILD_TOKEN" gh release view "$TAG" --repo "$BUILD_REPO" >/dev/null 2>&1; then
   # 已存在时也把预发布标记纠正一遍（重跑收尾 / 当初漏标的情形都靠这一行自愈）
-  gh release edit "$TAG" --prerelease="$PRERELEASE"
+  GH_TOKEN="$BUILD_TOKEN" gh release edit "$TAG" --repo "$BUILD_REPO" --prerelease="$PRERELEASE"
   echo "  ↳ 已存在，附件逐个覆盖上传（pre-release=$PRERELEASE）"
 else
-  gh release create "$TAG" --prerelease="$PRERELEASE" --title "$TAG" \
+  GH_TOKEN="$BUILD_TOKEN" gh release create "$TAG" --repo "$BUILD_REPO" --prerelease="$PRERELEASE" --title "$TAG" \
     --notes-file "$NOTES_FILE"
   echo "  ↳ 已创建（pre-release=$PRERELEASE）"
 fi
@@ -170,13 +248,47 @@ fi
 # exists（--clobber 没能先把它删掉），整批就此中断 —— 症状是 Release 建好了、
 # 附件却少了一半。逐个 + --clobber 稳定，且天然幂等（重跑只补缺的那几个）。
 for asset in "${ASSETS[@]}"; do
-  gh release upload "$TAG" "$asset" --clobber
+  GH_TOKEN="$BUILD_TOKEN" gh release upload "$TAG" "$asset" --repo "$BUILD_REPO" --clobber
 done
+
+# ── 2.5 镜像一份到源码仓库（MIRROR_TO_SOURCE=1 时）──────────────
+# 构建产物在构建仓库，但用户与贡献者习惯看源码仓库的 Releases 页 —— 那里
+# 空着会让人以为「这个版本没发」。所以再挂一份过去。
+#
+# ── 为什么放在脚本里而不是 CI ───────────────────────────────
+# magpie 在 CI 里做这件事，靠一个 75 分钟的 job 轮询构建仓库等资产齐。
+# 本项目的 Release 由**这个脚本**挂（构建仓库那份 `release.yml` 没有
+# publish job），所以轮到脚本时资产一定已经下到 `dist/` 了 —— 不需要
+# 轮询、不需要跨工作流等待，一行下载都不用重复。
+#
+# 默认开；`MIRROR_TO_SOURCE=0` 可关掉（例如只想在构建仓库留一份）。
+MIRROR_TO_SOURCE="${MIRROR_TO_SOURCE:-1}"
+if [ "$MIRROR_TO_SOURCE" = "1" ]; then
+  SOURCE_REPO="$(git remote get-url origin | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
+  if [ -z "$SOURCE_REPO" ] || [ "$SOURCE_REPO" = "$BUILD_REPO" ]; then
+    echo "⚠️  取不到源码仓库名（origin 不是 GitHub？），跳过镜像"
+  else
+    echo "→ 镜像到源码仓库 $SOURCE_REPO"
+    # 正文与构建仓库那份**逐字相同**（同一份更新日志），不追加任何说明行 ——
+    # 两个 Release 的内容应当一致，差异只该来自平台本身。
+    if GH_TOKEN="$SOURCE_TOKEN" gh release view "$TAG" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+      GH_TOKEN="$SOURCE_TOKEN" gh release edit "$TAG" --repo "$SOURCE_REPO" --prerelease="$PRERELEASE" --notes-file "$NOTES_FILE"
+    else
+      GH_TOKEN="$SOURCE_TOKEN" gh release create "$TAG" --repo "$SOURCE_REPO" --prerelease="$PRERELEASE" \
+        --title "$TAG" --notes-file "$NOTES_FILE"
+    fi
+    # 同样逐个上传：一批传会在已存在的附件上报 422（见上面那段注释）
+    for asset in "${ASSETS[@]}"; do
+      GH_TOKEN="$SOURCE_TOKEN" gh release upload "$TAG" "$asset" --repo "$SOURCE_REPO" --clobber
+    done
+    echo "  ↳ 已镜像 ${#ASSETS[@]} 个附件"
+  fi
+fi
 
 # ── 3. 验收提示 ───────────────────────────────────────────────
 echo
 echo "发版收尾完成。核对："
-echo "  [1] GitHub Release:  gh release view $TAG"
+echo "  [1] GitHub Release:  gh release view $TAG --repo $BUILD_REPO"
 if [ "$PRERELEASE" = true ]; then
   echo "      ↑ beta 版：Release 应显示 Prerelease —— 正式版用户收不到它，"
   echo "        只有开了「加入 beta 版」的用户收得到（见 .agents/skills/release-flow/SKILL.md 第 6 节）"
@@ -191,6 +303,10 @@ echo "      agent2api-server-linux-{amd64,arm64}.tar.gz 与各自的 .sha256 都
 echo "  [6] 服务端包（无 GUI）：Release 里还有 windows-server-amd64.zip（含 .sha256）。"
 echo "      两个平台的包解包后都应看到安装脚本 —— Linux: install.sh / agent2api.service"
 echo "      / agent2api.env.example；Windows: install-service.ps1"
+echo "  [7] 手机端：Release 里有 Agent2API-${TAG#v}.apk 与 .sha256；装到 Android 上"
+echo "      能启动、能添加网关并登录（版本号看系统「应用信息」页，手机端界面不显示）"
+echo "  [8] iOS：Release 里有 Agent2API-${TAG#v}.ipa 与 .sha256；未签名包需用"
+echo "      AltStore / SideStore 重签后安装，已签名包可直接走 TestFlight / 描述文件"
 if [ "$PRERELEASE" = true ]; then
-  echo "  [7] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
+  echo "  [9] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
 fi

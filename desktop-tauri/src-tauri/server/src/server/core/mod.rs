@@ -69,6 +69,7 @@ pub mod api_keys;
 pub mod auth;
 pub mod auth_http;
 pub mod assistant_sessions;
+pub mod assistant_images;
 pub mod auto_checkin;
 pub mod beijing;
 pub mod billing;
@@ -79,6 +80,9 @@ pub mod checkin_records;
 pub mod checkin_schedules;
 pub mod clash;
 pub mod client;
+// 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
+// 范围、密钥封装与自动同步的触发口径见该模块头
+pub mod cloud_sync;
 pub mod credential_maintenance;
 pub mod crypto;
 pub mod custom_providers;
@@ -96,6 +100,12 @@ pub mod login;
 pub mod model_meta;
 pub mod model_rules;
 pub mod models;
+/// 提供商插件宿主：子进程监管 + RPC 客户端 + 包安装。
+///
+/// 这是「提供商实现外置到用户安装的插件包」那条路在网关侧的入口，见模块头。
+/// 与 `providers` 的分工：`providers` 仍是网关对「一家上游」的抽象
+/// （`ProviderAdapter`），本模块提供它的远程实现 `RpcAdapter`。
+pub mod plugin_host;
 pub mod prompt;
 pub mod protocol;
 pub mod providers;
@@ -104,10 +114,18 @@ pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;
+pub mod routing_scope;
 pub mod sanitize;
 pub mod scheduled_tasks;
+// 侧边栏布局（分组 / 顺序 / 显隐）的持久化：整份 JSON 存 kv 一个键。
+// 布局的合法形状由前端 `ui/sidebar-layout.js` 拥有，后端只当不透明文档，
+// 见该模块头
+pub mod sidebar_layout;
 pub mod sub_kernel;
 pub mod subscriptions;
+// 运行环境探测（系统 / 架构 / 容器 / 服务形态 / 路径脱敏）：设置页「版本信息」
+// 的数据底座，见该模块头。纯读，不依赖 ServerState。
+pub mod system_info;
 pub mod task_state;
 pub mod travel_ledger;
 pub mod travel_records;

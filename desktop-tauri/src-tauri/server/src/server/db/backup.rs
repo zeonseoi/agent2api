@@ -118,6 +118,202 @@ const REQUIRED_TABLES: &[&str] = &["kv", "accounts"];
 /// （后到的把先到的覆盖掉，用户看到的统计却各说各话），也不必细化到读写锁。
 static RESTORE_MUTEX: Mutex<()> = Mutex::new(());
 
+// ─── 进度（恢复 / 导出，供前端轮询）──────────────────────────
+//
+// ── 为什么要有这个 ──────────────────────────────────────────
+// 整库恢复是**一次同步的长调用**：读几百 MB 的 SQL、在暂存库上执行、校验
+// schema、拍安全备份、用 Backup API 覆盖主库。整个过程在 30 秒到几分钟之间，
+// 而接口在结束时才返回 —— 界面上只有一个「恢复中…」的灰按钮，用户既看不到
+// 进展，也不知道还要等多久。
+//
+// ── 为什么是「全局快照 + 轮询」而不是事件推送 ────────────────
+// 与 `/api/update/progress`、`/api/storage/progress` 同一套：进度写入进程内的
+// 一个静态快照，前端每 500ms 拉一次。理由是不必为一条低频进度引入事件通道
+// （桌面壳与网页端两种形态都要接），而且刷新页面后仍能接上同一次恢复 ——
+// 弹窗按快照重建即可，事件流做不到（断了就丢）。
+//
+// ── 为什么没有「取消」────────────────────────────────────────
+// 恢复的每一步都不可回退：暂存库执行到一半、主库覆盖到一半时停下，留下的是
+// 一个既不是旧库也不是新库的现场。所以这个弹窗**不给关闭按钮**，只给进度与
+// 结果（见设置页的 `DbRestoreDialog`）。
+
+/// 恢复进度的一个阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestorePhase {
+    /// 空闲（没有恢复在跑）
+    Idle,
+    /// 读备份文件 + 头部校验
+    Reading,
+    /// 在暂存库上执行备份 SQL
+    Applying,
+    /// 校验 schema 版本 / 必需表 / 对齐
+    Validating,
+    /// 给当前主库拍安全备份
+    SafetyBackup,
+    /// 用 Backup API 覆盖主库
+    Replacing,
+    /// 重装内存态（config / 令牌）
+    Reloading,
+    /// 完成
+    Done,
+    /// 失败
+    Failed,
+}
+
+impl RestorePhase {
+    /// 阶段 → 界面文案。
+    ///
+    /// 文案写在后端：它是「这一步在做什么」的唯一权威（步骤顺序由这里决定），
+    /// 前端只负责显示。两处各写一份必然漂 —— 早先的「恢复中…」就是因为
+    /// 只有一句话，才说不出任何进展。
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Reading => "正在读取备份文件…",
+            Self::Applying => "正在把数据写入暂存库…",
+            Self::Validating => "正在校验备份完整性…",
+            Self::SafetyBackup => "正在备份当前数据（可回滚）…",
+            Self::Replacing => "正在替换主数据库…",
+            Self::Reloading => "正在重新加载配置…",
+            Self::Done => "恢复完成",
+            Self::Failed => "恢复失败",
+        }
+    }
+
+    /// 这个阶段占整条进度的百分比（起点）。
+    ///
+    /// 各阶段的耗时比例差得很远（读文件几秒、执行 SQL 可能几十秒、覆盖主库
+    /// 与库大小成正比），但**没有可靠的细粒度计量**（`execute_batch` 不回调）。
+    /// 所以给的是「大致位置」而不是精确百分比 —— 一个稳定的、只增不减的
+    /// 进度条比一个乱跳的假进度好。数值在 `DONE` 处收口到 100。
+    fn percent(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Reading => 5,
+            Self::Applying => 15,
+            Self::Validating => 45,
+            Self::SafetyBackup => 55,
+            Self::Replacing => 65,
+            Self::Reloading => 92,
+            Self::Done => 100,
+            Self::Failed => 100,
+        }
+    }
+}
+
+/// 恢复进度快照（前端轮询读它）。
+#[derive(Clone, Debug)]
+struct RestoreProgress {
+    phase: RestorePhase,
+    /// 失败时的原因（`Failed` 阶段才有）
+    error: Option<String>,
+    /// 完成时的结果（`Done` 阶段才有；形状与 `import_from_file` 的返回值一致）
+    result: Option<Value>,
+    /// 开始时刻（毫秒）：界面据此显示「已用时」
+    started_at: i64,
+    /// 结束时刻（毫秒；进行中为 0）
+    finished_at: i64,
+}
+
+impl RestoreProgress {
+    fn idle() -> Self {
+        Self {
+            phase: RestorePhase::Idle,
+            error: None,
+            result: None,
+            started_at: 0,
+            finished_at: 0,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "active": matches!(
+                self.phase,
+                RestorePhase::Reading
+                    | RestorePhase::Applying
+                    | RestorePhase::Validating
+                    | RestorePhase::SafetyBackup
+                    | RestorePhase::Replacing
+                    | RestorePhase::Reloading
+            ),
+            "phase": self.phase.label(),
+            "percent": self.phase.percent(),
+            "done": self.phase == RestorePhase::Done,
+            "failed": self.phase == RestorePhase::Failed,
+            "error": self.error,
+            "result": self.result,
+            "startedAt": self.started_at,
+            "finishedAt": self.finished_at,
+        })
+    }
+}
+
+/// 全局进度槽。`None` = 从没跑过恢复（界面据此不显示任何东西）。
+static RESTORE_PROGRESS: Mutex<Option<RestoreProgress>> = Mutex::new(None);
+
+/// 写一个阶段（内部用；锁失败时静默 —— 进度是锦上添花，不该让恢复本身失败）。
+fn set_phase(phase: RestorePhase) {
+    if let Ok(mut guard) = RESTORE_PROGRESS.lock() {
+        if let Some(progress) = guard.as_mut() {
+            progress.phase = phase;
+        }
+    }
+}
+
+/// 读当前进度（前端轮询）。从没跑过 → `{"active": false, "phase": ""}`。
+pub fn restore_progress() -> Value {
+    match RESTORE_PROGRESS.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(RestoreProgress::to_json)
+            .unwrap_or_else(|| RestoreProgress::idle().to_json()),
+        Err(_) => RestoreProgress::idle().to_json(),
+    }
+}
+
+/// 开始一次恢复：重置进度槽。`finish` 负责收口（成功 / 失败）。
+///
+/// ── 为什么没有 Drop 兜底 ────────────────────────────────────
+/// `import_from_file` 里 `finish` 是**唯一出口**（`let result = …` 先接住结果，
+/// 无论 Ok / Err 都会走到它），所以不存在「没收口就返回」的路径。而 release 是
+/// `panic=abort` —— 真到进程异常那一步 `Drop` 本身也不会执行，兜底代码是死的。
+/// 留着它只会让「失败时进度槽会怎样」看起来比实际复杂。
+struct RestoreRun;
+
+impl RestoreRun {
+    fn begin() -> Self {
+        if let Ok(mut guard) = RESTORE_PROGRESS.lock() {
+            *guard = Some(RestoreProgress {
+                phase: RestorePhase::Reading,
+                error: None,
+                result: None,
+                started_at: logging::now_ms(),
+                finished_at: 0,
+            });
+        }
+        Self
+    }
+
+    fn finish(self, result: Result<Value, String>) {
+        if let Ok(mut guard) = RESTORE_PROGRESS.lock() {
+            if let Some(progress) = guard.as_mut() {
+                progress.finished_at = logging::now_ms();
+                match result {
+                    Ok(value) => {
+                        progress.phase = RestorePhase::Done;
+                        progress.result = Some(value);
+                    }
+                    Err(message) => {
+                        progress.phase = RestorePhase::Failed;
+                        progress.error = Some(message);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 多行 VALUES 批的上限：行数封顶 + 字节封顶（大行单独成批，因为它拆不开）。
 /// 批量把「每行一次语句解析」摊薄成每批一次，cc-switch 实测 2 万行
 /// 21 秒 → <100ms。
@@ -131,16 +327,13 @@ const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
 
 // ── 导出 ────────────────────────────────────────────────────────
 
-/// 导出整库为 SQL 文本并写到 `target`。
+/// 导出整库为 SQL 文本并写到 `target`（桌面壳：用户选好路径，后端直写）。
 ///
 /// `include_logs = false` 为精简导出（跳过日志与调试报文五张表）。
 /// 返回 `{ bytes, tables: {表名: 行数} }` 给前端展示。
 pub fn export_to_file(db: &Db, target: &Path, include_logs: bool) -> Result<Value, String> {
-    let snapshot = snapshot_to_memory(db)?;
-    let skip: &[&str] = if include_logs { &[] } else { LOG_TABLES };
-    let dump = dump_sql(&snapshot, skip)?;
+    let (dump, tables) = export_sql(db, include_logs)?;
     atomic_write(target, dump.as_bytes())?;
-    let tables = table_row_counts(&snapshot, skip);
     logging::log(
         "[Storage]",
         &format!(
@@ -151,6 +344,19 @@ pub fn export_to_file(db: &Db, target: &Path, include_logs: bool) -> Result<Valu
         ),
     );
     Ok(json!({ "bytes": dump.len(), "tables": tables }))
+}
+
+/// 导出整库为 SQL 文本（网页端：内容直接进 HTTP 响应体，见 `backup_api`）。
+///
+/// 与 `export_to_file` 共用同一条 dump 链路 —— 两者只差「写文件」与
+/// 「交给 HTTP」这一步，格式与表清单必须完全一致（同一份备份在两端可互导）。
+/// 返回 `(SQL 文本, [{table, rows}])`。
+pub fn export_sql(db: &Db, include_logs: bool) -> Result<(String, Vec<Value>), String> {
+    let snapshot = snapshot_to_memory(db)?;
+    let skip: &[&str] = if include_logs { &[] } else { LOG_TABLES };
+    let dump = dump_sql(&snapshot, skip)?;
+    let tables = table_row_counts(&snapshot, skip);
+    Ok((dump, tables))
 }
 
 /// 主库 → 内存库的一致性快照（主连接锁只持拷贝那一下，见模块头）。
@@ -443,7 +649,7 @@ fn format_sql_blob(bytes: &[u8]) -> String {
 
 /// 快照里各业务表的行数（导出统计；只数被导出的表）。
 fn table_row_counts(conn: &Connection, skip: &[&str]) -> Vec<Value> {
-    let known = ["kv", "accounts", "logs", "requests", "request_daily", "debug_traffic", "request_raw", "account_usage_records"];
+    let known = ["kv", "accounts", "logs", "requests", "request_daily", "debug_traffic", "request_raw", "account_usage_records", "account_limiter_events"];
     known
         .iter()
         .filter(|table| !skip.contains(table))
@@ -521,6 +727,17 @@ fn account_key_warning(backup_marker: Option<String>) -> Option<String> {
 /// （见模块头「替换后要重装哪些内存状态」）。`warning` 只在密钥指纹对不上时出现
 /// ——**不阻断导入**，只是把「账号为什么解不开」明确说出来（见 `account_key_warning`）。
 pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Value, String> {
+    // 进度槽在这里开：`import_from_file` 是恢复的**唯一入口**（桌面壳的
+    // import / 网页端的上传 / 云同步下载都落到它），把开槽放在这里，三条路径
+    // 就都有进度，不必各接一次。
+    let run = RestoreRun::begin();
+    let result = import_with_progress(db, source, config_dir);
+    run.finish(result.clone());
+    result
+}
+
+/// 恢复主体（与 `import_from_file` 的差别只有进度上报）。
+fn import_with_progress(db: &Db, source: &Path, config_dir: &Path) -> Result<Value, String> {
     let sql_raw = std::fs::read_to_string(source)
         .map_err(|e| format!("读取备份文件失败: {e}"))?;
     let sql_content = sql_raw.trim_start_matches('\u{feff}');
@@ -537,6 +754,7 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
     // journal_mode 先对齐主库的 WAL —— Backup 会把源文件头拷进目标，
     // 暂存库若停在默认的回滚日志模式，覆盖后主库会被拉出 WAL
     // （cc-switch 对 auto_vacuum 处理过同一类坑）。
+    set_phase(RestorePhase::Applying);
     let temp = TempRestoreDb::new()?;
     let conn = &temp.conn;
     conn.execute_batch("PRAGMA journal_mode=WAL;")
@@ -555,6 +773,7 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
         return Err("备份文件的事务未完成，文件可能被截断".to_string());
     }
 
+    set_phase(RestorePhase::Validating);
     // 版本闸门：比当前程序新的库不收（migrate 只升不降，旧程序缺对应代码）。
     let restored_version: i64 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
@@ -573,12 +792,14 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
 
     // 覆盖主库：进程锁内再持主连接锁（两把锁顺序固定，绝无嵌套死锁）。
     // 安全备份与覆盖共用一次持锁 —— 快照必须精确代表「被替换掉的状态」。
+    set_phase(RestorePhase::SafetyBackup);
     let _guard = match RESTORE_MUTEX.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     let safety = db
         .with_mut(|main| safety_backup(main, config_dir).and_then(|safety| {
+            set_phase(RestorePhase::Replacing);
             let backup = Backup::new(conn, main).map_err(|e| format!("初始化恢复失败: {e}"))?;
             complete_backup(&backup, "恢复主数据库")?;
             Ok(safety)
@@ -587,6 +808,7 @@ pub fn import_from_file(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
     let safety = safety?;
 
     // 锁已释放：重装内存态（config 快照、面板刷新令牌），短效令牌清空。
+    set_phase(RestorePhase::Reloading);
     crate::server::config::reload();
     crate::server::access::load_refresh_tokens();
     crate::server::access::clear_access_tokens();
@@ -704,9 +926,12 @@ impl TempRestoreDb {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+        // CREATE 必须显式带上：open_with_flags 的标志原样传给 sqlite3_open_v2，
+        // 只有 READ_WRITE 时打开不存在的文件直接报 unable to open database file
+        // —— 实测（2026-10-19）整库恢复一进来就死在这一步，桌面端与网页端一起坏。
         let conn = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| format!("创建暂存库失败: {e}"))?;
         Ok(Self { path, conn })

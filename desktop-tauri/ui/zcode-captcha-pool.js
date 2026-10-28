@@ -75,6 +75,11 @@
   let lastRejected = 0;
   /** 连续失败次数（退让用） */
   let failures = 0;
+  let mintStatus = { state: 'idle', error: '' };
+
+  function setStatus(state, error = '') {
+    mintStatus = { state, error: String(error || '') };
+  }
 
   const api = () => window.workbuddyDesktop || null;
 
@@ -88,42 +93,27 @@
     if (window.wbApp?.debug) window.wbApp.debug(`[ZCodeCaptcha] [WARN] ${message}`);
   }
 
-  /** 拿一次池子概况；桥接方法缺失（界面被别的宿主打开、脚本没就位）时返回 null，循环安静地退让 */
   async function fetchStats() {
     const bridge = api();
-    if (!bridge?.zcodeCaptchaStats) return null;
-    try {
-      return await bridge.zcodeCaptchaStats();
-    } catch (error) {
-      log(`读取令牌池概况失败：${error?.message || error}`);
-      return null;
-    }
+    if (!bridge?.zcodeCaptchaStats) throw new Error('验证码令牌池接口不可用');
+    const stats = await bridge.zcodeCaptchaStats();
+    if (!stats || typeof stats !== 'object') throw new Error('验证码令牌池未返回状态');
+    if (stats.error) throw new Error(String(stats.error));
+    return stats;
   }
 
   async function pushTokens(tokens) {
     const bridge = api();
-    if (!bridge?.pushZcodeCaptchaTokens || tokens.length === 0) return false;
-    try {
-      await bridge.pushZcodeCaptchaTokens(tokens);
-      return true;
-    } catch (error) {
-      log(`令牌入池失败：${error?.message || error}`);
-      return false;
-    }
+    if (!bridge?.pushZcodeCaptchaTokens) throw new Error('验证码令牌入池接口不可用');
+    const outcome = await bridge.pushZcodeCaptchaTokens(tokens);
+    if (Number(outcome?.accepted) !== tokens.length) throw new Error('验证码令牌未全部入池');
   }
 
-  /** 铸一个（走无痕验证；`wbAliyunCaptcha` 未就绪或正忙时返回 null） */
   async function mintOne(config) {
     const captcha = window.wbAliyunCaptcha;
-    if (!captcha?.mintTraceless) return null;
-    // 用户正在拖滑块（领套餐 / 添加账号）时让路：两条流程共用 SDK 的同一个实例
+    if (!captcha?.mintTraceless) throw new Error('验证码组件尚未就绪');
     if (captcha.isBusy?.()) return null;
-    try {
-      return await captcha.mintTraceless(config);
-    } catch (error) {
-      log(`铸造失败：${error?.message || error}`);
-      return null;
-    }
+    return captcha.mintTraceless(config);
   }
 
   /** 一轮：读概况 → 需要就补 → 排下一次 */
@@ -131,54 +121,51 @@
     if (running || stopped) return;
     running = true;
     try {
+      if (mintStatus.state !== 'error') setStatus('checking');
       const stats = await fetchStats();
-      if (!stats) {
-        schedule(BACKOFF_MIN_MS);
-        return;
-      }
-      // 上游刚拒过令牌（3007）：库存即使「够」也不可信了，也补一轮
       const rejectedNow = Number(stats.rejected) || 0;
       const challenged = rejectedNow > lastRejected;
       lastRejected = rejectedNow;
-      const want = stats.needsTokens === true || challenged;
-      // 「需要铸造」的三样前提缺一不可：有账号走活动套餐、库存不足、风控配置拿得到
+      const want = stats.needsTokens === true
+        || (challenged && stats.required !== false && Number(stats.startPlanAccounts) > 0);
       if (!want) {
+        failures = 0;
+        setStatus(stats.required === false ? 'disabled' : 'idle');
         schedule(pollMsOf(stats));
         return;
       }
       // 风控配置只在真要铸的时候才去取（带 5 分钟缓存；上游那份配置很少变）
       const config = await fetchCaptchaConfig(stats);
       if (!config) {
-        schedule(BACKOFF_MIN_MS);
+        failures = 0;
+        setStatus('disabled');
+        schedule(pollMsOf(stats));
+        return;
+      }
+      if (window.wbAliyunCaptcha?.isBusy?.()) {
+        setStatus('waiting');
+        schedule(pollMsOf(stats));
         return;
       }
       const target = Math.max(1, Number(stats.target) || 1);
       const ready = Number(stats.ready) || 0;
       const need = Math.min(maxPerRoundOf(stats), Math.max(0, target - ready));
-      const tokens = [];
+      setStatus('minting');
       for (let index = 0; index < need; index += 1) {
         const param = await mintOne(config);
-        if (!param) break;
-        tokens.push({ param, region: config.region || '' });
-        // 连续铸造之间留一点间隔：SDK 的同一个实例连着跑两轮会互相干扰
+        if (!param) {
+          setStatus('waiting');
+          break;
+        }
+        await pushTokens([{ param, region: config.region || '' }]);
         await new Promise(resolve => window.setTimeout(resolve, 500));
       }
-      if (tokens.length === 0) {
-        // 一个都没铸出来（SDK 不可用 / 正忙）—— 退让，别原地空转
-        failures += 1;
-        if (failures >= 2) {
-          try { window.wbAliyunCaptcha?.resetMint?.(); } catch {}
-        }
-        const delay = Math.min(BACKOFF_MIN_MS * failures, BACKOFF_MAX_MS);
-        warn(`本轮未能铸出令牌（连续失败 ${failures} 次），将在 ${delay}ms 后重试`);
-        schedule(delay);
-        return;
-      }
-      await pushTokens(tokens);
       failures = 0;
+      if (mintStatus.state !== 'waiting') setStatus('idle');
       schedule(pollMsOf(stats));
     } catch (error) {
       failures += 1;
+      setStatus('error', error?.message || error);
       if (failures >= 2) {
         try { window.wbAliyunCaptcha?.resetMint?.(); } catch {}
       }
@@ -204,23 +191,20 @@
     if (configCache.value && configCache.expiresAt > Date.now()) return configCache.value;
     const bridge = api();
     const accountId = String(stats.captchaAccountId || '');
-    if (!bridge?.zcodeClaimCaptchaConfig || !accountId) return null;
-    try {
-      const config = await bridge.zcodeClaimCaptchaConfig(accountId);
-      if (!config?.enabled || !config.sceneId) {
-        // 上游此刻不要验证码（或配置不完整）：按「不铸造」处理，下一轮再问
-        log('上游风控配置未启用（enabled:false）——不铸造');
-        return null;
-      }
-      configCache = {
-        value: { sceneId: config.sceneId, prefix: config.prefix, region: config.region },
-        expiresAt: Date.now() + CONFIG_TTL_MS,
-      };
-      return configCache.value;
-    } catch (error) {
-      log(`取风控配置失败：${error?.message || error}`);
+    if (!bridge?.zcodeClaimCaptchaConfig || !accountId) throw new Error('没有可用账号获取验证码配置');
+    const config = await bridge.zcodeClaimCaptchaConfig(accountId);
+    if (config?.enabled === false) {
+      log('上游风控配置未启用（enabled:false）——不铸造');
       return null;
     }
+    if (!config?.enabled || !config.sceneId || !config.prefix) {
+      throw new Error('上游验证码配置不完整');
+    }
+    configCache = {
+      value: { sceneId: config.sceneId, prefix: config.prefix, region: config.region },
+      expiresAt: Date.now() + CONFIG_TTL_MS,
+    };
+    return configCache.value;
   }
 
   function schedule(delay) {
@@ -237,14 +221,15 @@
 
   function stop() {
     stopped = true;
+    setStatus('idle');
     window.clearTimeout(timer);
   }
 
-  window.wbZcodeCaptchaPool = { start, stop };
+  window.wbZcodeCaptchaPool = { start, stop, status: () => ({ ...mintStatus }) };
 
   // 自启：界面加载完就开始守着（桌面端与 headless 面板都走这里 —— 两种部署的
-  // 桥接方法都由各自的实现提供，见文件头）。桥接方法真缺失时循环安静退让，
-  // 不会有报错刷屏（见 fetchStats 的返回 null 分支）
+  // 桥接方法都由各自的实现提供，见文件头）。桥接方法缺失时 fetchStats 抛错，
+  // 循环按退让节奏重试，不会刷屏（错误只落控制台与 mintStatus）
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start, { once: true });
   } else {

@@ -142,6 +142,7 @@
         // 客户端（来源 UA 的归类，见后端 core::client）：同列的 track 与
         // page-requests.css 的 grid-template-columns 默认值必须同步
         { key: 'client', sel: '.req-client', track: '110px' },
+        { key: 'apiKey', sel: '.req-api-key', track: '140px' },
         { key: 'dur', sel: '.req-dur', track: '96px' },
         { key: 'usage', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
         { key: 'error', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
@@ -155,17 +156,9 @@
        */
       columnsOf: visibleColumnsOf(() => window.wbRequestsPanel?.visibleColumns?.()),
     },
-    // 签到记录（islands/checkin-records-tab.tsx）：table 模式里唯一**动态表头**的一张 ——
-    // 它的表头与表体都由 React 按列设置现渲染（标签页切走即卸载重建，就地重排那一路
-    // 跟不过重建），所以没有 syncStaticHead 的份；列集合变化由渲染方重画后调 repaint。
-    // root 只在「签到记录」标签页打开时存在（首次进页靠 awaitRoot 等它出现）。
-    {
-      id: 'checkin-records',
-      mode: 'table',
-      root: '.page[data-page="checkin"] table.ck-records-table',
-      columns: ['time', 'account', 'provider', 'source', 'outcome', 'detail'].map(key => ({ key })),
-      columnsOf: visibleColumnsOf(() => window.wbCheckinRecords?.visibleColumns?.()),
-    },
+    // 签到记录那张表**不在**这里登记了：它已随签到中心搬进插件包（页面在
+    // iframe 里，跨源，宿主的列宽拖动脚本碰不到它的 DOM）。插件页自带列宽与
+    // 筛选，与宿主这套表头机制无关。
     // 「获取模型」弹窗的表（islands/models-fetch-modal.tsx 动态创建，关闭即移除）。
     // 两个形态各一张表、各存一份列宽：列集合不同（内置家七列 / 自定义家三列），
     // 混用一份覆盖值会让「拖过的 provider 列宽」串到自定义家去（那边没有这列）。

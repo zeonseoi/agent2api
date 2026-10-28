@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react'
 import { Icon, type IconName } from './Icon'
 import { useStore, store } from '../state/store'
 import { LoginPage } from '../pages/LoginPage'
+import { isRateLimited } from '../lib/format'
 import { t } from '../i18n'
+import { BottomNavigation, BottomNavigationItem, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, StatusDot, Toaster, createToastManager } from '@ui'
+
+const feedbackManager = createToastManager()
 
 /**
  * 应用外壳：页面容器 + 底部标签栏 + 轻提示 + 凭证缺失层。
@@ -25,44 +29,79 @@ const TABS: TabDef[] = [
 /** 一级页集合：这些 screen 显示底部标签栏 */
 export const PRIMARY_SCREENS = new Set(TABS.map(tab => tab.id))
 
+/**
+ * 软键盘是否弹起。
+ *
+ * ── 为什么需要这个判断 ────────────────────────────────────────
+ * Android 的 `adjustResize` 会让 WebView 随键盘一起缩小，标签栏是 flex 布局
+ * 的最后一个子项，于是它被顶到键盘正上方 —— 用户看到的是「输入框 + 一条
+ * 导航栏 + 键盘」，而他要的是「输入框 + 键盘」。聊天类应用的通行做法就是
+ * 键盘弹起时把标签栏收起来（WhatsApp / Telegram 都是这样）。
+ *
+ * ── 怎么判 ────────────────────────────────────────────────────
+ * `visualViewport` 的高度比 `innerHeight` 小出一大截（> 120px）就是键盘在
+ * 占位。阈值取 120 而不是 0：移动浏览器的地址栏收起 / 展开也会让两者差几十
+ * 像素，那是正常滚动，不该把标签栏闪一下。
+ *
+ * 没有 `visualViewport` 的老 WebView 直接返回 false —— 标签栏常驻，行为与
+ * 改动前一致，不会因为拿不到 API 就少一条导航。
+ */
+export function useKeyboardOpen(): boolean {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const threshold = 120
+    const check = () => {
+      const covered = window.innerHeight - viewport.height - viewport.offsetTop
+      setOpen(covered > threshold)
+    }
+    viewport.addEventListener('resize', check)
+    viewport.addEventListener('scroll', check)
+    check()
+    return () => {
+      viewport.removeEventListener('resize', check)
+      viewport.removeEventListener('scroll', check)
+    }
+  }, [])
+
+  return open
+}
+
 export function TabBar() {
   const state = useStore()
+  const keyboardOpen = useKeyboardOpen()
   const active = state.stack.length === 0 ? state.route.screen : ''
   if (!PRIMARY_SCREENS.has(state.route.screen) || state.stack.length > 0) return null
-  const limited = state.session?.accounts?.accounts?.filter(a => a.enabled && hasRateLimit(a)).length || 0
+  // 键盘弹起时让位：那一条高度留给输入框，而不是导航
+  if (keyboardOpen) return null
+  const limited = state.session?.accounts?.accounts?.filter(a => a.enabled && isRateLimited(a)).length || 0
   return (
-    <nav className='m-tabbar' aria-label={t('主导航')}>
+    <BottomNavigation className='m-tabbar' aria-label={t('主导航')}>
       {TABS.map(tab => (
-        <button
+        <BottomNavigationItem
           key={tab.id}
-          type='button'
+          active={active === tab.id}
           className='m-tab'
-          data-active={active === tab.id}
           onClick={() => store.go(tab.id)}
-          aria-current={active === tab.id ? 'page' : undefined}
         >
           <Icon name={tab.icon} />
           <span>{tab.label}</span>
-          {tab.id === 'more' && limited > 0 ? <i className='m-dot' /> : null}
-        </button>
+          {tab.id === 'more' && limited > 0 ? <StatusDot variant='destructive' className='m-dot' /> : null}
+        </BottomNavigationItem>
       ))}
-    </nav>
+    </BottomNavigation>
   )
-}
-
-function hasRateLimit(account: { rateLimits?: Record<string, unknown> }): boolean {
-  return Boolean(account.rateLimits && Object.keys(account.rateLimits).length)
 }
 
 /** 轻提示 */
 export function Toast() {
-  const state = useStore()
-  const toast = state.toast
-  return (
-    <div className='m-toast' data-show={Boolean(toast)} role='status' aria-live='polite'>
-      {toast?.text || ''}
-    </div>
-  )
+  const { toast } = useStore()
+  useEffect(() => {
+    if (toast) feedbackManager.add({ id: 'mobile-feedback', title: toast.text, type: toast.tone === 'err' ? 'error' : toast.tone === 'warn' ? 'warning' : 'success', timeout: 3500 })
+  }, [toast])
+  return <Toaster manager={feedbackManager} position='bottom-center' />
 }
 
 /**
@@ -83,7 +122,15 @@ export function AuthGate() {
   const [busy, setBusy] = useState(false)
   if (!state.authLost) return null
 
-  // 打包形态走应用内登录页（login / key 两种模式它都覆盖）
+  /**
+   * APK 里登录页是整屏的，用户被登出后看不到「设置 → 服务器」。
+   * 登录页给了「换一台服务器」入口，它把用户压进服务器页 —— 这一屏必须让开，
+   * 否则登录页盖住整个界面，列表点不到。authLost 故意不清：用户取消返回后
+   * 登录页会重新盖上来，换到新服务器也会按新地址重新弹。
+   */
+  if (state.packaged && state.route.screen === 'servers') return null
+
+  // 打包形态走整屏的应用内登录页（login / key 两种模式它都覆盖）
   if (state.packaged) return <LoginPage mode={state.authLost} />
 
   const submit = async () => {
@@ -97,82 +144,21 @@ export function AuthGate() {
     setBusy(false)
   }
 
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 80,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 20,
-        background: 'color-mix(in srgb, black 46%, transparent)',
-        backdropFilter: 'blur(4px)',
-      }}
-    >
-      <div
-        style={{
-          width: '100%',
-          maxWidth: 340,
-          padding: 20,
-          borderRadius: 18,
-          background: 'var(--m-surface)',
-          border: '1px solid var(--m-line)',
-          boxShadow: 'var(--m-shadow-2)',
-        }}
-      >
-        <h2 style={{ margin: 0, fontSize: 17 }}>
-          {state.authLost === 'login' ? t('需要重新登录') : t('需要网关 API Key')}
-        </h2>
-        <p style={{ margin: '8px 0 0', fontSize: 12.5, lineHeight: 1.65, color: 'var(--m-text-2)' }}>
-          {state.authLost === 'login'
-            ? t('会话已过期。重新登录后会自动回到手机端。')
-            : t('这个面板没有管理员，用一把已启用的 API Key 访问（在桌面端「网关 Key」页创建）。')}
-        </p>
-        {state.authLost === 'key' ? (
-          <input
-            type='password'
-            value={key}
-            onChange={event => setKey(event.target.value)}
-            placeholder='sk-…'
-            autoComplete='off'
-            style={{
-              width: '100%',
-              boxSizing: 'border-box',
-              marginTop: 14,
-              height: 42,
-              padding: '0 12px',
-              borderRadius: 11,
-              border: '1px solid var(--m-line-strong)',
-              background: 'var(--m-surface-2)',
-              color: 'var(--m-text)',
-              fontFamily: 'var(--m-mono)',
-              // 16px 是 iOS 的阈值：小于它聚焦时 Safari 会自动放大整页
-              fontSize: 16,
-            }}
-          />
-        ) : null}
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          {state.authLost === 'login' ? (
-            <button
-              type='button'
-              className='m-btn'
-              onClick={() => {
-                window.location.href = '/login?next=%2Fm'
-              }}
-            >
-              {t('去登录')}
-            </button>
-          ) : (
-            <button type='button' className='m-btn' onClick={() => void submit()} disabled={busy || !key.trim()}>
-              {busy ? t('验证中…') : t('保存并继续')}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  )
+  return <Dialog open disablePointerDismissal>
+    <DialogContent className='w-[min(340px,calc(100vw-40px))]' showCloseButton={false}>
+      <DialogHeader><DialogTitle>{state.authLost === 'login' ? t('需要重新登录') : t('需要网关 API Key')}</DialogTitle></DialogHeader>
+      <DialogBody>
+        <p className='text-[12.5px] leading-relaxed text-subtle'>{state.authLost === 'login'
+          ? t('会话已过期。重新登录后会自动回到手机端。')
+          : t('这个面板没有管理员，用一把已启用的 API Key 访问（在桌面端「网关 Key」页创建）。')}</p>
+        {state.authLost === 'key' && <Input type='password' value={key} onChange={event => setKey(event.target.value)} placeholder='sk-…' autoComplete='off' />}
+      </DialogBody>
+      <DialogFooter>
+        {state.authLost === 'login' ? <Button size='touch' className='w-full' onClick={() => { window.location.href = '/login?next=%2Fm' }}>{t('去登录')}</Button>
+          : <Button size='touch' className='w-full' onClick={() => void submit()} disabled={busy || !key.trim()}>{busy ? t('验证中…') : t('保存并继续')}</Button>}
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 }
 
 /**

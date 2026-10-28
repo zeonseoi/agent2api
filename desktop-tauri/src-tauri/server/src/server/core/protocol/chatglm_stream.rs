@@ -281,7 +281,7 @@ impl ChatFromChatglmStream {
             return Vec::new();
         }
         // 一个内容帧都没给就收尾：这是「成功但什么都没有」的流，
-        // 记成成功会让下游按空回答计费（判据与 Command Code 那台同款）
+        // 记成成功会让下游按空回答计费（判据与 AI SDK NDJSON 那台同款）
         if !self.started {
             return self.fail_message("上游返回空响应（没有任何内容）", 429);
         }
@@ -326,7 +326,7 @@ impl ChatFromChatglmStream {
     ///
     /// 错误路径**不**补 usage 帧：带 `usage` 且 `choices` 为空的帧正是 OpenAI
     /// 流式的收尾形态，部分客户端据此判定「流已结束」—— 在它之后补错误帧
-    /// 等于让那些客户端看不到失败（与 Command Code 那台的论证逐字相同）。
+    /// 等于让那些客户端看不到失败（与 AI SDK NDJSON 那台的论证逐字相同）。
     fn fail_message_with_kind(
         &mut self,
         message: &str,

@@ -75,10 +75,12 @@ type SheetContentProps = DialogPrimitive.Popup.Props & {
   /** 顶部拖拽手柄，默认 true。嵌套抽屉里关掉，避免两层手柄叠在一起 */
   showHandle?: boolean
   /**
-   * 形态：`bottom` 贴底（手机默认）；`center` 居中（桌面浏览器打开时用）。
+   * 形态：`bottom` 贴底（手机默认）；`center` 居中（桌面浏览器打开时用）；
+   * `right` 贴右侧（筛选面板这类「列一组条件」的抽屉）。
+   *
    * 默认 `bottom` —— 这份组件的存在理由就是移动端。
    */
-  side?: 'bottom' | 'center'
+  side?: 'bottom' | 'center' | 'right' | 'left'
   /**
    * 关闭后是否把 Portal 留在 DOM 里（内容保留、只是隐藏），默认 false。
    * 语义与 DialogContent 的 keepMounted 相同：内容里挂着有状态的第三方 DOM
@@ -97,6 +99,8 @@ function SheetContent({
   ...props
 }: SheetContentProps) {
   const centered = side === 'center'
+  const right = side === 'right'
+  const left = side === 'left'
   return (
     <SheetPortal keepMounted={keepMounted}>
       <SheetOverlay />
@@ -112,16 +116,29 @@ function SheetContent({
                 'data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[.985]',
                 'data-closed:animate-out data-closed:fade-out-0 data-closed:fill-mode-forwards',
               ]
-            : [
-                'inset-x-0 bottom-0 max-h-[85svh] rounded-t-xl',
-                'data-open:animate-in data-open:slide-in-from-bottom data-open:fade-in-0',
-                'data-closed:animate-out data-closed:slide-out-to-bottom data-closed:fade-out-0 data-closed:fill-mode-forwards',
-              ],
+            : right
+              ? [
+                  // 侧边抽屉最多占 86vw，保留关闭与上下文区域。
+                  'top-0 right-0 bottom-0 h-full w-[min(340px,86vw)] rounded-l-xl',
+                  'data-open:animate-in data-open:slide-in-from-right data-open:fade-in-0',
+                  'data-closed:animate-out data-closed:slide-out-to-right data-closed:fade-out-0 data-closed:fill-mode-forwards',
+                ]
+              : left
+                ? [
+                    'top-0 left-0 bottom-0 h-full w-[min(340px,86vw)] rounded-r-xl',
+                    'data-open:animate-in data-open:slide-in-from-left data-open:fade-in-0',
+                    'data-closed:animate-out data-closed:slide-out-to-left data-closed:fade-out-0 data-closed:fill-mode-forwards',
+                  ]
+                : [
+                  'inset-x-0 bottom-0 max-h-[85svh] rounded-t-xl',
+                  'data-open:animate-in data-open:slide-in-from-bottom data-open:fade-in-0',
+                  'data-closed:animate-out data-closed:slide-out-to-bottom data-closed:fade-out-0 data-closed:fill-mode-forwards',
+                ],
           className
         )}
         {...props}
       >
-        {showHandle && !centered && (
+        {showHandle && !centered && !right && !left && (
           <div
             aria-hidden='true'
             className='mx-auto mt-2 mb-1 h-1 w-9.5 shrink-0 rounded-pill bg-border-strong'

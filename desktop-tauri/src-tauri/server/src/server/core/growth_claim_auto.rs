@@ -13,10 +13,15 @@
 //! `claimed` 的跳过。已完成 → 直接 claim；未完成 → 先点亮（accept + 上报）
 //! 再 claim。无期限的任务不碰。
 //!
-//! ── 上游调用交给官方实现 ────────────────────────────────────
-//! 列表（`growth::list_tasks`）、单任务「accept → 上报 → 回读 → claim」
-//! （`growth::process_task(auto_claim = true)`）都是官方 `providers::workbuddy
-//! ::growth` 的既有实现，本模块只负责「挑哪几条要领」与「什么时候醒」。
+//! ── 上游调用走提供商插件 ────────────────────────────────────
+//! 官方 v3.3.0 把执行体搬进了插件（`ProvidersPlugin/Agent2Providers` 的
+//! `workbuddy::admin`），网关这一侧只剩 `admin.action` 的透传。所以本模块
+//! 通过两条动作干活：`growth.status` 拿任务清单、`growth.task`（`mode=full`）
+//! 点亮并领取。**到期判据依赖插件在任务行里透传 `validEnd`**（上游的
+//! `valid_end`）—— 官方 v0.2.1 的 `task_row` 只回 `unlockAt`，本 fork 用的
+//! `agent2api-providers` 3.3.0-beta.4-fork.1 补了 `validStart` / `validEnd`。
+//! 装了不含该字段的插件时本模块不会命中任何任务（判据保守返回 false，
+//! 不报错、也不误领）—— 升级插件即可，无需改本文件。
 //!
 //! ── 台账 ────────────────────────────────────────────────────
 //! 每领回一条落一行 `travel_records`（`outcome = task_claimed`，见
@@ -32,7 +37,6 @@ use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::account_store::AccountStore;
-use crate::server::core::providers::workbuddy::growth::{self, GrowthAccount};
 use crate::server::core::providers::workbuddy::Region as WorkBuddyRegion;
 use crate::server::core::travel_records;
 use crate::server::logging;
@@ -65,15 +69,24 @@ pub fn set_claim_auto(enabled: bool) {
 
 // ─── 判据 ────────────────────────────────────────────────────
 
-/// 任务是否「快到期」：`valid_end` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
+/// 任务是否「快到期」：`validEnd` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
 ///
-/// `valid_end` 是 ISO 8601 带时区串（如 `2026-11-02T23:59:00+08:00`）。取它
+/// `validEnd` 是 ISO 8601 带时区串（如 `2026-11-02T23:59:00+08:00`）。取它
 /// 的北京日期键，往前推一天得到「该领的那天」；今天到了或过了就返回 true
 /// （到期当天/之后仍会尝试，直到上游把它判成已领或任务下线）。
 ///
-/// 无期限（`valid_end` 为 null）的任务**不碰** —— 用户要的是「有结束时间的任务」。
+/// 无期限（`validEnd` 为 null）的任务**不碰** —— 用户要的是「有结束时间的任务」。
+///
+/// ── 键名为什么是 `validEnd` 而不是 `valid_end` ────────────────
+/// 这条判据读的是**插件回包**（`growth.status` 的 `tasks[].*`），不是上游原始
+/// JSON：插件那层已经把 `task_code` / `accept_status` 归一连成 `code` /
+/// `status`。到期字段同理归一到驼峰（与界面读的键一致）。
 fn due_for_claim(task: &Value) -> bool {
-    let Some(end) = task.get("valid_end").and_then(Value::as_str) else {
+    let end = task
+        .get("validEnd")
+        .or_else(|| task.get("valid_end"))
+        .and_then(Value::as_str);
+    let Some(end) = end else {
         return false;
     };
     let Some(threshold) = claim_threshold_day(end) else {
@@ -96,17 +109,21 @@ fn claim_threshold_day(end: &str) -> Option<String> {
     Some((end_day - chrono::Days::new(1)).format("%Y-%m-%d").to_string())
 }
 
-/// 国内版账号（成长任务只对这些账号有意义；判据与 `growth::supports_growth`
-/// 同源）。
+/// 国内版账号（成长任务只对这些账号有意义）。
 ///
 /// 与官方旅行排程的账号过滤是同一段判据。**不去共用一个公共函数**
 /// ——两个调度器要彼此完全独立，共享一个辅助函数会把它们的生命周期重新绑在一起
-/// （改一处影响两处）。这段只有 5 行，重复比耦合划算。
+/// （改一处影响两处）。这段只有几行，重复比耦合划算。
 fn cn_accounts(store: &AccountStore) -> Vec<Value> {
     store
         .accounts_for_provider(WorkBuddyRegion::Cn.provider_id())
         .into_iter()
-        .filter(|account| growth::supports_growth(account))
+        .filter(|account| {
+            !account
+                .get("enterpriseId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
         .collect()
 }
 
@@ -124,19 +141,22 @@ fn reason_source(reason: &str) -> &'static str {
 /// 对所有国内版账号扫一遍成长任务，领掉「快到期」的。
 ///
 /// ── 判据与动作 ──────────────────────────────────────────────
-/// 只看 `valid_end` 非空、且今天 ≥ 到期日 − 1 天的任务；已 `claimed` 的跳过。
-/// 已完成 → 直接 claim；**未完成 → 先点亮（accept + 上报）再 claim**。未映射 /
-/// 不可伪造 / 未解锁的任务由官方 `process_task` 自己保守跳过，这里不重复判。
-///
-/// ── 为什么复用 `process_task(auto_claim = true)` ─────────────
-/// 它已经是「accept → 上报 → 回读 → claim」的一体流程（含 accept 回读验证），
-/// 正是「点亮 + 领取」。这里只是把「挑哪几条」的逻辑放在外面。
+/// 只看 `validEnd` 非空、且今天 ≥ 到期日 − 1 天的任务；已 `claimed` 的跳过。
+/// 领取一律走插件的 `growth.task` + `mode=full`（它内部是「accept → 上报 →
+/// 回读 → claim」的一体流程，含 accept 回读验证）；未映射 / 不可伪造 / 未解锁
+/// 的任务由插件自己保守跳过，这里不重复判。
 ///
 /// 返回 `(领取成功数, 失败数)`，供轮次汇总日志用。
 pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usize) {
     let accounts = cn_accounts(store);
     let mut claimed = 0usize;
     let mut failed = 0usize;
+    let Some(adapter) = crate::server::core::plugin_host::lookup(
+        WorkBuddyRegion::Cn.provider_id(),
+    ) else {
+        logging::verbose("[Growth]", "未装入 WorkBuddy 提供商插件，到期领取跳过");
+        return (0, 0);
+    };
     for account in &accounts {
         let id = account.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
@@ -147,53 +167,37 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .unwrap_or(id);
-        let Some(account_ctx) = GrowthAccount::from_store(store, id) else {
+        let Ok(status) = adapter
+            .admin_action(store, id, "growth.status", &Value::Null)
+            .await
+        else {
             continue;
         };
-        // 两个口径都拉（小程序限定任务只在带 mp 头的列表里下发），合并去重
-        let mut tasks: Vec<Value> = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
-        for mp in [false, true] {
-            let Ok(list) = growth::list_tasks(&account_ctx, mp).await else {
-                continue;
-            };
-            for task in list {
-                let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
-                if code.is_empty() || seen.iter().any(|item| item == code) {
-                    continue;
-                }
-                seen.push(code.to_string());
-                tasks.push(task);
-            }
-        }
+        // 插件已把默认口径与小程序口径合并去重（见插件 admin.rs 的 growth_status）
+        let tasks = status
+            .get("tasks")
+            .and_then(|block| block.get("tasks"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         for task in &tasks {
-            let code = task.get("task_code").and_then(Value::as_str).unwrap_or("");
+            let code = task.get("code").and_then(Value::as_str).unwrap_or("");
             if code.is_empty() {
                 continue;
             }
-            let status = task.get("accept_status").and_then(Value::as_str).unwrap_or("");
-            if status == "claimed" {
+            if task.get("status").and_then(Value::as_str) == Some("claimed") {
                 continue;
             }
             if !due_for_claim(task) {
                 continue;
             }
-            let report = growth::process_task(&account_ctx, code, task, true).await;
-            match report.outcome {
-                growth::TaskOutcome::Done => {
-                    claimed += 1;
-                    travel_records::record(
-                        reason_source(reason),
-                        reason,
-                        id,
-                        name,
-                        WorkBuddyRegion::Cn.provider_id(),
-                        travel_records::OUTCOME_TASK_CLAIMED,
-                        Some(format!("{}（+{} 积分）", report.message, report.credit)),
-                        None,
-                    );
-                }
-                growth::TaskOutcome::Failed => {
+            let payload = json!({ "code": code, "mode": "full" });
+            let report = match adapter
+                .admin_action(store, id, "growth.task", &payload)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
                     failed += 1;
                     travel_records::record(
                         reason_source(reason),
@@ -203,10 +207,41 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
                         WorkBuddyRegion::Cn.provider_id(),
                         travel_records::OUTCOME_TASK_FAILED,
                         None,
-                        Some(format!("{code}：{}", report.message)),
+                        Some(format!("{code}：{}", error.message)),
+                    );
+                    continue;
+                }
+            };
+            let message = report.get("message").and_then(Value::as_str).unwrap_or("");
+            let credit = report.get("credit").and_then(Value::as_i64).unwrap_or(0);
+            match report.get("outcome").and_then(Value::as_str).unwrap_or("") {
+                "done" => {
+                    claimed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_CLAIMED,
+                        Some(format!("{message}（+{credit} 积分）")),
+                        None,
                     );
                 }
-                // Already / Skipped：不是事件（已领 / 未映射 / 不可伪造 / 未解锁）
+                "failed" => {
+                    failed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_FAILED,
+                        None,
+                        Some(format!("{code}：{message}")),
+                    );
+                }
+                // already / skipped：不是事件（已领 / 未映射 / 不可伪造 / 未解锁）
                 _ => {}
             }
         }
@@ -446,10 +481,12 @@ mod tests {
         assert_eq!(claim_threshold_day("not-a-date").as_deref(), None);
     }
 
-    /// 无 `valid_end` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
+    /// 无 `validEnd` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
     #[test]
     fn due_for_claim_ignores_tasks_without_valid_end() {
-        assert!(!due_for_claim(&json!({ "task_code": "x" })));
+        assert!(!due_for_claim(&json!({ "code": "x" })));
+        assert!(!due_for_claim(&json!({ "validEnd": Value::Null })));
+        // 上游原始键名也认（插件未归一时仍能判）
         assert!(!due_for_claim(&json!({ "valid_end": Value::Null })));
     }
 }

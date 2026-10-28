@@ -320,9 +320,21 @@ impl AccountStore {
     /// 于是「每次转发少解析 20 条记录的 JSON」是这条改造里收益最直接的一处。
     pub(crate) fn record_by_id(&self, _guard: &MutexGuard<'_, ()>, id: &str) -> Option<StoredAccount> {
         let db = self.inner.db.as_ref()?;
-        db.with(|conn| sql::load_by_id(conn, id))
-            .and_then(Result::ok)
-            .flatten()
+        let result = db.with(|conn| sql::load_by_id(conn, id));
+        // 「这一行读不出来」与「没这条记录」在这里都退化成 None —— 本函数是
+        // 转发链路上的热路径（每个请求按 id 取会话），不能为一条坏记录把请求
+        // 打挂。但**不能完全静默**：读不出来通常是密钥不匹配，用户会看到
+        // 「账号突然用不了了」却找不到原因。原因已由 `sql::load_by_id` 写进
+        // 错误文案，这里按文案节流上报（同一句 10 分钟内只报一次）。
+        match result {
+            Some(Ok(record)) => record,
+            Some(Err(error)) => {
+                sql::warn_load_failure("按 id 读取账号", &error.to_string());
+                None
+            }
+            // 库没打开（`db.with` 返回 None）：不是「读不出来」，没有可报的原因
+            None => None,
+        }
     }
 
     /// 取某个 provider 的全部账号（**只读这一家**）。
@@ -478,13 +490,10 @@ impl AccountStore {
     /// 直接发请求」的调用方无需再单独传代理参数；`proxyError` 非空表示配置的
     /// 代理解析失败，调用方应回退直连并提示。
     ///
-    /// ── 小浣熊桌面端账号的凭证（W3-T4）─────────────────────────
-    /// 这类记录**故意不落 token**（凭证在 `~/.box-agent/config/auth.json`，
-    /// 客户端重新登录后下次请求即生效）。会话形态是「拿着就能发请求」的形状，
-    /// 因此这里把 auth.json 的实时值填进 `auth` —— 否则转发链路的
-    /// `has_access_token` 判定会把它当成没有登录态（401），而小浣熊适配器
-    /// 也正是从 `auth.accessToken` 取 Authorization 头的。
-    /// 读不到客户端登录态时退化成空 token：让上层的 401 文案去说明原因，
+    /// ── 桌面端账号的凭证来源 ───────────────────────────────────
+    /// 历史上「记录里不落 token、凭证实时读客户端文件」的家（小浣熊 / Cline /
+    /// AutoClaw）已随实现搬到插件，`live_desktop_credentials` 现在恒回 `None`；
+    /// 这类记录在网关侧退化成空 token —— 让上层的「需安装插件」文案去说明原因，
     /// 本函数不制造错误（它是被 CRUD 与选路大量复用的纯取值路径）。
     fn session_from_record(&self, record: &StoredAccount) -> Value {
         let edition = resolve_edition(record.edition().as_deref());
@@ -513,12 +522,13 @@ impl AccountStore {
         //   - `zcodePlan`：通道名（缺失 = 编码套餐，见 `zcode::plan_of`）。
         // 空值不写：会话里出现空串会让「有没有这条通道的凭证」的判定变成
         // 「键在不在」，那是两个不同的问法。
+        // 端点三件套只从**记录**里取，没有就是空串：网关不知道任何一家的上游
+        // 该填什么（那套知识随实现搬到了提供商插件）。插件家也不读这三个键 ——
+        // 它从 `store.get` 拿到的 secret 里有自己写的那份。
         let mut session = json!({
-            "endpoint": record.endpoint().unwrap_or_else(|| edition.endpoint.to_string()),
-            "prefixPath": record
-                .prefix_path()
-                .unwrap_or_else(|| edition.prefix_path.to_string()),
-            "platform": record.platform().unwrap_or_else(|| edition.platform.to_string()),
+            "endpoint": record.endpoint().unwrap_or_default(),
+            "prefixPath": record.prefix_path().unwrap_or_default(),
+            "platform": record.platform().unwrap_or_default(),
             "edition": edition.id,
             "proxy": proxy,
             "proxyError": proxy_error_value,
@@ -584,46 +594,16 @@ impl AccountStore {
                 }
             }
         }
-        // ── OfficeAce 的凭据字段（`officeace::adapter` 用）──────────────
-        // 它的转发凭证不是 `auth.accessToken`，而是**记录顶层的**网关 Basic 那一对
-        // （`baseUrl` / `modelAppKey` / `modelAppSecret`）；控制面临时凭据
-        // （`accessKeyId` 等）留给额度/签到。会话是转发链交给适配器的唯一形态
-        // （`build_chat_request` 的 `account` 参数），所以这些字段必须随会话出来 ——
-        // 否则 `officeace::credentials::from_record` 读到全空、转发必报缺凭据。
-        // 与 ZCode 那支同一形态（本家才注入，别家逐字不变）；空值不写。
-        if record.provider() == crate::server::core::account_store::OFFICEACE_PROVIDER_ID {
-            if let Some(object) = session.as_object_mut() {
-                for key in [
-                    "baseUrl",
-                    "modelAppKey",
-                    "modelAppSecret",
-                    "accessKeyId",
-                    "secretAccessKey",
-                    "securityToken",
-                    "projectId",
-                ] {
-                    let value = record.get(key).and_then(Value::as_str).unwrap_or("");
-                    if !value.trim().is_empty() {
-                        object.insert(key.to_string(), Value::String(value.to_string()));
-                    }
-                }
-                if let Some(expires_at) = record
-                    .get("expiresAt")
-                    .and_then(Value::as_i64)
-                    .filter(|value| *value > 0)
-                {
-                    object.insert("expiresAt".to_string(), Value::from(expires_at));
-                }
-            }
-        }
+        // OfficeAce 的凭据注入已随实现搬到插件：插件从 `store.get` 直接读
+        // secret（不经过会话形态），网关不再需要把它的网关 Basic 那一对
+        // 摊进会话。
         session
     }
 
     /// 指定账号的凭证（Node 版 getCredentialsById）；无凭证/不存在时 None
     ///
-    /// 小浣熊桌面端账号同样把 auth.json 的实时值填进 `access_token` /
-    /// `refresh_token` / `expires_at`（理由见 `session_from_record`）——
-    /// 「有没有可用凭证」在全仓是一条判据，不能因为凭证存在别处就分叉。
+    /// 桌面端账号的实时凭证路径已随实现搬到插件（见 `live_desktop_credentials`），
+    /// 这里只剩记录里的存量值 —— 「有没有可用凭证」在全仓仍是一条判据。
     pub fn get_credentials_by_id(&self, id: &str) -> Option<CredentialsById> {
         let _guard = self.guard();
         let record = self.record_by_id(&_guard, id)?;
@@ -651,11 +631,9 @@ impl AccountStore {
             access_token,
             refresh_token,
             expires_at: if expires_at > 0.0 { Some(expires_at) } else { None },
-            endpoint: record.endpoint().unwrap_or_else(|| edition.endpoint.to_string()),
-            prefix_path: record
-                .prefix_path()
-                .unwrap_or_else(|| edition.prefix_path.to_string()),
-            platform: record.platform().unwrap_or_else(|| edition.platform.to_string()),
+            endpoint: record.endpoint().unwrap_or_default(),
+            prefix_path: record.prefix_path().unwrap_or_default(),
+            platform: record.platform().unwrap_or_default(),
             edition: edition.id.to_string(),
             priority: record.priority(),
             enabled: record.enabled(),
@@ -709,76 +687,22 @@ impl AccountStore {
 
 /// 桌面端实时账号的凭证（读取那一刻的值）；不是桌面端账号或读不到时 None。
 ///
-/// 为什么不缓存到记录里：auth.json 是小浣熊生态的共享登录态，客户端/box-agent
-/// 会在 token 临期时自行刷新并回写；把值缓存进账号记录只会得到一份过期副本，
-/// 还会与「刷新成功后回写 auth.json」的路径打架（架构文档 §3.2 明确要求
-/// 桌面端账号的凭证**每次实时读**）。
+/// ── 现在恒为 None（保留函数的理由）──────────────────────────
+/// 历史上「记录里不落 token、凭证每次实时读客户端文件」的家有三家：
+/// 小浣熊（`~/.box-agent/config/auth.json`）、AutoClaw（`%APPDATA%/AutoClaw/
+/// auth.json` 的 safeStorage 密文）与 Cline（客户端自己的 `providers.json`）。
+/// 三份读取路径都属于**上游客户端知识**，已随各自实现整体搬到提供商插件 ——
+/// 网关不再持有任何一条「去哪儿读官方客户端登录态」的路径。
 ///
-/// ── 两家桌面态（W4b-T-c2 起）────────────────────────────────
-/// 小浣熊（`raccoon-desktop`，读 `~/.box-agent/config/auth.json`）与
-/// AutoClaw（`autoclaw-desktop` / `autoclaw-intl-desktop`，读
-/// `%APPDATA%/AutoClaw/auth.json` 的 **safeStorage 密文**并走 DPAPI +
-/// AES-GCM 解密）都是「记录里不落 token、凭证实时读」的形态，因此都要在这里
-/// 填进会话 —— 否则转发链路的 `build_chat_request` 从 `auth.accessToken`
-/// 取到空串，稳定 401。
-/// AutoClaw 的解密结果由 `autoclaw::credentials` 的进程级 mtime 缓存兜住，
-/// 每个请求都做一次 DPAPI 是被缓存挡住的那件贵事，不是本函数重复做的。
+/// 函数留着而不是删掉：会话构造、凭证读取、公开形态三处都按「实时值优先、
+/// 回落记录」调用它。将来若再出现同类家（凭证不在记录里），在这里补一个分支
+/// 即可，三个调用点一行都不用动；直接删掉会把「这里有第二种凭证来源」这件事
+/// 从代码里抹去，读代码的人只会看到一处凭空分叉的 match。
 ///
-/// AutoClaw 的**两个地区**都要走这一支：那个 auth.json 两地共用（没有地区
-/// 标记），地区只能从**记录自己的 provider** 取（`autoclaw` → 国内版、
-/// `autoclaw-intl` → 国际版）—— 写死国内版会让国际版桌面账号拿不到 token，
-/// 表现为「导入成功但转发时报账号缺少 accessToken」。
-///
-/// CatPaw 不在这里：它的凭证不是 Bearer（Cookie 形态的 `X-Passport-Token` +
-/// 独立 uid），会话的 `auth.accessToken` 装不下它，由
-/// `catpaw::adapter::forward_conversation` 自己经 `snapshot_for` 取。
-///
-/// `pub(crate)`：各家的账号公开形态（`raccoon_accounts.rs` /
-/// `autoclaw_accounts.rs`）也要用它 —— 桌面端账号的展示字段（token 尾号/过期
-/// 时间/能否刷新）必须来自同一份实时值，否则界面与转发看到的就是两个状态。
-pub(crate) fn live_desktop_credentials(record: &StoredAccount) -> Option<(String, String, f64)> {
-    if super::is_autoclaw_family(&record.provider()) && record.is_desktop() {
-        // 地区取记录自己的 provider（两地共用一个文件，见上方说明）；
-        // 认不出的 id 退回国内版 —— 与 `to_autoclaw_public_account` 同一兜底口径
-        let region = crate::server::core::providers::autoclaw::Region::from_provider_id(
-            &record.provider(),
-        )
-        .unwrap_or(crate::server::core::providers::autoclaw::Region::Cn);
-        let credentials = crate::server::core::providers::autoclaw::credentials::local_credentials(
-            region,
-        )
-        .ok()?;
-        return Some((
-            credentials.token,
-            credentials.refresh_token,
-            credentials.expires_at.unwrap_or(0.0),
-        ));
-    }
-    // Cline 桌面端登录态：实时读 `~/.cline/data/settings/providers.json`。
-    // 少了这一支，桌面端账号的会话里 `auth.accessToken` 会是空串 ——
-    // 记录里**按设计不落 token**（见 `cline_accounts.rs` 的模块头），
-    // 于是转发会以「账号缺少 accessToken」401 收场，而账号看着一切正常。
-    if super::is_cline_family(&record.provider()) && record.is_desktop() {
-        let credentials =
-            crate::server::core::providers::cline::credentials::read_desktop_credentials()
-                .ok()
-                .flatten()?;
-        return Some((
-            credentials.access_token,
-            credentials.refresh_token,
-            credentials.expires_at.unwrap_or(0.0),
-        ));
-    }
-    if record.provider() != super::RACCOON_PROVIDER_ID || !record.is_desktop() {
-        return None;
-    }
-    let credentials = crate::server::core::providers::raccoon::credentials::desktop_credentials()
-        .ok()?;
-    Some((
-        credentials.token,
-        credentials.refresh_token,
-        credentials.expires_at.unwrap_or(0.0),
-    ))
+/// 存量记录里的 `desktop: true` 账号仍留在库里、公开形态如实显示；装上插件后
+/// 由插件实时读，没装插件时这类账号的转发会如实报「需要安装插件」。
+pub(crate) fn live_desktop_credentials(_record: &StoredAccount) -> Option<(String, String, f64)> {
+    None
 }
 
 /// 这条账号记录所属的 provider **是否能承接推理转发**（`ProviderAdapter::supports_chat`）。

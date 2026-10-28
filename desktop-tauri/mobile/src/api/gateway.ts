@@ -7,6 +7,14 @@
  */
 
 import { apiCall } from './client'
+import type { ProxyUsage } from '../../../ui-shared/proxy-usage'
+import type { CheckinCenter } from '../../../ui-shared/checkin'
+import type { HiddenAccountsSummary } from '../../../ui-shared/plugins'
+import { logQueryString, type LogPage, type LogQuery } from '../../../ui-shared/logs'
+
+export type { LogEntry, LogPage } from '../../../ui-shared/logs'
+
+export type { CheckinAccount, CheckinCenter, ProviderGroup as CheckinProviderRow } from '../../../ui-shared/checkin'
 
 /* ─── 会话 / 账号 ─────────────────────────────── */
 
@@ -23,6 +31,8 @@ export type Account = {
   id: string
   provider?: string
   name?: string
+  displayName?: string
+  nameCustom?: boolean
   nickname?: string
   email?: string
   enabled?: boolean
@@ -35,6 +45,8 @@ export type Account = {
   expiresAt?: number
   needsRelogin?: boolean
   needsReloginReason?: string
+  /** 智谱清言：这条账号是不是访客（后端只对本家注入；访客没有积分体系，不查余额） */
+  isGuest?: boolean
   /** 按模型记的限流记录 */
   rateLimits?: Record<string, RateLimitInfo>
   [key: string]: unknown
@@ -53,7 +65,9 @@ export type SessionPayload = {
     currentAccountIds?: Record<string, string | null>
     accounts?: Account[]
     providers?: ProviderSummary[]
+    hiddenAccounts?: HiddenAccountsSummary
   }
+  accountFeatures?: Record<string, unknown>
   lastRequestModel?: string | null
   routedAccountId?: string | null
   defaultModel?: string | null
@@ -69,6 +83,7 @@ export function fetchSession(signal?: AbortSignal): Promise<SessionPayload> {
 export function fetchAccounts(signal?: AbortSignal): Promise<{
   accounts?: Account[]
   providers?: ProviderSummary[]
+  hiddenAccounts?: HiddenAccountsSummary
   currentAccountId?: string | null
   currentAccountIds?: Record<string, string | null>
 }> {
@@ -111,6 +126,22 @@ export type StatsDimension = {
   totalTokens?: number
   tokens?: number
   percentage?: number
+  model?: string
+  successRate?: number | null
+  promptTokens?: number | null
+  completionTokens?: number | null
+  cacheReadTokens?: number | null
+  cacheRate?: number | null
+  lastUsedAt?: number | null
+  tokenDetailsComplete?: boolean
+  source?: string
+  filterValue?: string
+  state?: 'enabled' | 'disabled' | 'deleted'
+}
+
+export type StatsDay = {
+  date?: string; tokens?: number; requests?: number
+  models?: StatsDimension[]; clients?: StatsDimension[]; apiKeys?: StatsDimension[]
 }
 
 export type StatsSummary = {
@@ -121,15 +152,22 @@ export type StatsSummary = {
   providers?: StatsDimension[]
   accounts?: StatsDimension[]
   models?: StatsDimension[]
-  cacheRates?: Record<string, number | null>
-  dailyTrend?: Array<{ date?: string; tokens?: number; requests?: number }>
+  clients?: StatsDimension[]
+  apiKeys?: StatsDimension[]
+  apiKeyDetail?: { filterValue?: string; label?: string; requests?: number; totalTokens?: number; detailsComplete?: boolean; clients?: StatsDimension[]; models?: StatsDimension[] } | null
+  cacheRates?: Record<string, { rate?: number; inputTokens?: number; hitTokens?: number } | number | null>
+  dailyTrend?: StatsDay[]
   cacheTrend24h?: unknown
 }
 
-export type StatsRange = 'today' | 'yesterday' | '7' | '30' | 'month' | 'all'
+export type StatsRange = 'today' | 'yesterday' | '7' | '30' | 'month' | 'all' | 'custom'
 
-export function fetchStatsSummary(range: StatsRange, signal?: AbortSignal): Promise<StatsSummary> {
-  return apiCall<StatsSummary>(`/api/stats/summary?range=${encodeURIComponent(range)}`, { signal })
+export function fetchStatsSummary(range: StatsRange, signal?: AbortSignal, options?: {
+  apiKey?: string; startDate?: string; endDate?: string
+}): Promise<StatsSummary> {
+  const query = new URLSearchParams({ range })
+  for (const [key, value] of Object.entries(options || {})) if (value) query.set(key, value)
+  return apiCall<StatsSummary>(`/api/stats/summary?${query}`, { signal })
 }
 
 /* ─── 请求日志 ─────────────────────────────────── */
@@ -158,6 +196,8 @@ export type RequestRow = {
   attemptDetails?: AttemptDetail[]
   sensitiveHits?: Array<{ word?: string; count?: number }>
   route?: unknown
+  client?: string
+  apiKeyId?: string; apiKeyName?: string; apiKeySource?: string
 }
 
 export type RequestPage = {
@@ -168,7 +208,20 @@ export type RequestPage = {
 }
 
 export function fetchRequests(
-  params: { offset?: number; limit?: number; status?: 'ok' | 'error'; model?: string; provider?: string },
+  params: {
+    offset?: number
+    limit?: number
+    /** 后端只认这三个值，其余忽略（见 report::normalize_status_filter） */
+    status?: 'ok' | 'error' | 'running'
+    model?: string
+    provider?: string
+    client?: string
+    apiKey?: string
+    startDate?: string
+    endDate?: string
+    productionOnly?: string
+    completedOnly?: string
+  },
   signal?: AbortSignal,
 ): Promise<RequestPage> {
   const query = new URLSearchParams()
@@ -177,89 +230,24 @@ export function fetchRequests(
   if (params.status) query.set('status', params.status)
   if (params.model) query.set('model', params.model)
   if (params.provider) query.set('provider', params.provider)
+  if (params.client !== undefined) query.set('client', params.client)
+  for (const key of ['apiKey', 'startDate', 'endDate', 'productionOnly', 'completedOnly'] as const) {
+    if (params[key] !== undefined) query.set(key, params[key] as string)
+  }
   const suffix = query.toString()
   return apiCall<RequestPage>(`/api/stats/requests${suffix ? `?${suffix}` : ''}`, { signal })
 }
 
 /* ─── 运行日志 ─────────────────────────────────── */
 
-export type LogEntry = {
-  id?: number
-  ts?: number
-  level?: string
-  category?: string
-  message?: string
-  data?: unknown
-}
-
-export type LogPage = {
-  entries?: LogEntry[]
-  total?: number
-  stats?: unknown
-}
-
-export function fetchLogs(
-  params: { level?: string; category?: string; keyword?: string; start?: number; limit?: number },
-  signal?: AbortSignal,
-): Promise<LogPage> {
-  const query = new URLSearchParams()
-  if (params.level) query.set('level', params.level)
-  if (params.category) query.set('category', params.category)
-  if (params.keyword) query.set('keyword', params.keyword)
-  if (params.start) query.set('start', String(params.start))
-  query.set('limit', String(params.limit ?? 60))
-  return apiCall<LogPage>(`/api/logs?${query.toString()}`, { signal })
+export function fetchLogs(params: LogQuery, signal?: AbortSignal): Promise<LogPage> {
+  return apiCall<LogPage>(`/api/logs?${logQueryString({ limit: 60, ...params })}`, { signal })
 }
 
 /* ─── 签到中心 ─────────────────────────────────── */
 
-export type CheckinAccount = {
-  id?: string
-  name?: string
-  available?: boolean
-  checkinAt?: number
-  checkedInToday?: boolean
-}
-
-export type CheckinProviderRow = {
-  id?: string
-  label?: string
-  accounts?: CheckinAccount[]
-  doneCount?: number
-  totalCount?: number
-}
-
-export type CheckinCenter = {
-  daily?: {
-    providers?: CheckinProviderRow[]
-    outOfScope?: Array<{ label?: string; reason?: string; count?: number }>
-    todayDone?: number
-    todayEligible?: number
-  }
-  extras?: {
-    onboarding?: Array<{ id?: string; name?: string; provider?: string }>
-    plans?: Array<{ id?: string; name?: string; provider?: string; claimAt?: number }>
-  }
-  auto?: { enabled?: boolean; time?: string; providers?: string[] }
-  history?: Array<{
-    at?: number
-    date?: string
-    reason?: string
-    succeeded?: number
-    total?: number
-    skipped?: number
-    failed?: number
-    failedCount?: number
-  }>
-}
-
 export function fetchCheckinCenter(signal?: AbortSignal): Promise<CheckinCenter> {
   return apiCall<CheckinCenter>('/api/checkin-center', { signal })
-}
-
-/** 批量签到（不带 id = 全部可签账号） */
-export function runCheckin(id?: string): Promise<unknown> {
-  return apiCall('/api/accounts/checkin', { method: 'POST', body: id ? { id } : {} })
 }
 
 /* ─── 模型管理 ─────────────────────────────────── */
@@ -270,9 +258,13 @@ export type ManageModel = {
   provider?: string
   providerLabel?: string
   source?: string
+  kind?: string
+  supports_image_generation?: boolean
+  supports_image_editing?: boolean
   enabled?: boolean
   aliases?: string[]
   visibility?: string | null
+  upstreamStatus?: 'undeployed' | null
   capabilities?: unknown
   reasoningLevels?: unknown
   refreshedAt?: unknown
@@ -330,7 +322,7 @@ export function deleteKey(id: string): Promise<KeysPayload> {
 
 /* ─── 网络代理 ─────────────────────────────────── */
 
-export type PoolItem = {
+export type PoolItem = ProxyUsage & {
   id?: string
   name?: string
   source?: string
@@ -340,13 +332,16 @@ export type PoolItem = {
   port?: number
   address?: string
   lastTest?: { at?: number; success?: boolean; ip?: string; error?: string } | null
-  usedBy?: number
+  /** 孤儿订阅节点：所属订阅已不存在（后端标注） */
+  orphan?: boolean
   [key: string]: unknown
 }
 
 export type PoolPayload = {
   items?: PoolItem[]
   clash?: { available?: boolean; error?: string | null; options?: unknown[] }
+  /** 内核装没装：订阅节点没有端口时的首要成因（没内核就没有监听器） */
+  kernelInstalled?: boolean
 }
 
 export function fetchProxyPool(signal?: AbortSignal): Promise<PoolPayload> {
@@ -394,7 +389,7 @@ export function fetchScheduledTasks(signal?: AbortSignal): Promise<{ tasks?: Sch
 export function patchScheduledTask(
   id: string,
   patch: { enabled?: boolean; interval?: number },
-): Promise<{ tasks?: ScheduledTask[] }> {
+): Promise<ScheduledTask> {
   return apiCall(`/api/scheduled-tasks/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch })
 }
 
@@ -407,16 +402,84 @@ export function runScheduledTask(id: string): Promise<unknown> {
 export type AgentClient = {
   id?: string
   name?: string
-  path?: string
-  applied?: boolean
-  mode?: string
+  resolvedPath?: string
+  configPath?: string
+  viaGateway?: boolean
+  configMode?: string
+  installed?: boolean
+  readError?: string | null
+  needsRestart?: boolean
+  detectionState?: string
+  supportNote?: string
+  applied?: { canUndo?: boolean; canDisconnect?: boolean; modifiedExternally?: boolean }
   [key: string]: unknown
+}
+
+export type AgentRestorePreview = {
+  token: string
+  warnings: string[]
+  files: Array<{ path: string; diff: Array<{ kind: 'same' | 'added' | 'removed'; text: string }> }>
 }
 
 export function fetchAgents(signal?: AbortSignal): Promise<{ clients?: AgentClient[] }> {
   return apiCall<{ clients?: AgentClient[] }>('/api/agents', { signal })
 }
 
-export function restoreAgentClient(id: string): Promise<unknown> {
-  return apiCall('/api/agents/restore', { method: 'POST', body: { id } })
+export function previewAgentRestore(clientId: string): Promise<AgentRestorePreview> {
+  return apiCall('/api/agents/preview', { method: 'POST', body: { clientId, operation: 'restore' } })
 }
+
+export function restoreAgentClient(clientId: string, token: string): Promise<unknown> {
+  return apiCall('/api/agents/restore', { method: 'POST', body: { clientId, operation: 'restore', token } })
+}
+
+/* ─── 账号余额 ─────────────────────────────── */
+
+export type UsageRow = {
+  id?: string
+  name?: string | null
+  /** 后端按家给不同形状；前端只读其中几个通用键，故用 Record */
+  usage?: Record<string, unknown> | null
+  error?: string | null
+  code?: string | number | null
+  /** 这一行的结论时刻（毫秒） */
+  at?: number
+}
+
+export type UsageSnapshot = {
+  /** 全部行里最新的结论时刻 */
+  at?: number
+  results?: UsageRow[]
+  skipped?: number
+}
+
+/** 最近一次查询结果的快照（只读记录表，不触发上游查询） */
+export function fetchUsageSnapshot(signal?: AbortSignal): Promise<UsageSnapshot> {
+  return apiCall<UsageSnapshot>('/api/accounts/usage/snapshot', { signal })
+}
+
+/** 手动查询单个账号余额（会真的打上游，可能慢） */
+export function fetchAccountUsage(id: string): Promise<{ results?: UsageRow[]; skipped?: number }> {
+  return apiCall<{ results?: UsageRow[]; skipped?: number }>(
+    `/api/accounts/usage?id=${encodeURIComponent(id)}`,
+  )
+}
+
+/** 改备注名（后端 PATCH 支持 name 字段，空串会被 400 拒绝） */
+export function renameAccount(id: string, name: string): Promise<unknown> {
+  return apiCall(`/api/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name } })
+}
+
+/** 清除限流标记；不传 model = 清除该账号全部模型 */
+export function clearAccountRateLimits(id: string, model?: string): Promise<unknown> {
+  return apiCall(`/api/accounts/${encodeURIComponent(id)}/rate-limits/clear`, {
+    method: 'POST',
+    body: model ? { model } : {},
+  })
+}
+
+/** 把账号设为全局队列第一位（设为首选） */
+export function promoteAccount(id: string): Promise<unknown> {
+  return apiCall('/api/accounts/current', { method: 'POST', body: { id } })
+}
+

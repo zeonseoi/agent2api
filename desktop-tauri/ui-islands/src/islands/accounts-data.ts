@@ -30,7 +30,7 @@
 
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
-  type AccountRecord, type ClashSnapshot, type PanelKind, type PoolItem,
+  type AccountRecord, type ClashSnapshot,
   type TokenReading, type UsageEntry,
 } from './accounts-shared'
 import {
@@ -39,9 +39,15 @@ import {
 } from './accounts-domain'
 import * as domain from './accounts-domain'
 import { t } from '../i18n'
+import { adoptLimiterSnapshot } from './accounts-limiter-model'
 import {
-  allAccounts, bump, findAccount, getStore, isPicked, openPanelsFor, panelOpen, patch,
+  allAccounts, bump, findAccount, getStore, isPicked, patch,
 } from './accounts-store'
+import { proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
+import { installListRefresh, refreshList } from './accounts-refresh'
+import { confirmBatchResult, refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
+
+export { refreshList } from './accounts-refresh'
 
 // 状态层原样再导出：视图侧（accounts-page / panels / dialogs）只认本文件这一条路径
 export * from './accounts-store'
@@ -109,6 +115,11 @@ function putUsage(id: string, entry: UsageEntry, at: number): void {
 export function usageEntryOf(account: AccountRecord): UsageEntry {
   const entry = usageMap.get(account.id)
   if (entry === undefined) return undefined
+  // 访客账号不查余额（见 `supportsUsage` 的说明）：它名下**只可能**是历史失败
+  // 结论 —— 升级前的心跳给它排过期、每次查询都稳定失败。留着就会在余额列
+  // 留一格红字，而那一格本该是「—」（这条账号没有可查的东西）。后端快照出口
+  // 已经不再端出这些行，这里管的是**升级前就已经写进本地缓存**的那些。
+  if (account.isGuest === true) return undefined
   if (!usageFailureOf(entry)) return entry
   const changedAt = Math.max(Number(account.addedAt) || 0, Number(account.updatedAt) || 0)
   return (usageFailureAt.get(account.id) || 0) >= changedAt ? entry : undefined
@@ -230,87 +241,19 @@ export function invalidateClashCache(): void {
 /* ─── 代理池（「网络代理」页的命名代理，账号页的代理下拉）─── */
 
 /**
- * 代理池列表缓存。与 clash 那份（放 store 里）不同：它**只有代理表单用**
- * （账号表的代理列读的是账号自己的 proxy 描述，不需要池），所以不进 store，
- * 一个模块变量 + 在途 Promise 就够。
+ * 池列表的**唯一一份缓存**在 `proxy-pool-cache.ts`：账号页与「网络代理」页
+ * 共用它（那一页每次写操作都拿到后端回报的整份列表，写进同一份缓存，这里
+ * 立刻能看到）。
+ *
+ * 为什么不再是本文件的模块变量：曾经它只在这里，且读过一次就永不失效
+ * （`invalidateProxyPoolCache` 全项目没有调用点）。后果是在网络代理页禁用
+ * 节点 / 删除订阅之后，账号页的代理下拉还列着那些条目，选中才被后端拒绝。
  */
-let poolCache: PoolItem[] | null = null
-let poolInflight: Promise<PoolItem[]> | null = null
+export {
+  acceptProxyPool, ensureProxyPoolOptions, invalidateProxyPoolCache, poolError,
+  proxyPoolOptions, proxyPoolSnapshot, refreshProxyPool, subscribeProxyPool,
+} from './proxy-pool-cache'
 
-/** 已缓存的池列表（`null` = 还没读过）；表单首帧用它避免下拉先空一拍 */
-export function proxyPoolSnapshot(): PoolItem[] | null {
-  return poolCache
-}
-
-/** 清掉缓存（表单里的「重新读取」用） */
-export function invalidateProxyPoolCache(): void {
-  poolCache = null
-}
-
-/**
- * 读一次代理池（模块级缓存；并发调用合并成一次）。
- * 与 clashOptions 同一条纪律：桥异常时可能 resolve 出 `undefined`（而不是 reject），
- * 那种情况按失败处理 —— 不校验的话会伪装成「池里一条都没有」。
- */
-export async function proxyPoolOptions(options: { force?: boolean } = {}): Promise<PoolItem[]> {
-  if (!options.force && poolCache) return poolCache
-  if (!poolInflight) {
-    poolInflight = (async () => {
-      try {
-        const data = await shared().workbuddyDesktop?.getProxyPool?.()
-        if (!data || typeof data !== 'object' || !Array.isArray(data.items)) {
-          throw new Error(t('代理池响应异常（{type}）', { type: typeof data }))
-        }
-        return data.items
-      } finally {
-        poolInflight = null
-      }
-    })()
-  }
-  const items = await poolInflight
-  poolCache = items
-  return items
-}
-
-/** 代理池读取失败的原因（成功后清空）—— 代理列据此显示「读取失败」的说明项 */
-let lastPoolError: string | null = null
-
-export function poolError(): string | null {
-  return lastPoolError
-}
-
-/**
- * 代理列的池条目自愈：没读到就补拉（节流 30 秒，与 `ensureClashOptions` 同一套
- * 理由 —— 没有它，「失败 → 重画 → 又拉」会变成死循环；有它，网络 / 桥恢复后
- * 最多半分钟自己补上）。
- */
-let poolRetryAt = 0
-let poolWarned = false
-
-export function ensureProxyPoolOptions(): void {
-  if (poolCache || Date.now() < poolRetryAt) return
-  if (typeof shared().workbuddyDesktop?.getProxyPool !== 'function') {
-    // 桥没挂上（加载失败等）：本页面会话内不再尝试，并告警一次
-    if (!poolWarned) {
-      poolWarned = true
-      console.warn('[accounts] 桥未提供 getProxyPool：代理列的「已保存的代理」选项不可用')
-    }
-    poolRetryAt = Infinity
-    return
-  }
-  poolRetryAt = Date.now() + 30_000
-  void proxyPoolOptions()
-    .then(() => {
-      poolRetryAt = 0
-      lastPoolError = null
-      // 读到了要重画一次：这一格渲染时读的是同步快照，没有订阅者通知它
-      bump()
-    })
-    .catch(error => {
-      lastPoolError = errorMessage(error)
-      bump()
-    })
-}
 
 /* ─── 弹窗 ─────────────────────────────────── */
 
@@ -329,6 +272,18 @@ export function openBatchDialog(ids: string[], action = 'enable'): void {
   patch({ dialog: { kind: 'batch', ids: selected, action } })
 }
 
+/**
+ * 打开某一家的**分组设置**弹窗（分组带上齿轮那颗按钮）。
+ *
+ * 不做「这一家还在不在」的存在性校验：分组带本身是从分组视图渲染出来的，
+ * 打不开的组根本点不到；而设置里有些项（将来的默认展开 / 新账号落点）在
+ * 账号被删光之后仍然有意义，硬拦一次反而让弹窗随账号数闪没。
+ */
+export function openGroupDialog(provider: string): void {
+  if (!provider) return
+  patch({ dialog: { kind: 'group', provider } })
+}
+
 /* ─── 删除账号后的缓存清理 ───────────────────── */
 
 /** 清掉已删除账号的本地缓存（app.js 每次 refresh 后调用） */
@@ -338,15 +293,13 @@ export function refreshCaches(validIds: Set<string>): void {
   // 失败结论的时刻表跟着条目一起清：账号删掉后同 id 可能被「重新添加」复用，
   // 留着的旧时刻会让那条新记录继承一个本该作废的失败结论
   for (const id of [...usageFailureAt.keys()]) if (!validIds.has(id)) usageFailureAt.delete(id)
-  const panels = new Map(getStore().panels)
-  for (const id of [...panels.keys()]) if (!validIds.has(id)) { panels.delete(id); touched = true }
   const connections = new Map(getStore().connections)
   for (const id of [...connections.keys()]) if (!validIds.has(id)) { connections.delete(id); touched = true }
   const inflight = new Set(getStore().usageInflight)
   for (const id of [...inflight]) if (!validIds.has(id)) { inflight.delete(id); touched = true }
   const selected = new Set(getStore().selected)
   for (const id of [...selected]) if (!validIds.has(id)) { selected.delete(id); touched = true }
-  if (touched) patch({ panels, connections, usageInflight: inflight, selected })
+  if (touched) patch({ connections, usageInflight: inflight, selected })
 }
 
 /* ─── 连接数（实时，2 秒一轮）────────────────────
@@ -506,9 +459,10 @@ export function applyBalances(
  * 甚至一天，这就是"每次打开都要手点一下"。
  *
  * ── 为什么在前端做，而不是后端调度 ───────────────────────────
- * 「这家该不该有明细」这个判据（`creditDetail` 能力位）住在前端
- * （accounts-domain 的 PROVIDER_FEATURES），后端没有同一份名单；搬过去等于再写
- * 一份、迟早漂。而这边本来就有一切：缓存条目、能力位、单账号查询的现成动作。
+ * 「这家该不该有明细」这个判据（`creditDetail` 能力位）是**插件申报**的
+ * （协议里的 `AccountFeatures`，界面侧在 accounts-features 归一），后端不查
+ * 这份名单；搬过去等于再写一份、迟早漂。而这边本来就有一切：缓存条目、
+ * 能力位、单账号查询的现成动作。
  *
  * ── 三条纪律（都为了"补齐不该把界面弄得更差"）─────────────────
  *   1. **每个会话只做一次**：这是补齐旧文档，不是维持读数新鲜（那是后端心跳的
@@ -569,7 +523,8 @@ export async function syncBalancesSnapshot(): Promise<boolean> {
     // Token 限制器的读数**先于**余额的早退判定应用：余额只在查询到期时变化
     // （`at` 不动说明没有新结论），而 Token 周期消耗随每条请求变化 —— 先判
     // 余额的 `at` 就返回会让 Token 读数停在最后一次余额查询那会儿。
-    const tokenApplied = applyTokenUsage(data)
+    const limiterApplied = adoptLimiterSnapshot(data)
+    const tokenApplied = applyTokenUsage(data) || limiterApplied
     if (tokenApplied) {
       bump()
       // Token 结论会翻转「已限流」归类（isLimitedNow 的口径），顶栏那枚计数
@@ -770,9 +725,10 @@ export async function refreshUsageAfterCheckin(id?: string): Promise<void> {
  */
 export async function setAccountEnabled(id: string, enabled: boolean): Promise<void> {
   try {
-    await shared().workbuddyDesktop?.updateAccount?.(id, { enabled })
-    await shared().wbApp?.refresh?.()
+    await updateAccountConfirmed(id, { enabled })
     toast(enabled ? t('✅ 已启用') : t('✅ 已禁用'))
+    try { await refreshSavedAccounts() }
+    catch (error) { toast(t('账号已保存，但列表刷新失败：{error}', { error: errorMessage(error) }), 'err') }
   } catch (error) {
     toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
     // 失败时把开关拨回去：界面上不能留一个「已改」的假象
@@ -811,11 +767,23 @@ export async function reorderQueue(ids: string[], note?: string): Promise<boolea
 export async function setGroupEnabled(ids: string[], enabled: boolean): Promise<void> {
   if (!ids.length) return
   try {
-    await shared().workbuddyDesktop?.batchAccounts?.({ action: enabled ? 'enable' : 'disable', ids })
-    toast(enabled
-      ? t('✅ 已启用 {n} 个账号', { n: ids.length })
-      : t('✅ 已禁用 {n} 个账号', { n: ids.length }))
-    await shared().wbApp?.refresh?.()
+    const bridge = shared().workbuddyDesktop
+    if (!bridge?.batchAccounts) throw new Error(t('批量操作接口不可用，请重新打开页面'))
+    const payload = { action: enabled ? 'enable' : 'disable', ids }
+    const data = confirmBatchResult(await bridge.batchAccounts(payload), payload)
+    const count = data.ok?.length || 0
+    const changed = data.ok?.filter(item => item.changes?.length).length || 0
+    const failed = data.failed?.length || 0
+    if (failed || data.skipped?.length) {
+      toast(t('{verb}完成：成功 {ok} 个，未变更 {unchanged} 个，跳过 {skip} 个，失败 {fail} 个', {
+        verb: enabled ? t('启用') : t('禁用'), ok: changed, unchanged: count - changed,
+        skip: data.skipped?.length || 0, fail: failed,
+      }), failed ? 'err' : 'ok')
+    } else {
+      toast(enabled ? t('✅ 已启用 {n} 个账号', { n: count }) : t('✅ 已禁用 {n} 个账号', { n: count }))
+    }
+    try { await refreshSavedAccounts() }
+    catch (error) { toast(t('批量操作已保存，但列表刷新失败：{error}', { error: errorMessage(error) }), 'err') }
   } catch (error) {
     toast(t('操作失败：{message}', { message: errorMessage(error) }), 'err')
     void shared().wbApp?.refresh?.()
@@ -834,12 +802,6 @@ export async function clearLimits(id: string, model?: string): Promise<void> {
 }
 
 /**
- * 代理列下拉的保存。值只有两种：空串 = 直连（proxy 传 null），否则是 Clash 出口 uid
- * （`{source:'clash', listenerUid}`）——「自定义代理…」不是值而是动作：把下拉恢复成
- * 原选中，再打开账号设置弹窗（完整代理表单在那里）。成功后用后端回报的变更说明播报，
- * 与后端文案保持一份事实。
- */
-/**
  * 代理列选中即保存（`value` 是下拉的值）。下拉的选项只有三类：
  *   ''                     → 直连（proxy = null）
  *   `pool:<proxyId>`       → 引用「网络代理」页的池条目
@@ -848,6 +810,13 @@ export async function clearLimits(id: string, model?: string): Promise<void> {
  *
  * 出口统一走代理池之后，这里**不再**产生 `{source:'clash'}` —— 存量里那种
  * 记录仍照原样转发，用户在这个下拉里选一条池条目或切回直连就会改写它。
+ *
+ * ── 禁用条目为什么在这里再挡一次 ─────────────────────────────
+ * 视图层已经把禁用条目置灰（`disabled`），但下拉的选项来自缓存，极端情况下
+ * （缓存刚被别处刷新、弹层已经展开）仍可能点到一条已禁用的。后端
+ * `normalize_account_proxy` 有意**不**校验池的当下状态（保存账号不依赖池的
+ * 读库结果），所以这里不挡的话会「保存成功 → 解析失败 → 回退直连」，用户只
+ * 看到一句「代理已禁用」。挡在这里，提示与视图上的置灰是同一个事实。
  */
 export async function applyProxyPick(id: string, value: string, fallback: string): Promise<void> {
   if (value === PROXY_CUSTOM_EDIT) {
@@ -858,20 +827,28 @@ export async function applyProxyPick(id: string, value: string, fallback: string
   // 当前自定义配置的显示项：选它自己不是一次修改
   if (value === PROXY_CUSTOM_CURRENT) return
   if (value === fallback) return
+  if (value.startsWith(POOL_VALUE_PREFIX)) {
+    const poolId = value.slice(POOL_VALUE_PREFIX.length)
+    const item = (proxyPoolSnapshot() || []).find(entry => entry.id === poolId)
+    if (item && item.enabled === false) {
+      toast(t('「{name}」已在「网络代理」页禁用，请先启用它或换一条', {
+        name: item.name || poolId,
+      }), 'err')
+      return
+    }
+  }
   try {
     const proxy = value === ''
       ? null
       : { source: 'pool', proxyId: value.slice(POOL_VALUE_PREFIX.length) }
-    const result = await shared().workbuddyDesktop?.updateAccount?.(id, { proxy })
-    const changes = result?.changes
-    // changes[0] 是后端回报的变更说明（后端文案保持一份事实），没有时给前端兜底一句
-    const change = Array.isArray(changes) && changes.length ? changes[0] : t('代理已更新')
-    toast(`✅ ${change}`)
+    await updateAccountConfirmed(id, { proxy })
+    toast(`✅ ${t('代理已更新')}`)
   } catch (error) {
     toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
   } finally {
     // 成败都重拉：成功让这格显示落库后的值，失败把下拉拨回原值
-    await shared().wbApp?.refresh?.()
+    try { await refreshSavedAccounts() }
+    catch (error) { toast(t('刷新账号列表失败：{message}', { message: errorMessage(error) }), 'err') }
   }
 }
 
@@ -880,39 +857,13 @@ export const PROXY_CUSTOM_CURRENT = '__proxy_custom__'
 export const PROXY_CUSTOM_EDIT = '__proxy_custom_edit__'
 
 /**
- * 行上「领套餐」/ 签到中心 ZCode 行：打开**套餐明细**弹窗（zcode-plans-modal.tsx）。
- *
- * ── 为什么是一颗「打开弹窗」的按钮而不是直接开领 ──────────────
- * 一个账号可能同时挂着几份可领套餐，而上游的「已领取过」是**按套餐**判的
- * （同一份再领回 1003，换一份照样能领）—— 所以「这次领哪一份」必须由用户看着
- * 逐份状态来决定。旧版是先探测再弹一个原生确认框，里面既列不出逐份状态、也显示
- * 不了刚领到还没生效的套餐；现在统一进弹窗：上面是可领取（逐份标「今日已领」、
- * 逐份点「领取」），下面是账号名下已有的套餐（含**待生效**与已过期）。
- *
- * 「今天领过哪几份」与余额读数都由弹窗自己从账号页状态里读（判据只有域层的
- * `claimedPlanIdsToday` 一处），这里只传 id 与显示名。
- *
- * ── 收尾（刷新余额 / 重拉账号）为什么在弹窗里 ────────────────
- * 领到的是 token 额度：余额列的读数立刻就变了，领取台账也变了。这两件事都是本页
- * 的 store（弹窗能订阅到，见那边的 `subscribe`），所以由弹窗领完自己刷 ——
- * 这里不替它盯流程。
- */
-export function openZcodePlans(id: string, name?: string): void {
-  const account = findAccount(id)
-  if (!account) { toast(t('账号不存在，请刷新后重试'), 'err'); return }
-  const modal = shared().wbZcodePlans
-  if (!modal?.open) {
-    // 岛还没挂上（构建产物没更新 / 加载失败）：如实说一句，别静默什么都不做
-    toast(t('套餐明细弹窗未加载，请重启应用后重试'), 'err')
-    return
-  }
-  modal.open({ id, name: name || account.name })
-}
-
-/**
  * CodeArts 的「领福利」入口已整体迁到「签到中心」的活动福利卡（checkin-page.tsx
  * 直接调 legacy 脚本 `ui/codearts-welfare.js` 的 `wbCodeArtsWelfare.start`），
  * 账号页不再有这颗按钮 —— 这里不再中转。
+ *
+ * ZCode 的「领套餐」同一场收敛：账号页那颗按钮已撤（套餐明细与逐份领取在
+ * 签到中心的「活动福利」卡，那一行点开的就是同一个 `wbZcodePlans` 弹窗），
+ * 原先只服务它的 `openZcodePlans` 一并删掉。
  */
 
 /* ─── 对外契约（window）────────────────────── */
@@ -926,7 +877,6 @@ export type RowContext = {
   rank: number
   picked: boolean
   usageEntry: UsageEntry
-  limitsOpen: boolean
   connections: number
 }
 
@@ -940,16 +890,23 @@ export function rowContext(
     rank,
     picked: isPicked(account.id),
     usageEntry: usageMap.get(account.id),
-    limitsOpen: panelOpen(account.id, 'limits'),
     connections: connectionsOf(account.id),
   }
 }
 
 export type AccountsViewApi = {
   render(): void
+  refreshList: typeof refreshList
   refreshCaches(validIds: Set<string>): void
-  openPanels(ids: string[], kind: PanelKind): void
   syncConnections(): Promise<boolean>
+  /**
+   * 强制重读「网络代理」页的代理池（切回本页时调）。
+   *
+   * 代理列的下拉读的是共享缓存，平时由网络代理页的写操作就地更新；这一条是
+   * 兜底 —— 池可能在应用外被改过（另一个窗口、手工改库），而本页在切页前
+   * 可能一次都没重新读过。失败不抛，界面按 `poolError()` 显示「读取失败」。
+   */
+  refreshProxyPool(): Promise<void>
   applyBalances(
     balances: { results?: Array<Record<string, unknown>>; at?: unknown } | null | undefined,
   ): number
@@ -998,7 +955,6 @@ type AccountsModelApi = {
   /** 「已限流」的完整口径（isLimitedNow：模型限流或限制器跳过档），余额与 Token 读数由本文件的缓存出 */
   isLimited: (account: AccountRecord | null | undefined) => boolean
   accountEdition: typeof domain.accountEdition
-  supportsClaim: typeof domain.supportsClaim
   matchEnabled: typeof domain.matchEnabled
   matchLimit: typeof domain.matchLimit
   visibleAccounts: typeof domain.visibleAccounts
@@ -1042,7 +998,6 @@ const ACCOUNTS_MODEL_API: AccountsModelApi = {
     tokenUsageOf(account),
   ),
   accountEdition: domain.accountEdition,
-  supportsClaim: domain.supportsClaim,
   matchEnabled: domain.matchEnabled,
   matchLimit: domain.matchLimit,
   visibleAccounts: domain.visibleAccounts,
@@ -1059,11 +1014,13 @@ const ACCOUNTS_MODEL_API: AccountsModelApi = {
  * 拿不到就会退化成静默不生效。
  */
 export function installAccountsApi(): void {
+  installListRefresh()
   window.wbAccountsView = {
     render: () => bump(),
+    refreshList,
     refreshCaches,
-    openPanels: openPanelsFor,
     syncConnections,
+    refreshProxyPool,
     applyBalances,
     syncBalancesSnapshot,
     queryUsageFor,

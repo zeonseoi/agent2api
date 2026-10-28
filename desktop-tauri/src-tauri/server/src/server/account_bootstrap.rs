@@ -19,8 +19,10 @@
 //!      `accounts.json` 再也进不来，界面上只剩那一条旧登录态。
 //!      这是本次改动最危险的一条路径，所以跳过必须发生在**这些导入器之前**，
 //!      而不是只跳过迁移框架本身。
-//!   2. 三家旧项目导入（raccoon / catpaw / autoclaw）的触发条件同样是「本家
-//!      账号列表为空」，会先占住表、把标记键写掉。
+//!   2. 各家旧项目导入的触发条件同样是「本家账号列表为空」，会先占住表、把
+//!      标记键写掉。**这类导入已全部随实现搬到插件**（raccoon / CatPaw /
+//!      AutoClaw 读的都是客户端私有文件布局与 safeStorage 解密链），网关这边
+//!      不再有需要抢在迁移框架之前跑的导入器 —— 这一条现在只是历史背景。
 //!   3. [`AccountStore::migrate_startup`] 会在空列表上写下
 //!      `priorityScope: "global"`（它判「作用域不是 global」就落这个键，
 //!      空列表也不例外）—— 而 `import_accounts` 要靠**这个键不存在**来决定
@@ -42,7 +44,7 @@
 //! 与改造前的启动顺序逐字一致，其中最后几条有依赖：
 //!   `auth.json` → `migrate_startup`（整队/拆池/拆家）→ 历史账号凭证加密
 //!   → 历史网关 Key 加密 → 顶层 `apiKey` 原地加密 → `migrate_cline_split`
-//!   → 网关 Key 白名单补齐 → raccoon → catpaw → autoclaw
+//!   → 网关 Key 白名单补齐
 //!   - 三条「形态加密」（账号凭证 / 网关 Key 数组 / 网关 Key 旧字段）紧随
 //!     `migrate_startup` 之后、且排在彼此相邻：第一条收尾它没碰到的历史明文行，
 //!     后两条只碰 kv 里的 `apiKeys` 与顶层 `apiKey`，互不依赖、也都不依赖后面的
@@ -177,27 +179,22 @@ pub(crate) fn run(store: &AccountStore) {
             ),
         );
     }
-    // 小浣熊旧数据一次性导入（架构文档 §3.3，W3-T4）：
-    //   `~/.raccoon-proxy/accounts.json`（旧网关多账号）+
-    //   `~/.box-agent/config/auth.json`（桌面端实时登录态）→ raccoon 账号。
-    // 触发条件是「raccoon 账号列表为空 **且** config 里没有 raccoonImported」，
-    // 幂等且失败不阻断（两个来源各自缺失就跳过，见该方法的说明）。
-    store.import_legacy_raccoon_data();
-    // CatPaw 旧数据一次性导入（架构文档 §9，W5-T-d4）：
-    //   `~/.meituan-catpaw/catpaw-proxy-accounts.json`（原项目多账号）+
-    //   `~/.meituan-catpaw/auth.json`（桌面端实时登录态）→ catpaw 账号。
-    // 触发条件是「catpaw 账号列表为空 **且** config 里没有 catpawImported」，
-    // 与上面那条同构（标记键、幂等性、失败不阻断都一致）。
-    store.import_legacy_catpaw_data();
-    // AutoClaw 旧数据一次性导入（架构文档 §10.2 末条，W4b-T-c2）：
-    //   `~/.autoclaw-proxy/accounts.json`（原项目多账号）+
-    //   `%APPDATA%/AutoClaw/auth.json`（桌面端实时登录态；备来源
-    //   `~/.openclaw-autoclaw/openclaw.json`）→ autoclaw 账号。
-    // 触发条件是「autoclaw 账号列表为空 **且** config 里没有 autoclawImported」，
-    // 与上面两条同构（标记键、幂等性、失败不阻断都一致）。
-    // 三条导入**追加式共存**：各看自己那一家的账号列表与自己那个标记键，
-    // 互不影响，先后顺序不改变任何结果（后一条只增不改前面的账号）。
-    store.import_legacy_autoclaw_data();
+    // 小浣熊旧数据一次性导入**已随实现搬到插件**（与下面 CatPaw / AutoClaw
+    // 同一处置）：它读的 `~/.raccoon-proxy/accounts.json` 与
+    // `~/.box-agent/config/auth.json` 分别是旧网关的多账号文件与客户端登录态，
+    // 后者属于上游客户端知识。存量用户由插件 `account.normalize` 在「导入
+    // 桌面端登录态」时补齐，旧代理账号文件走 `authFileContent` 手工导入一次。
+    // CatPaw 旧数据一次性导入（架构文档 §9，W5-T-d4）**已随实现搬到插件**：
+    // 它读的两个来源（`~/.meituan-catpaw/catpaw-proxy-accounts.json` 与
+    // `~/.meituan-catpaw/auth.json`）都是 CatPaw 客户端的私有文件布局，
+    // 属于「上游知识」，不该留在网关。存量用户由插件的 `account.normalize`
+    // 在「导入桌面端登录态」时补齐；旧代理账号文件由用户手工导入一次
+    // （`POST /api/accounts` 的 `authFileContent` 路径）。
+    // AutoClaw 旧数据一次性导入**已随实现搬到插件**：它读的两个来源
+    // （`~/.autoclaw-proxy/accounts.json` 与 `%APPDATA%/AutoClaw/auth.json`）
+    // 都是 AutoClaw 客户端的私有文件布局 + safeStorage 解密链，属于「上游知识」。
+    // 存量用户由插件的 `account.normalize`（桌面端导入）或
+    // `POST /api/accounts` 的 `authFileContent`（手工导入一次）补齐。
 }
 
 /// 旧版单账号 `auth.json` → 一个 workbuddy 账号（仅当账号列表为空时导入一次）。

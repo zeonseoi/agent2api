@@ -4,8 +4,7 @@
  * ── 两种运行形态 ──────────────────────────────────────────────
  *   · **PWA / 浏览器**：页面就是网关出的，同源，地址恒为当前 origin。
  *     这时不该让用户填地址 —— 填了也只会把请求打到别处去。
- *   · **APK**：界面打进包里，页面 origin 是 `http://localhost`，与网关
- *     必然跨源。用户要自己填地址，还可能有多台。
+ *   · **原生 App**：界面打进包里，与网关不同源。用户要自己填地址，还可能有多台。
  *
  * 判据是 `isPackaged()`：Capacitor 在原生壳里会往 window 挂 `Capacitor`，
  * 浏览器里没有。不用 UA 判断 —— 桌面浏览器开 `/m` 与手机浏览器开是同一份代码。
@@ -35,34 +34,72 @@ export function isPackaged(): boolean {
 }
 
 /**
+ * 当前原生平台：`android` / `ios`，浏览器里是 `web`。
+ *
+ * ── 为什么要区分到这一步 ──────────────────────────────────────
+ * 两种壳的「应用内更新」根本不同：
+ *   · Android 能自己下载 APK 并调起安装器（ApkUpdaterPlugin）；
+ *   · iOS 不允许 App 自行安装可执行代码 —— 只能跳到 App Store / TestFlight，
+ *     所以那边不该出现「立即更新」这种下载按钮。
+ * 只用 `isPackaged()` 判断会把 iOS 也当成 APK 形态，点下去只会报
+ * 「当前不是 APK 形态」。
+ */
+export type NativePlatform = 'android' | 'ios' | 'web'
+
+export function nativePlatform(): NativePlatform {
+  if (typeof window === 'undefined') return 'web'
+  const cap = (window as Window & { Capacitor?: { getPlatform?: () => string } }).Capacitor
+  const platform = cap?.getPlatform?.()
+  if (platform === 'android') return 'android'
+  if (platform === 'ios') return 'ios'
+  return 'web'
+}
+
+/**
  * 归一化用户输入的地址。
  *
  * 用户会输 `192.168.1.23`、`192.168.1.23:3065`、`http://192.168.1.23:3065/`、
- * `192.168.1.23:3065/m` 等各种形态。统一成 `scheme://host[:port]`：
+ * `192.168.1.23:3065/m`、`https://gw.example.com` 等各种形态。统一成
+ * `scheme://host[:port]`：
+ *   · 协议只认 http / https，写了别的（ftp:// 之类）视为非法；
  *   · 没写协议就补 `http://`（局域网网关基本都是 http）；
  *   · 去掉结尾斜杠与路径（用户可能直接粘了 `/m` 或 `/v1`）；
- *   · 只填了主机没填端口时补默认端口 —— 网关默认 3065。
+ *   · http 没写端口时补网关默认端口 3065；https 没写端口时不补，交给
+ *     浏览器按标准 443 处理 —— 显式写 `:443` 反而会让某些反代/CDN 多一层歧义。
  * 非法输入返回空串，由调用方提示。
  */
 export function normalizeBase(raw: string): string {
   let text = raw.trim()
   if (!text) return ''
+  // 协议是「用户想走哪条链路」的唯一表达，必须保留；只接受 http / https
+  const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(text)
+  const scheme = schemeMatch ? schemeMatch[1].toLowerCase() : ''
+  if (scheme && scheme !== 'http' && scheme !== 'https') return ''
   // 用户从浏览器地址栏复制时会带 /m、/v1、#hash 之类，一律砍掉
   text = text.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
   text = text.split(/[/?#]/)[0]
   if (!text) return ''
-  const match = /^([^:]+)(?::(\d+))?$/.exec(text)
+  // host 可以是 IPv4 / 主机名 / 方括号 IPv6；方括号里的冒号要整体匹配
+  const match = /^(\[[0-9a-fA-F:]+\]|[^:]+)(?::(\d+))?$/.exec(text)
   if (!match) return ''
-  const host = match[1]
-  const port = match[2] || '3065'
+  const host = match[1].toLowerCase()
+  const port = match[2]
   // 只接受 IPv4 / 主机名 / 方括号 IPv6；localhost 也走这条
-  if (!/^[\w.-]+$|^\[[0-9a-fA-F:]+\]$/.test(host)) return ''
-  return `http://${host}:${port}`
+  if (!/^[\w.-]+$/.test(host) && !/^\[[0-9a-fA-F:]+\]$/.test(host)) return ''
+  if (port && (Number(port) < 1 || Number(port) > 65535)) return ''
+  if (port) return `${scheme || 'http'}://${host}:${port}`
+  // 没写端口：http 补网关默认端口，https 走标准 443（不显式写出来）
+  return scheme === 'https' ? `https://${host}` : `http://${host}:3065`
 }
 
-/** 从基地址里取出给用户看的 host:port */
+/**
+ * 从基地址里取出给用户看的 host:port。
+ *
+ * 只省略 `http://`：明文是局域网网关的默认形态，省掉更省地方；`https://`
+ * 必须留着 —— 用户要能一眼看出这条地址走的是不是加密链路。
+ */
 export function baseLabel(base: string): string {
-  return base.replace(/^https?:\/\//, '')
+  return base.replace(/^http:\/\//, '')
 }
 
 function readServers(): ServerEntry[] {
@@ -118,6 +155,12 @@ export function activeServerId(): string {
   return activeServer()?.id || ''
 }
 
+/** 在途请求与页面缓存同时绑定服务器 id 和地址，编辑地址也会换代。 */
+export function serverIdentity(): string {
+  const server = activeServer()
+  return server ? `${server.id}:${server.base}` : ''
+}
+
 /**
  * 新增或更新一台服务器。返回它本身（已存在同地址则复用那条记录，
  * 不产生重复项）。
@@ -130,6 +173,10 @@ export function saveServer(input: { id?: string; name?: string; base: string }):
     ? list.find(item => item.id === input.id)
     : list.find(item => item.base === base)
   if (existing) {
+    if (existing.base !== base) {
+      clearServerAuth(existing.id)
+      storeServerKey(existing.id, '')
+    }
     existing.base = base
     existing.name = (input.name || '').trim()
     writeServers(list)
@@ -145,10 +192,12 @@ export function saveServer(input: { id?: string; name?: string; base: string }):
 }
 
 export function removeServer(id: string): void {
+  const current = activeServerId()
   const list = readServers().filter(item => item.id !== id)
   writeServers(list)
   clearServerAuth(id)
-  if (activeServerId() === id) {
+  storeServerKey(id, '')
+  if (current === id) {
     try {
       localStorage.setItem(ACTIVE_KEY, list[0]?.id || '')
     } catch {
@@ -170,7 +219,18 @@ export function setActiveServer(id: string): void {
 const KEY_STORAGE = (id: string) => `agent2api.webKey.${id}`
 const PANEL_AUTH = (id: string) => `agent2api.panelAuth.${id}`
 
-export type PanelAuth = { access?: string; refresh?: string }
+export type PanelAuth = {
+  access?: string
+  refresh?: string
+  /**
+   * access 的到期时刻（毫秒；0 / 缺省 = 不知道）。
+   *
+   * **不是凭据**：它只回答「该不该在下个请求前先续期」（见 client.ts 的
+   * `ensureFreshSession`）。服务端仍然按会话表判有效期，这里算错只会退回
+   * 「401 → 续期」的老路径。与令牌存在同一条记录里：清会话时一处删干净。
+   */
+  expiresAt?: number
+}
 
 export function readServerKey(id: string): string {
   try {
@@ -198,9 +258,20 @@ export function readServerAuth(id: string): PanelAuth | null {
   }
 }
 
-export function storeServerAuth(id: string, access: string, refresh: string): void {
+/**
+ * 落盘一对令牌。`expiresIn` 是服务端下发的剩余秒数（见 `issue_response`），
+ * 转成绝对时刻存下来 —— 相对秒数在页面挂久了就失去意义。
+ */
+export function storeServerAuth(
+  id: string,
+  access: string,
+  refresh: string,
+  expiresIn?: number,
+): void {
+  const seconds = Number(expiresIn)
+  const expiresAt = Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : 0
   try {
-    localStorage.setItem(PANEL_AUTH(id), JSON.stringify({ access, refresh }))
+    localStorage.setItem(PANEL_AUTH(id), JSON.stringify({ access, refresh, expiresAt }))
   } catch {
     /* 同上 */
   }

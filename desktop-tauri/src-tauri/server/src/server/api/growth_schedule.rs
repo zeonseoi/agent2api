@@ -17,8 +17,7 @@
 //! （那是 Node 版历史契约，本接口是纯新增的管理 API）。
 //!
 //! ── 「正在执行中」────────────────────────────────────────────
-//! 手动 run 撞上已有轮次在跑时返回 400 管理信封（与 `/api/scheduled-tasks`
-//! 的 run 同款），前端能按一个套路处理。
+//! 手动 run 撞上正在执行的轮次返回 409；能力不可用返回中性跳过，真正失败保留原因。
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -53,7 +52,10 @@ pub async fn configure(body: Bytes) -> Response {
     }
     match growth_scheduler::configure(&payload) {
         Ok(state) => {
-            let enabled = state.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+            let enabled = state
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let times = state
                 .get("times")
                 .and_then(Value::as_array)
@@ -85,11 +87,41 @@ pub async fn configure(body: Bytes) -> Response {
 pub async fn run_now(State(state): State<ServerState>) -> Response {
     let store = state.store().clone();
     match growth_scheduler::run_now(&store).await {
-        Some(summary) => ok_json(json!({
+        growth_scheduler::RunOutcome::Completed(summary) => ok_json(json!({
+            "outcome": "completed",
             "summary": summary,
             "schedule": growth_scheduler::state(),
         })),
-        None => bad_request("猫猫旅行巡检正在执行中，请稍候"),
+        growth_scheduler::RunOutcome::Skipped(message) => ok_json(json!({
+            "outcome": "skipped",
+            "message": message,
+            "summary": Value::Null,
+            "schedule": growth_scheduler::state(),
+        })),
+        growth_scheduler::RunOutcome::Busy => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "outcome": "busy",
+                "error": "猫猫旅行巡检正在执行中，请稍候",
+                "schedule": growth_scheduler::state(),
+            })),
+        )
+            .into_response(),
+        growth_scheduler::RunOutcome::Failed(error) => (
+            u16::try_from(error.status_code)
+                .ok()
+                .and_then(|status| StatusCode::from_u16(status).ok())
+                .unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(json!({
+                "success": false,
+                "outcome": "failed",
+                "error": error.message,
+                "code": error.code,
+                "schedule": growth_scheduler::state(),
+            })),
+        )
+            .into_response(),
     }
 }
 

@@ -1,14 +1,24 @@
 import { useEffect, useState } from 'react'
 import { PageHead, IconButton, SectionHead, Empty, ErrorNote, copyWithToast } from '../components/ui'
 import { ProviderLogo, GlyphLogo } from '../components/ProviderLogo'
+import { HiddenAccountsNotice } from '../components/HiddenAccountsNotice'
 import { Icon } from '../components/Icon'
+import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { useStore, store } from '../state/store'
-import { fetchCheckinCenter, fetchRequests, type CheckinCenter, type RequestPage } from '../api/gateway'
-import { formatCompact, formatInt, formatDuration, ellipsisMiddle } from '../lib/format'
+import {
+  fetchCheckinCenter,
+  fetchRequests,
+  fetchStatsSummary,
+  type CheckinCenter,
+  type RequestPage,
+  type StatsSummary,
+} from '../api/gateway'
+import { formatCompact, formatInt, formatDuration, ellipsisMiddle, isRateLimited } from '../lib/format'
 import { apiBase, baseLabel } from '../lib/servers'
 import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
+import { Card, Button } from '@ui'
 
 /**
  * 首页。
@@ -22,16 +32,23 @@ export function HomePage() {
   const session = state.session
   const accounts = session?.accounts?.accounts || []
   const enabled = accounts.filter(item => item.enabled).length
-  const limited = accounts.filter(item => item.enabled && hasRateLimit(item)).length
+  const limited = accounts.filter(item => item.enabled && isRateLimited(item)).length
   const [checkin, setCheckin] = useState<CheckinCenter | null>(null)
   const [requests, setRequests] = useState<RequestPage | null>(null)
+  const [today, setToday] = useState<StatsSummary | null>(null)
   const [error, setError] = useState('')
 
   const load = async () => {
     try {
-      const [center, page] = await Promise.all([fetchCheckinCenter(), fetchRequests({ limit: 3 })])
+      // 今日请求数走报表汇总（区间内的请求数）；该接口失败不应拖垮整页，失败时按 0 显示
+      const [center, page, summary] = await Promise.all([
+        fetchCheckinCenter(),
+        fetchRequests({ limit: 3 }),
+        fetchStatsSummary('today').catch(() => null),
+      ])
       setCheckin(center)
       setRequests(page)
+      setToday(summary)
       setError('')
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -41,6 +58,13 @@ export function HomePage() {
   // 首页只轮询签到与最近请求：会话本身由 App 启动时拉一次，
   // 用户下拉刷新（下面的按钮）才重拉
   usePolling(load, 60_000)
+
+  const pull = usePullToRefresh({
+    onRefresh: async () => {
+      await store.refresh(true)
+      await load()
+    },
+  })
 
   useEffect(() => {
     if (!session) void store.refresh()
@@ -52,9 +76,11 @@ export function HomePage() {
   const done = daily?.todayDone || 0
   const percent = eligible ? Math.round((done / eligible) * 100) : 0
   const recent = requests?.entries || []
+  const checkinKey = 'checkin'
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageHead
         title={t('网关运行中')}
         subtitle={t('{n} 个账号启用 · {m} 个限流中', { n: enabled, m: limited })}
@@ -65,7 +91,7 @@ export function HomePage() {
 
       {/* 运行状态与今日读数 */}
       <div className='m-section' style={{ marginTop: 0 }}>
-        <div
+        <Card
           className='m-card'
           style={{
             padding: '16px 16px 14px',
@@ -100,7 +126,7 @@ export function HomePage() {
               />
               {gateway ? t('运行中') : t('未配置上游')}
             </span>
-            <button
+            <Button size='default' variant='ghost'
               type='button'
               onClick={() => void copyWithToast(apiBase() + '/v1', 'Base URL')}
               style={{
@@ -119,7 +145,7 @@ export function HomePage() {
             >
               {baseLabel(apiBase())}/v1
               <Icon name='copy' style={{ width: 13, height: 13 }} />
-            </button>
+            </Button>
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
@@ -127,7 +153,7 @@ export function HomePage() {
             <div style={{ width: 1, background: 'rgba(255,255,255,.22)', margin: '2px 4px' }} />
             <HeroMetric label={t('限流中')} value={`${limited}`} />
             <div style={{ width: 1, background: 'rgba(255,255,255,.22)', margin: '2px 4px' }} />
-            <HeroMetric label={t('今日请求')} value={formatInt(requests?.total || 0)} />
+            <HeroMetric label={t('今日请求')} value={formatInt(today?.overview?.requests || 0)} />
           </div>
 
           <div
@@ -142,46 +168,56 @@ export function HomePage() {
             }}
           >
             <span>{t('今日签到 {done}/{total}', { done, total: eligible })}</span>
-            <span>{t('最近请求 {n} 条', { n: requests?.matched || 0 })}</span>
+            <span>{t('累计请求 {n} 条', { n: requests?.total || 0 })}</span>
           </div>
-        </div>
+        </Card>
       </div>
 
-      {/* 签到卡 */}
-      <div className='m-section'>
-        <div className='m-card' style={{ display: 'flex', alignItems: 'center', gap: 13, padding: 15 }}>
-          <Ring percent={percent} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14.5, fontWeight: 600 }}>
-              {t('今日签到 {done} / {total}', { done, total: eligible })}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--m-text-3)', marginTop: 3, whiteSpace: 'nowrap' }}>
-              {eligible - done > 0
-                ? t('还有 {n} 个待签', { n: eligible - done })
-                : t('今天都签完了')}
-            </div>
-          </div>
-          <button type='button' className='m-btn m-sm' onClick={() => store.push('checkin')}>
-            <Icon name='checkin' />
-            {t('签到')}
-          </button>
-        </div>
-      </div>
+      <HiddenAccountsNotice hidden={session?.accounts?.hiddenAccounts} />
 
-      {/* 快捷入口 */}
+      {/* 签到中心是固定入口；没有可用能力时由内置页展示空态。 */}
+        <div className='m-section'>
+          <Card className='m-card' style={{ display: 'flex', alignItems: 'center', gap: 13, padding: 15 }}>
+            <Ring percent={percent} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 600 }}>
+                {t('今日签到 {done} / {total}', { done, total: eligible })}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--m-text-3)', marginTop: 3, whiteSpace: 'nowrap' }}>
+                {eligible === 0 ? t('暂无可签到账号')
+                  : eligible - done > 0
+                    ? t('还有 {n} 个待签', { n: eligible - done })
+                    : t('今天都签完了')}
+              </div>
+            </div>
+            <Button size='touch-sm' variant='default' type='button' className='m-btn m-sm' onClick={() => store.push(checkinKey)}>
+              <Icon name='checkin' />
+              {t('签到')}
+            </Button>
+          </Card>
+        </div>
+
+      {/* 高频操作入口 */}
       <div className='m-section'>
-        <div className='m-card' style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', padding: '14px 8px 12px' }}>
-          <QuickEntry icon='checkin' label={t('签到')} onClick={() => store.push('checkin')} />
+        <Card
+          className='m-card'
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            padding: '14px 8px 12px',
+          }}
+        >
+          <QuickEntry icon='checkin' label={t('签到')} onClick={() => store.push(checkinKey)} />
           <QuickEntry icon='model' label={t('模型')} onClick={() => store.push('models')} />
           <QuickEntry icon='key' label={t('Key')} onClick={() => store.push('keys')} />
           <QuickEntry icon='doc' label={t('接入')} onClick={() => store.push('docs')} />
-        </div>
+        </Card>
       </div>
 
       {/* 限流告警：只留一条，按严重度取最需要处理的那条 */}
       {limited > 0 ? (
         <div className='m-section'>
-          <button
+          <Button size='default' variant='ghost'
             type='button'
             onClick={() => store.go('accounts')}
             style={{
@@ -202,22 +238,22 @@ export function HomePage() {
               {t('{n} 个账号正在限流，转发会自动跳过它们', { n: limited })}
             </span>
             <span style={{ color: 'var(--m-warn)', fontWeight: 600, fontSize: 12, flex: 'none' }}>{t('查看')}</span>
-          </button>
+          </Button>
         </div>
       ) : null}
 
       {/* 最近请求 */}
       <div className='m-section'>
         <SectionHead title={t('最近请求')} action={{ label: t('全部'), onClick: () => store.push('requests') }} />
-        <div className='m-card'>
+        <Card className='m-card'>
           {error ? (
             <Empty text={error} />
           ) : recent.length ? (
             recent.map((row, index) => (
-              <button
+              <Button size='default' variant='ghost'
                 key={row.id || `${row.ts}-${index}`}
                 type='button'
-                className='m-row'
+                className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left'
                 onClick={() => store.push('requests')}
                 style={{ minHeight: 46 }}
               >
@@ -231,23 +267,23 @@ export function HomePage() {
                 <span style={{ fontSize: 11, color: 'var(--m-text-3)', flex: 'none' }}>
                   {row.durationMs ? formatDuration(row.durationMs) : '—'}
                 </span>
-              </button>
+              </Button>
             ))
           ) : (
             <Empty text={t('还没有请求记录')} />
           )}
-        </div>
+        </Card>
       </div>
 
       {/* 提供商概览 */}
       <div className='m-section'>
         <SectionHead title={t('账号分布')} action={{ label: t('管理'), onClick: () => store.go('accounts') }} />
-        <div className='m-card'>
+        <Card className='m-card'>
           {(session?.accounts?.providers || []).slice(0, 5).map(item => (
-            <button
+            <Button size='default' variant='ghost'
               key={item.id}
               type='button'
-              className='m-row'
+              className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left'
               onClick={() => store.go('accounts')}
             >
               <ProviderLogo id={item.id} label={item.label} />
@@ -258,10 +294,10 @@ export function HomePage() {
               <span className='m-chev'>
                 <Icon name='chev' />
               </span>
-            </button>
+            </Button>
           ))}
           {!(session?.accounts?.providers || []).length ? <Empty text={t('还没有添加账号')} /> : null}
-        </div>
+        </Card>
       </div>
     </div>
   )
@@ -335,7 +371,7 @@ function QuickEntry({
   onClick: () => void
 }) {
   return (
-    <button
+    <Button size='default' variant='ghost'
       type='button'
       onClick={onClick}
       style={{
@@ -365,7 +401,7 @@ function QuickEntry({
         <Icon name={icon} style={{ width: 21, height: 21 }} />
       </span>
       {label}
-    </button>
+    </Button>
   )
 }
 
@@ -374,9 +410,5 @@ export function StatusDot({ status }: { status?: number }) {
   const tone = !status ? 'warn' : status >= 200 && status < 400 ? 'ok' : 'bad'
   const color = tone === 'ok' ? 'var(--m-ok)' : tone === 'warn' ? 'var(--m-warn)' : 'var(--m-danger)'
   return <i style={{ width: 7, height: 7, borderRadius: '50%', background: color, flex: 'none' }} />
-}
-
-function hasRateLimit(account: { rateLimits?: Record<string, unknown> }): boolean {
-  return Boolean(account.rateLimits && Object.keys(account.rateLimits).length)
 }
 

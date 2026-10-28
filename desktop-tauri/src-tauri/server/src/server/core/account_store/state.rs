@@ -325,7 +325,7 @@ impl StoredAccount {
 
     /// 小浣熊新手任务的**结算台账**：`{ "<task_key>": <毫秒时刻> }`。
     ///
-    /// 键是 `providers::raccoon::onboarding` 的任务 key（`desktop_login_grant` /
+    /// 键是插件 `raccoon::onboarding` 的任务 key（`desktop_login_grant` /
     /// `mobile_login_grant`），值是这条**一次性**登录奖励结算的时刻 —— 「本轮刚
     /// 领到」（granted=true）与「探测确认早已发放过」（granted=false）都算结算：
     /// 一次性福利落定后不会再变，之后状态查询直接按「已领取」展示。不记的话，
@@ -401,14 +401,20 @@ impl StoredAccount {
     /// **原样存取**，归一化（认不出的值怎么落）在 `zcode::normalize_plan` 一处：
     /// 存储层不做取值白名单，否则将来加第三条通道要改两个地方。
     pub fn zcode_plan(&self) -> String {
-        as_text(self.fields.get(crate::server::core::providers::zcode::PLAN_FIELD))
+        let key = crate::server::core::providers::zcode::PLAN_FIELD;
+        let value = as_text(self.fields.get(key));
+        if !value.trim().is_empty() { value }
+        else { as_text(self.fields.get("pluginSecret").and_then(|secret| secret.get(key))) }
     }
 
     pub fn set_zcode_plan(&mut self, value: &str) {
-        self.fields.insert(
-            crate::server::core::providers::zcode::PLAN_FIELD.to_string(),
-            Value::String(value.to_string()),
-        );
+        let key = crate::server::core::providers::zcode::PLAN_FIELD;
+        self.fields.insert(key.to_string(), Value::String(value.to_string()));
+        for field in ["pluginSecret", "pluginPublic"] {
+            if let Some(Value::Object(fields)) = self.fields.get_mut(field) {
+                fields.insert(key.to_string(), Value::String(value.to_string()));
+            }
+        }
     }
 
     /// 是否「有可用凭证」（当前账号派生、凭据查询都以此为准）
@@ -459,9 +465,22 @@ impl StoredAccount {
     /// `modelAppSecret` 是它独有的凭证键）：那家不用 Bearer token，转发凭证是
     /// 一对网关 Basic key，漏了这一条它整家都会被静默过滤掉（见
     /// [`Self::has_officeace_key`]）。
+    ///
+    /// 第七条判据 `has_plugin_secret()` 只对插件家有效（凭证是不透明的
+    /// `pluginSecret`，网关不解析 —— 见 `account_store::plugin_accounts`）。
+    /// 漏了它，插件家的账号会在选路第一级就被当成「没有凭证」全部跳过。
     pub fn has_credentials(&self) -> bool {
         self.has_token() || self.is_desktop() || self.has_api_key() || self.has_jwt()
-            || self.no_auth() || self.has_officeace_key()
+            || self.no_auth() || self.has_officeace_key() || self.has_plugin_secret()
+    }
+
+    /// 记录里是否有非空的 `pluginSecret`（插件家的不透明凭证）。
+    ///
+    /// 只判「在不在、是不是 null」而不判内容：那份 JSON 的形状由插件定义，
+    /// 网关读它就是在猜别人的格式。空对象也算有凭证 —— 某些插件家（例如
+    /// 免登录的访客模式）确实会存一个空对象表示「没有可存的凭证但账号有效」。
+    pub fn has_plugin_secret(&self) -> bool {
+        matches!(self.fields.get("pluginSecret"), Some(value) if !value.is_null())
     }
 
     /// 记录是否**显式声明「该上游无需鉴权」**（自定义账号的 `noAuth: true`）。

@@ -14,8 +14,36 @@
 
 use serde_json::Value;
 
-/// 默认仓库（本项目的上游）；fork 后可自行覆盖（Node 版 DEFAULT_REPO）
-pub const DEFAULT_REPO: &str = "Agent2API/agent2api";
+use crate::server::config::UpdateChannels;
+
+/// 默认仓库：安装包实际发布的地方（独立构建账号下的仓库）。
+///
+/// ── 为什么不是主仓库 ────────────────────────────────────────
+/// 构建已搬到专用账号（见 `Agent2Builder/agent2api-releases` 的
+/// `release.yml`）：七个平台 job 跑一次是重负载，留在主仓库做 tag 触发容易
+/// 被判定为 Actions 滥用。因此**主仓库不再发带安装包的 Release** —— 这个
+/// 常量若仍指向主仓库，更新检查会永远「已是最新」（不报错，只是静默失效）。
+///
+/// ── 这个值是可以被远程改掉的 ────────────────────────────────
+/// 它只是**兜底**。正常情况下实际用的是索引里的 `app.repo`
+/// （见 `core::update::index`）：构建仓库换了，改索引文件即可，不必发版。
+/// 这里保留一个可用值，是为了「索引读不到也还能更新」。
+///
+/// `WORKBUDDY_UPDATE_REPO` 环境变量仍可覆盖（最高优先级，且不读索引）。
+pub const DEFAULT_REPO: &str = "Agent2Builder/agent2api-releases";
+
+/// 项目源码仓库（`owner/repo`）。
+///
+/// ── 为什么不能复用 [`DEFAULT_REPO`] ──────────────────────────
+/// 界面上的「关于作者 / 收藏项目」两个入口指的是**项目**，不是安装包存放处。
+/// 构建账号（`Agent2Builder`）只是借来跑 Actions 的，它的主页没有代码、
+/// 没有 issue、Star 也没有意义 —— 拿 `repository` 现拼链接会把人领错地方。
+///
+/// 这个值不随索引变：索引回答的是「产物在哪」，这里回答的是「项目在哪」，
+/// 两者只有「换源码仓库」时才需要一起改（换构建仓库不该动它）。
+///
+/// 网页端 / 手机端拿到的 `sourceRepository` 就是它（见 `build_check_result`）。
+pub const SOURCE_REPO: &str = "aimod-cc/Agent2API";
 
 /// GitHub API 根（Node 版 GITHUB_API）—— [`api_base`] 的默认值
 pub const GITHUB_API: &str = "https://api.github.com";
@@ -206,50 +234,24 @@ pub fn compare_versions(a: &str, b: &str) -> Option<i32> {
     })
 }
 
-/// 从 Release **列表**（`/releases`）里挑「当前该更新到的一版」。
+/// 从 Release 列表中挑选已关注通道里语义化版本最高的一版。
 ///
-/// 这是 beta 通道的取版方式：`/releases/latest` 由 GitHub 自己排除预发布，
-/// 想要 beta 就得自己从列表里挑。规则：
-///   · 跳过草稿（带令牌请求时草稿也会出现在列表里，它绝不该被当成可下载的一版）；
-///   · 版本号认不出来的标签不参与比较；
-///   · 其余按**版本号**取最高的一个（`3.2.0-beta.1` > `3.1.0`）。
-///
-/// ── 两种模式：`only_prerelease` ─────────────────────────────
-/// 调用方（`check::fetch_release`）按「当前跑的是不是 beta 版」决定：
-///   · `false`（当前跑正式版，比如刚打开开关的人）：**预发布一并参与**，取最高。
-///     beta 的核心号总排在正式版前面，所以正常会拿到某个 beta；仓库一个 beta
-///     都没有时照旧拿正式版更新 —— 打开开关不该让人收不到任何更新。
-///   · `true`（当前就在 beta 版上）：**只看预发布**。同核心号的转正版
-///     （`3.1.0` > `3.1.0-beta.1`）不算「有更新」，不会把人从 beta 频道拽回
-///     正式版 —— 加入 beta 的人要的是「留在 beta 上」，回到正式版由用户自己
-///     关开关决定。列表里没有可用 beta 时返回 `None`（无更新），
-///     **不回落到正式版**：回落等于用「转正」把人踢出 beta 频道。
-///
-/// 不降级由调用方那次 `compare_versions(挑中的标签, 当前版本) > 0` 兜住：beta 版
-/// 比同核心号的正式版小、但比更早的正式版大，于是「关掉开关后不会被降级、
-/// 等正式版版号超上来才收到」这条自然成立（`3.1.0-beta.1` 的用户在正式版发到
-/// `3.1.0` 之前不会收到任何东西）。
-///
-/// 为什么按版本号而不是列表顺序：列表按创建时间倒序，而热修（先发 3.1.0、
-/// 后补 3.0.9）会让创建时间与版本号不一致 —— 面板要的是「版本最高的一版」。
-/// 版本号相同时保留先遇到的（= 创建时间更晚的那条）。
-pub fn pick_listed_release<'a>(payload: &'a Value, only_prerelease: bool) -> Option<&'a Value> {
+/// 草稿和非语义化标签不参与；分类同时考虑预发布标记和版本后缀。
+/// 与当前版本的比较由调用方负责，列表发布时间不决定版本先后。
+pub fn pick_listed_release(payload: &Value, channels: UpdateChannels) -> Option<&Value> {
     let list = payload.as_array()?;
     let mut best: Option<&Value> = None;
-    let mut first: Option<&Value> = None;
     for item in list {
         if item.get("draft").and_then(Value::as_bool) == Some(true) {
             continue;
-        }
-        if first.is_none() {
-            first = Some(item);
         }
         let tag = item.get("tag_name").and_then(Value::as_str).unwrap_or("");
         if parse_version(tag).is_none() {
             continue;
         }
-        // 「不要用转正版把人踢出 beta 频道」：只在这里筛预发布（见函数说明）
-        if only_prerelease && !is_prerelease_version(tag) {
+        let prerelease = item.get("prerelease").and_then(Value::as_bool) == Some(true)
+            || is_prerelease_version(tag);
+        if !channels.accepts(prerelease) {
             continue;
         }
         let take = match best {
@@ -263,10 +265,7 @@ pub fn pick_listed_release<'a>(payload: &'a Value, only_prerelease: bool) -> Opt
             best = Some(item);
         }
     }
-    // 兜底取列表第一条（= 创建时间最新）只在「一个能认的版本号都没有」时用；
-    // 只看预发布的那条路上不用 —— 它要的是「没有 beta 就没有更新」，不是
-    // 「随便挑一条充数」。
-    if only_prerelease { best } else { best.or(first) }
+    best
 }
 
 // ─── URL 与资产 ─────────────────────────────────────────────
@@ -279,6 +278,9 @@ pub fn pick_listed_release<'a>(payload: &'a Value, only_prerelease: bool) -> Opt
 pub fn assert_downloadable(url: &str) -> Result<url::Url, UpdateError> {
     let parsed = url::Url::parse(url)
         .map_err(|_| UpdateError::with_status(400, "下载地址不是合法 URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(UpdateError::with_status(400, "下载地址不能包含凭证"));
+    }
     let host = parsed.host_str().unwrap_or("").to_lowercase();
 
     // ── 自建更新源（WORKBUDDY_UPDATE_API_BASE）───────────────
@@ -567,8 +569,28 @@ pub fn pick_asset_by_name(assets: Option<&Value>, wanted: &str) -> Option<Value>
     }))
 }
 
-/// JS `String.prototype.trim` 的空白集合 = White_Space ∪ {U+FEFF}。
+/// Android APK 的资产名约定：`Agent2API-<版本>.apk`（CI 的 android job 按这个
+/// 形状重命名，安装文档里写的也是它）。
 ///
+/// 与 [`pick_installer`] 分开的原因：那条按**本机平台**挑安装包，而手机端要的
+/// 恰恰是「另一个平台」的产物 —— 网关跑在电脑上，用户却在手机上点更新。所以
+/// 这条不看 `cfg!(target_os)`，只按后缀 `.apk` 挑。
+///
+/// 多个候选（例如同时挂了 universal 与分架构包）时取第一个：当前 CI 只产一个，
+/// 等真出现多包再补优先级。
+pub fn pick_android_apk(assets: Option<&Value>) -> Option<Value> {
+    let list = assets.and_then(Value::as_array)?;
+    let chosen = list
+        .iter()
+        .find(|item| asset_name(item).to_lowercase().ends_with(".apk"))?;
+    Some(serde_json::json!({
+        "name": asset_name(chosen),
+        "size": chosen.get("size").and_then(Value::as_u64).unwrap_or(0),
+        "url": chosen.get("browser_download_url").and_then(Value::as_str).unwrap_or(""),
+    }))
+}
+
+/// JS `String.prototype.trim` 的空白集合 = White_Space ∪ {U+FEFF}。
 /// 这里为 safe_file_name 的 `.trim()` 复制一份：规则只有一行，重复的代价
 /// 小于把它提升成全局公共设施（项目里另有几处同款实现，各自模块内可见）。
 fn js_trim(value: &str) -> &str {

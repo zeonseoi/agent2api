@@ -14,8 +14,8 @@
 //!   1. **Anthropic Messages SSE**（`AnthropicToChatStream` ←
 //!      `protocol::anthropic_outbound::ChatFromAnthropicStream`）：内置家里只有
 //!      ZCode 的活动套餐通道说这套协议；
-//!   2. **Command Code NDJSON**（`CommandCodeToChatStream` ←
-//!      `protocol::commandcode_outbound::ChatFromCommandCodeStream`）：
+//!   2. **AI SDK v5 NDJSON**（`AiSdkNdjsonToChatStream` ←
+//!      `protocol::ai_sdk_ndjson::ChatFromAiSdkNdjsonStream`）：
 //!      `api.commandcode.ai` 的 `/alpha/generate` 返回
 //!      `application/x-ndjson`（一行一个 JSON 事件、**HTTP 恒 200**、错误在流内）。
 //!      两台状态机不合并：行形态（有无 `data:` 前缀）与事件词表都不同，
@@ -52,7 +52,7 @@ use futures::Stream;
 use crate::server::core::protocol::anthropic_outbound::ChatFromAnthropicStream;
 use crate::server::core::protocol::antigravity_stream::ChatFromAntigravityStream;
 use crate::server::core::protocol::chatglm_stream::ChatFromChatglmStream;
-use crate::server::core::protocol::commandcode_outbound::ChatFromCommandCodeStream;
+use crate::server::core::protocol::ai_sdk_ndjson::ChatFromAiSdkNdjsonStream;
 
 /// 上游 Anthropic SSE → 标准 chat SSE 的字节流（`reqwest::Response` 直接进来）。
 ///
@@ -161,11 +161,11 @@ impl Stream for AnthropicToChatStream {
 /// 因此编排层**不**按 `response.status()` 分流错误 —— 它照旧把 200 与响应体
 /// 一起交进来，成败由这台状态机折出的错误帧表达（聚合器据此转 502、
 /// 流式路径原样把错误帧透给客户端）。
-pub struct CommandCodeToChatStream {
+pub struct AiSdkNdjsonToChatStream {
     /// 上游字节流（已描述错误、已装空闲守卫）
     inner: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
     /// 协议状态机（上游 NDJSON 事件 → chat 帧）
-    machine: ChatFromCommandCodeStream,
+    machine: ChatFromAiSdkNdjsonStream,
     /// 已翻译待下发的帧（一个上游 chunk 可能产出多帧）
     pending: VecDeque<Bytes>,
     /// 上游已结束（不再 poll 上游，把 pending 与收尾帧吐完即 None）
@@ -174,7 +174,7 @@ pub struct CommandCodeToChatStream {
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
 }
 
-impl CommandCodeToChatStream {
+impl AiSdkNdjsonToChatStream {
     /// `model` 是**上游真名**（下发帧里的 `model` 字段，见模块头）。
     pub fn new(
         response: reqwest::Response,
@@ -196,7 +196,7 @@ impl CommandCodeToChatStream {
         );
         Self {
             inner: guarded,
-            machine: ChatFromCommandCodeStream::new(model),
+            machine: ChatFromAiSdkNdjsonStream::new(model),
             pending: VecDeque::new(),
             upstream_done: false,
             capture: telemetry.capture(),
@@ -204,7 +204,7 @@ impl CommandCodeToChatStream {
     }
 }
 
-impl Stream for CommandCodeToChatStream {
+impl Stream for AiSdkNdjsonToChatStream {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

@@ -20,15 +20,19 @@ use std::collections::BTreeMap;
 use rusqlite::{params, Connection};
 
 use super::record::{AccountAccum, DailyEntry, ModelAccum, ProviderAccum};
+use super::source::{ApiKeyAccum, ClientAccum};
 
 /// `request_daily` 的列顺序（所有 SELECT 都按这个顺序取，`decode_daily`
 /// 依赖它；不写 `SELECT *` 的理由同 `sql::REQUEST_COLUMNS`）
 ///
-/// `credits` 排在**末尾**：与明细侧那条「加列只加在末尾」的纪律同理 ——
+/// `credits` 排在 `account_stats` 之后：与明细侧那条「加列只加在末尾」的纪律同理 ——
 /// 中间插一列会让后面所有 `row.get(n)` 的序号整体挪一位，改动在 diff 里看不出错，
-/// 只会静默取错值（schema v11 加的列）。
+/// 只会静默取错值（schema v11 加的列）。官方 v18 的三列排在它后面，也是同一理由。
+/// 物理列序不保证一致（撞号库经 `reconcile` 补的 `credits` 会落到表尾），所以
+/// 这里**永远显式列名**，`decode_daily` 只认本常量的顺序。
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
-     cache_input_tokens, model_tokens, provider_stats, account_stats, credits";
+     cache_input_tokens, model_tokens, provider_stats, account_stats, credits, \
+     client_stats, api_key_stats, source_stats_version";
 
 /// JSON 数组列 → `Vec<T>`。解析失败或内容不是数组时退化成空表。
 ///
@@ -62,6 +66,9 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         account_stats: decode_accum::<AccountAccum>(&account_stats),
         // 末列是 schema v11 加的（当天 Credits 合计）；旧行 DEFAULT 0 原样读出
         credits: row.get(9)?,
+        client_stats: decode_accum::<ClientAccum>(&row.get::<_, String>(10)?),
+        api_key_stats: decode_accum::<ApiKeyAccum>(&row.get::<_, String>(11)?),
+        source_stats_version: row.get(12)?,
     })
 }
 
@@ -103,14 +110,17 @@ pub(super) fn select_daily_row(
 pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO request_daily (date, requests, successful, tokens, cache_hit_tokens, \
-         cache_input_tokens, model_tokens, provider_stats, account_stats, credits) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+         cache_input_tokens, model_tokens, provider_stats, account_stats, credits, \
+         client_stats, api_key_stats, source_stats_version) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(date) DO UPDATE SET requests = excluded.requests, \
          successful = excluded.successful, tokens = excluded.tokens, \
          cache_hit_tokens = excluded.cache_hit_tokens, \
          cache_input_tokens = excluded.cache_input_tokens, \
          model_tokens = excluded.model_tokens, provider_stats = excluded.provider_stats, \
-         account_stats = excluded.account_stats, credits = excluded.credits",
+         account_stats = excluded.account_stats, credits = excluded.credits, \
+         client_stats = excluded.client_stats, \
+         api_key_stats = excluded.api_key_stats, source_stats_version = excluded.source_stats_version",
         params![
             day.date,
             day.requests,
@@ -122,6 +132,9 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
             encode_accum(&day.provider_stats),
             encode_accum(&day.account_stats),
             day.credits,
+            encode_accum(&day.client_stats),
+            encode_accum(&day.api_key_stats),
+            day.source_stats_version,
         ],
     )?;
     Ok(())

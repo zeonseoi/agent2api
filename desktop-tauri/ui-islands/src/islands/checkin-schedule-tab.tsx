@@ -1,208 +1,141 @@
 import * as React from 'react'
-import { Badge, Button, Checkbox, Input, Spinner, Switch } from '@ui'
-import { formatTime, shared, toast } from './accounts-shared'
+import { Badge, Button, Checkbox, Input, Switch , Label, Card, CardHeader } from '@ui'
+import {
+  patch, removeScheduleEntry, runScheduleEntry, saveKeepaliveModels,
+  saveScheduleEntry, saveTravel, runTravelNow, setClaimAuto, store, toggleMaster,
+} from './checkin-store'
+import {
+  formatClock, formatTime,
+  type CheckinCenter, type CheckinResult, type ScheduleEntry,
+} from './checkin-types'
 import { t } from '../i18n'
-import {
-  getCheckinStore, setClaimAuto, setKeepaliveDraft, submitKeepaliveModels, subscribeCheckinStore,
-  runTravelScheduleNow, saveTravelSchedule,
-  type CheckinStore, type TravelScheduleState,
-} from './checkin-state'
-import {
-  deleteSchedule, getSchedulesStore, loadSchedules, runScheduleNow, saveSchedule,
-  setEditingId, subscribeSchedulesStore, toggleMaster, toggleScheduleEnabled,
-  type SchedulesStore,
-} from './checkin-schedules-state'
-import type { ScheduleEntry } from './checkin-state'
+import { confirmDialog } from '@ui'
+import { Empty } from '@ui'
 
 /**
- * 签到中心的「定时签到」标签页。
+ * 「定时签到」标签页：总开关 + 条目列表 + 保活模型链 + 猫猫旅行。
  *
- * ── 结构 ────────────────────────────────────────────────────
- *   · 总开关面板 —— `autoCheckin.enabled`（写走老的 /api/auto-checkin，见
- *     checkin-schedules-state 的模块头）。关了所有条目都不跑；开着时每条
- *     条目按自己的时刻与范围各自执行、各自当天去重。
- *   · 条目列表 —— 每条：开关 / 时刻 / 范围 / 下次执行 / 上次执行摘要 +
- *     立即执行 / 编辑 / 删除。行内展开编辑表单（一次只开一张，状态在
- *     schedules-state 的 editingId）；新建同表单（editingId = 'new'）。
- *   · 保活模型链面板 —— 自原「自动签到」卡迁入（它是全局一份的配置，
- *     与条目无关，所以独立成卡）：WorkBuddy 国际版日活保活的免费模型，
- *     按顺序回退；清空提交 = 恢复缺省链。
+ * ── 编排在网关，页面只是视图 ────────────────────────────────
+ * 一条定时条目可能横跨九家提供商；卸载插件不能让用户丢排程。所以排程、去重、
+ * 错过补签全在网关（`core::auto_checkin` / `core::checkin_schedules`）。
  *
- * 数据：GET /api/checkin-schedules 一次拉全（loadSchedules，挂载时调）；
- * 写动作的响应自带整份新状态，无轮询。
+ * ── 两块「地区专属」面板 ────────────────────────────────────
+ * 保活模型链（国际版）与猫猫旅行（国内版）由插件申报的 `adminPanels` 决定显不
+ * 显示。它们**该跟着插件走** —— 那是插件独有的玩法知识，网关不该假装知道
+ * 「国际版有日活保活这回事」。这与「签到中心菜单常驻」不矛盾：菜单是产品功能，
+ * 这两个面板是某家提供商的特色。
  */
 
-/**
- * 问号提示全文（沿用原「自动签到」卡的说明，调度语义没变 —— 变的只是
- * 「一个时刻」变成「多条目各自时刻」）。
- * 整段是一个键：扫描器只认字符串字面量（拼接串 / 模板串提不到键），所以不拆行。
- */
-const AUTO_CHECKIN_DESC = t(
-    '到点后自动签到勾选提供商的可用账号（WorkBuddy 国内版走每日签到接口，国际版走每日活跃任务：探测活动、领日活奖励、再用免费模型保活并在网页通道建会话点亮日活；小浣熊走桌面端每日积分链路；AutoClaw 走官方客户端的每日签到任务；Qoder 中国版走活动领取，没被下发活动的账号会得到中性提示；Qoder 国际版要先带设备风控身份（本机 Qoder 客户端 / qodercli 的 UMID 组件生成）才能看到「每日 100 Credits」活动，缺组件时会得到明确的说明而不是报错；Trae 领 SOLO 的每日签到积分（按自然日 0 点重置），上游没对该账号开活动、或凭据里没有设备号时得到的是「未领取 + 具体原因」而不是报错；Loomy 每天替账号打一次首次登录积分；KukuAI 领「免费领积分」的每日任务；CodeArts 领当日的运营福利（领取 → 确认 → 回读核实，自动执行受每天 6 次 / 间隔 10 分钟的写请求限流）；OfficeAce 果办一次领当天全部奖励（每日签到 + 新人礼））。错过时点开机后会自动补签，不会因为当时没开机而漏掉。各家签到接口都是幂等的，重复执行不会重复领取。',
-)
+/* ─── 条目编辑表单 ─────────────────────────── */
 
-/* ─── store 订阅 ───────────────────────────── */
-
-function useSchedulesStore(): SchedulesStore {
-  const [store, setStore] = React.useState(getSchedulesStore())
-  React.useEffect(() => subscribeSchedulesStore(() => setStore(getSchedulesStore())), [])
-  return store
-}
-
-/** 保活模型链的草稿 / 快照在 checkin-state 里，这里只订阅读 */
-function useCheckinSnapshot(): CheckinStore {
-  const [store, setStore] = React.useState(getCheckinStore())
-  React.useEffect(() => subscribeCheckinStore(() => setStore(getCheckinStore())), [])
-  return store
-}
-
-/* ─── 展示工具 ─────────────────────────────── */
-
-/** 勾选的家名（providers 顺序即注册顺序：注册表顺序，不是勾选先后） */
-function pickedLabels(entry: ScheduleEntry, options: Array<{ id: string; label: string }>): string[] {
-  const picked = Array.isArray(entry.providers) ? entry.providers : []
-  return options.filter(option => picked.includes(option.id)).map(option => option.label)
-}
-
-/**
- * 范围摘要。**全选时只说「全部 n 家」**：默认就是全选，把 12 个名字铺一行
- * 之后，这一行里真正该被看见的「每天几点」和「上次执行」全被名字淹掉了
- * （名称列被挤成两行）。部分勾选才逐家列 —— 那时名单本身就是信息
- * （悬停看全貌，见 `providersFullList`）。
- */
-function providersSummary(entry: ScheduleEntry, options: Array<{ id: string; label: string }>): string {
-  const labels = pickedLabels(entry, options)
-  if (!labels.length) return t('未勾选提供商')
-  if (options.length > 0 && labels.length >= options.length) return t('全部 {n} 家', { n: options.length })
-  return labels.join(t('、'))
-}
-
-/** 完整名单（行里会截断，悬停提示用这一份） */
-function providersFullList(entry: ScheduleEntry, options: Array<{ id: string; label: string }>): string {
-  const labels = pickedLabels(entry, options)
-  return labels.length ? labels.join(t('、')) : t('未勾选提供商')
-}
-
-/** 上次执行的一行摘要（时间 · 触发原因 —— 成功 n · 失败 n） */
-function lastResultLine(entry: ScheduleEntry): string {
-  const last = entry.lastResult
-  if (!last) return t('还没执行过')
-  const numberOf = (value: unknown): number => Number(value) || 0
-  const parts = [t('成功 {n}', { n: numberOf(last.succeeded) })]
-  const active = numberOf(last.active)
-  if (active > 0) parts.push(t('保活 {n}', { n: active }))
-  const failed = numberOf(last.failedCount)
-  if (failed > 0) parts.push(t('失败 {n}', { n: failed }))
-  return `${last.at ? formatTime(last.at) : '—'}${last.reason ? ` · ${last.reason}` : ''} —— ${parts.join(t(' · '))}`
-}
-
-/* ─── 编辑表单 ─────────────────────────────── */
-
-/**
- * 条目的行内编辑 / 新建表单。草稿是**组件内**状态（展开时按 entry 现起，
- * 收起即弃）—— 与时刻草稿跨卡共享的旧场景不同，这里一次只开一张表单。
- */
-function ScheduleEditor({ entry, store }: { entry: ScheduleEntry | null; store: SchedulesStore }) {
-  const options = Array.isArray(store.data?.providerOptions) ? store.data!.providerOptions! : []
+function EditorForm({ entry, options }: {
+  entry: ScheduleEntry | null
+  options: { id: string; label: string }[]
+}): React.ReactElement {
   const isNew = entry === null
   const [label, setLabel] = React.useState(entry?.label ?? '')
-  const [time, setTime] = React.useState(entry?.time ?? '00:01')
-  const [picked, setPicked] = React.useState<ReadonlySet<string>>(
-    new Set(isNew ? options.map(option => option.id) : entry?.providers ?? []),
+  // 新建默认 00:01：与后端 `DEFAULT_TIME` 同一个值，不在这里另立一个
+  const [time, setTime] = React.useState(entry?.time || '00:01')
+  const [providers, setProviders] = React.useState<string[]>(
+    entry ? [...entry.providers] : options.map(item => item.id),
   )
-  // 新建缺省全选；没有 options（后端没给）时退到这条已有的 providers
-  React.useEffect(() => {
-    if (isNew && options.length > 0) setPicked(new Set(options.map(option => option.id)))
-    // 只在挂载 / 切换编辑对象时初始化一次：options 后到不该把用户改了一半的勾选冲掉
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-  const canSave = time.trim() !== '' && picked.size > 0
-  const pickAll = (): void => setPicked(new Set(options.map(option => option.id)))
-  const clearAll = (): void => setPicked(new Set<string>())
-  const submit = async (): Promise<void> => {
-    await saveSchedule({
-      id: entry?.id,
+
+  const canSave = time.trim() !== '' && providers.length > 0 && !store.saving
+
+  const toggleProvider = (id: string, checked: boolean) => {
+    setProviders(prev => (checked
+      ? (prev.includes(id) ? prev : [...prev, id])
+      : prev.filter(item => item !== id)))
+  }
+
+  const submit = () => {
+    void saveScheduleEntry({
+      ...(isNew ? {} : { id: entry.id }),
       label: label.trim(),
-      enabled: entry?.enabled ?? true,
       time: time.trim(),
-      providers: options.map(option => option.id).filter(id => picked.has(id)),
+      enabled: entry ? entry.enabled : true,
+      providers: options.map(item => item.id).filter(id => providers.includes(id)),
     })
   }
+
   return (
-    <div className='ck-sched-editor'>
-      <div className='ck-set-line'>
-        <span className='ck-set-k'>{t('名称')}</span>
-        <span className='ck-set-v'>
+    <div className="ck-sched-editor">
+      <div className="ck-set-line">
+        <span className="ck-set-k">名称</span>
+        <span className="ck-set-v">
           <Input
-            type='text'
-            className='max-w-[220px]'
-            placeholder={t('可选 · 缺省显示时刻')}
+            type="text"
+            className="ck-sched-name"
+            placeholder="可选 · 缺省显示时刻"
             value={label}
             disabled={store.saving}
             onChange={event => setLabel(event.currentTarget.value)}
           />
         </span>
       </div>
-      <div className='ck-set-line'>
-        <span className='ck-set-k'>{t('每天时刻')}</span>
-        <span className='ck-set-v flex items-center gap-2'>
+
+      <div className="ck-set-line">
+        <span className="ck-set-k">每天时刻</span>
+        <span className="ck-set-v ck-set-row">
           <Input
-            type='time'
-            className='w-[96px] max-w-[96px] font-mono tabular-nums'
+            type="time"
+            className="ck-sched-time-input font-mono tabular-nums"
             value={time}
             disabled={store.saving}
             onChange={event => setTime(event.currentTarget.value)}
           />
-          <span className='text-subtle text-xs'>{t('北京时间 · 错过时点开机后会自动补签')}</span>
+          <span className="ck-sub">北京时间 · 错过时点开机后会自动补签</span>
         </span>
       </div>
-      <div className='ck-set-line ck-set-line-top'>
-        <span className='ck-set-k'>{t('签到范围')}</span>
-        <span className='ck-set-v'>
-          <div className='ck-mini-row'>
-            <span className='ck-mini-note'>
-              {t('到点时逐个签到，已勾 {n} / {total} 家', { n: picked.size, total: options.length })}
+
+      <div className="ck-set-line ck-set-line-top">
+        <span className="ck-set-k">签到范围</span>
+        <span className="ck-set-v">
+          <div className="ck-mini-row">
+            <span className="ck-mini-note">
+              到点时逐个签到，已勾 {providers.length} / {options.length} 家
             </span>
-            <button type='button' className='ck-mini-btn' disabled={store.saving} onClick={pickAll}>
-              {t('全选')}
-            </button>
-            <button
-              type='button'
-              className='ck-mini-btn'
-              disabled={store.saving || picked.size === 0}
-              onClick={clearAll}
+            <Button size='default' variant='ghost'
+              type="button"
+              className="ck-mini-btn"
+              disabled={store.saving}
+              onClick={() => setProviders(options.map(item => item.id))}
             >
-              {t('清空')}
-            </button>
+              全选
+            </Button>
+            <Button size='default' variant='ghost'
+              type="button"
+              className="ck-mini-btn"
+              disabled={store.saving || providers.length === 0}
+              onClick={() => setProviders([])}
+            >
+              清空
+            </Button>
           </div>
-          <div className='ck-range'>
+          <div className="ck-range">
             {options.map(option => (
-              <label className='ck-range-item' key={option.id}>
+              <Label className="ck-range-item" key={option.id}>
                 <Checkbox
-                  checked={picked.has(option.id)}
+                  checked={providers.includes(option.id)}
                   disabled={store.saving}
-                  onCheckedChange={next => {
-                    const nextPicked = new Set(picked)
-                    if (next === true) nextPicked.add(option.id)
-                    else nextPicked.delete(option.id)
-                    setPicked(nextPicked)
-                  }}
+                  onCheckedChange={checked => toggleProvider(option.id, checked === true)}
                 />
-                <span className='ck-range-name' title={option.label}>{option.label}</span>
-              </label>
+                <span className="ck-range-name" title={option.label}>{option.label}</span>
+              </Label>
             ))}
           </div>
-          {picked.size === 0 ? (
-            <div className='ck-mini-warn'>{t('至少勾一家才能保存（不勾等于这条条目不签到）')}</div>
-          ) : null}
+          {providers.length === 0
+            ? <div className="ck-mini-warn">至少勾一家才能保存（不勾等于这条条目不签到）</div>
+            : null}
         </span>
       </div>
-      <div className='ck-sched-actions'>
-        <Button size='sm' variant='outline' disabled={store.saving} onClick={() => setEditingId(null)}>
-          {t('取消')}
+
+      <div className="ck-sched-actions">
+        <Button size="sm" variant="outline" disabled={store.saving} onClick={() => patch({ editingId: null })}>
+          取消
         </Button>
-        <Button size='sm' variant='default' disabled={!canSave || store.saving} onClick={() => void submit()}>
-          {store.saving ? t('保存中…') : t('保存')}
+        <Button size="sm" variant="default" disabled={!canSave} onClick={submit}>
+          {store.saving ? '保存中…' : '保存'}
         </Button>
       </div>
     </div>
@@ -211,100 +144,103 @@ function ScheduleEditor({ entry, store }: { entry: ScheduleEntry | null; store: 
 
 /* ─── 条目行 ───────────────────────────────── */
 
-/**
- * 新建条目的那一行。它必须是**真渲染出来的一段界面** —— 之前「添加条目」
- * 只把 `editingId` 置成 `'new'`，而没有一处按这个值渲染（条目行只认
- * `entry.id`），于是点了完全没反应（状态变了、界面没动）。
- *
- * 位置在列表**首位**：点按钮的地方（卡头右上）离它最近，也不会被已有条目
- * 推到看不见的地方去。
- */
-function NewEntryRow({ store }: { store: SchedulesStore }) {
-  return (
-    <div className='ck-sched-row open ck-sched-row-new'>
-      <div className='ck-sched-main'>
-        <span className='ck-new-dot' aria-hidden>＋</span>
-        <div className='ck-prov-info'>
-          <div className='ck-prov-name'>{t('新建定时条目')}</div>
-          <div className='ck-prov-desc'>
-            {t('填好时刻与签到范围后点「保存」；名称可以留空（界面显示时刻）')}
-          </div>
-        </div>
-      </div>
-      <ScheduleEditor entry={null} store={store} />
-    </div>
-  )
+/** 「上次执行」那一行：`时间 · 原因 —— 成功 N · 保活 N · 失败 N` */
+function lastResultLine(entry: ScheduleEntry): string {
+  const result: CheckinResult | null = entry.lastResult
+  if (!result || typeof result !== 'object') return '还没执行过'
+  const count = (key: keyof CheckinResult) => Number(result[key]) || 0
+  const parts = [`成功 ${count('succeeded')}`]
+  if (count('active') > 0) parts.push(`保活 ${count('active')}`)
+  if (count('failedCount') > 0) parts.push(`失败 ${count('failedCount')}`)
+  const at = result.at ? formatTime(result.at) : '—'
+  const reason = result.reason ? ` · ${result.reason}` : ''
+  return `${at}${reason} —— ${parts.join(' · ')}`
 }
 
-function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: SchedulesStore }) {
-  const options = Array.isArray(store.data?.providerOptions) ? store.data!.providerOptions! : []
-  const expanded = store.editingId === entry.id
-  const busy = store.runningId === entry.id
-  const masterOn = store.data?.enabled === true
-  const nextRunAt = Number(entry.nextRunAt)
-  const remove = async (): Promise<void> => {
-    const ask = shared().wbConfirm?.ask
-    if (!ask) return
-    // ConfirmOptions 只收 html（调用方负责转义）：条目名来自用户输入，先转义再拼
-    const name = entry.displayLabel || entry.time || entry.id
-    const escaped = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    if (!(await ask({
-      title: t('删除定时条目'),
-      html: t('确定删除「<strong>{name}</strong>」？删除后到点不再执行。', { name: escaped }),
-      okText: t('删除'),
-      okClass: 'danger',
-    }))) return
-    await deleteSchedule(entry.id)
-  }
+/** 范围的摘要（全选时说「全部 N 家」，不把十几个名字串起来） */
+function scopeSummary(entry: ScheduleEntry, options: { id: string; label: string }[]): string {
+  const lookup = new Map(options.map(item => [item.id, item.label]))
+  const names = entry.providers.map(id => lookup.get(id) ?? id)
+  if (names.length === 0) return '未勾选提供商'
+  if (options.length > 0 && names.length >= options.length) return `全部 ${options.length} 家`
+  return names.join('、')
+}
+
+function EntryRow({ entry, options, masterOn }: {
+  entry: ScheduleEntry
+  options: { id: string; label: string }[]
+  masterOn: boolean
+}): React.ReactElement {
+  const editing = store.editingId === entry.id
+  const running = store.runningScheduleId === entry.id
+  const nextRun = Number(entry.nextRunAt)
+  const nextText = masterOn && entry.enabled && Number.isFinite(nextRun) && nextRun > 0
+    ? `下次 ${formatClock(nextRun)}`
+    : '—'
+
+  const fullScope = entry.providers
+    .map(id => options.find(item => item.id === id)?.label ?? id)
+    .join('、') || '未勾选提供商'
+
   return (
-    <div className={expanded ? 'ck-sched-row open' : 'ck-sched-row'}>
-      <div className='ck-sched-main'>
+    <div className={editing ? 'ck-sched-row open' : 'ck-sched-row'}>
+      <div className="ck-sched-main">
         <Switch
-          checked={entry.enabled === true}
+          checked={entry.enabled}
           disabled={store.saving}
-          onCheckedChange={next => void toggleScheduleEnabled(entry, next === true)}
+          // 只改开关：其余字段原样回传（后端 upsert 是全量覆盖）。
+          // 不收表单、不弹提示 —— 这是行上的快捷开关，不是「编辑完成」。
+          onCheckedChange={checked => void saveScheduleEntry({
+            id: entry.id,
+            label: entry.label ?? '',
+            enabled: checked === true,
+            time: entry.time ?? '',
+            providers: Array.isArray(entry.providers) ? entry.providers : [],
+          }, { closeEditor: false, silent: true })}
         />
-        <div className='ck-prov-info'>
-          <div className='ck-prov-name'>
+        <div className="ck-prov-info">
+          <div className="ck-prov-name">
             {entry.displayLabel || entry.time || entry.id}
-            {entry.enabled === true
-              ? null
-              : <Badge variant='outline' shape='tag'>{t('已停用')}</Badge>}
+            {entry.enabled ? null : <Badge variant="outline" shape="tag">已停用</Badge>}
           </div>
-          <div className='ck-prov-desc ck-sched-scope' title={providersFullList(entry, options)}>
-            {t('每天 {time} · {scope}', { time: entry.time ?? '—', scope: providersSummary(entry, options) })}
+          <div className="ck-prov-desc ck-sched-scope" title={fullScope}>
+            每天 {entry.time || '—'} · {scopeSummary(entry, options)}
           </div>
-          <div className='ck-prov-desc'>
-            {t('上次执行：{line}', { line: lastResultLine(entry) })}
-          </div>
+          <div className="ck-prov-desc">上次执行：{lastResultLine(entry)}</div>
         </div>
-        <div className='ck-prov-right'>
-          <span className='ck-sched-next'>
-            {masterOn && entry.enabled === true && Number.isFinite(nextRunAt) && nextRunAt > 0
-              ? t('下次 {date}', { date: formatTime(nextRunAt) })
-              : '—'}
-          </span>
+        <div className="ck-prov-right">
+          <span className="ck-sched-next">{nextText}</span>
           <Button
-            size='sm'
-            variant='ghost'
-            disabled={busy || store.runningId !== null}
-            onClick={() => void runScheduleNow(entry.id)}
+            size="sm"
+            variant="ghost"
+            disabled={running || store.runningScheduleId !== null}
+            onClick={() => void runScheduleEntry(entry.id)}
           >
-            {busy ? t('执行中…') : t('立即执行')}
+            {running ? '执行中…' : '立即执行'}
           </Button>
           <Button
-            size='sm'
-            variant='ghost'
-            onClick={() => setEditingId(expanded ? null : entry.id)}
+            size="sm"
+            variant="ghost"
+            onClick={() => patch({ editingId: editing ? null : entry.id })}
           >
-            {expanded ? t('收起') : t('编辑')}
+            {editing ? '收起' : '编辑'}
           </Button>
-          <Button size='sm' variant='ghost' className='text-destructive' disabled={store.saving} onClick={() => void remove()}>
-            {t('删除')}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-destructive"
+            disabled={store.saving}
+            onClick={async () => {
+              const name = entry.displayLabel || entry.time || entry.id
+              if (!await confirmDialog(`确定删除「${name}」？删除后到点不再执行。`)) return
+              void removeScheduleEntry(entry.id)
+            }}
+          >
+            删除
           </Button>
         </div>
       </div>
-      {expanded ? <ScheduleEditor entry={entry} store={store} /> : null}
+      {editing ? <EditorForm entry={entry} options={options} /> : null}
     </div>
   )
 }
@@ -326,21 +262,21 @@ function ScheduleEntryRow({ entry, store }: { entry: ScheduleEntry; store: Sched
  * （POST /api/claim-auto，起停后端轮询）。没有国内版账号时后端不给这段，
  * 整卡不渲染。
  */
-function ClaimAutoCard({ store }: { store: CheckinStore }) {
-  const claimEnabled = store.snapshot?.claimAuto?.enabled === true
+function ClaimAutoCard() {
+  const claimEnabled = store.center?.claimAuto?.enabled === true
   return (
-    <section className='panel ck-growth-card'>
-      <div className='panel-head'>
+    <Card render={<section />} className='panel ck-growth-card'>
+      <CardHeader className='panel-head'>
         <h2>{t('WorkBuddy 成长任务')}</h2>
         <span className='tip-q' data-tip={t('后台每 2 小时检查一次：把快过期（今天 ≥ 到期日 − 1 天）的成长任务领回来（已完成直接领；未完成先点亮再领）。仅 WorkBuddy 国内版；会真发起写请求，请确认后再开。')}></span>
-      </div>
+      </CardHeader>
       <div className='p-4'>
         <div className='ck-set-line'>
           <span className='ck-set-k'>{t('到期自动领取')}</span>
           <span className='ck-set-v'>
             <Switch
               checked={claimEnabled}
-              disabled={store.travelSaving}
+              disabled={store.saving}
               onCheckedChange={next => void setClaimAuto(next)}
             />
           </span>
@@ -349,7 +285,7 @@ function ClaimAutoCard({ store }: { store: CheckinStore }) {
           {t('对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「签到记录」。也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。')}
         </div>
       </div>
-    </section>
+    </Card>
   )
 }
 
@@ -359,411 +295,391 @@ function ClaimAutoCard({ store }: { store: CheckinStore }) {
 function sameModels(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((item, index) => item === b[index])
 }
+/* ─── 保活模型链（国际版）──────────────────── */
 
 /**
- * 拖动状态放在**模块级**：指针监听挂在 window 上，回调里拿不到组件闭包。
+ * 拖动排序：模块级状态。
  *
- * ── 为什么拖动是「换一份新数组」而不是自己搬 DOM ─────────────
- * 清单由 React 按 `key={模型名}` 渲染，拖动时做的只是把数组换一份新的 ——
- * React 会**移动既有节点**（不重建），所以拖动中 row 的 DOM 身份不变、
- * 后面的落点判定始终量的还是那一行。自己搬 DOM 的话下一次 diff 就会把顺序打回去。
+ * 拖动期间**只动 DOM**（`insertBefore`），松手才把最终顺序写进 state。
+ * 每次移动都写 state 会让 React 重渲、行节点被替换，手里那个节点变成孤儿
+ * （`getBoundingClientRect()` 全 0），后续落点判定全错 —— 这是旧 iframe 版
+ * 真实踩过的坑。
  */
-type ChainDrag = {
-  /** 当前顺序（每次落点变化就换一份新的） */
-  list: string[]
-  /** 被拖的行现在在第几位 */
-  from: number
+type DragState = {
+  container: HTMLElement
   row: HTMLElement
-  onChange: (models: string[]) => void
+  models: string[]
+  onChange: (next: string[]) => void
 }
 
-let chainDrag: ChainDrag | null = null
+let drag: DragState | null = null
 
-/** 指针落在第几位：拿其余各行的中线比（与账号页顺序拖拽同一口径） */
-function chainInsertIndex(others: HTMLElement[], clientY: number): number {
-  for (let index = 0; index < others.length; index += 1) {
-    const rect = others[index].getBoundingClientRect()
+function insertIndex(rows: HTMLElement[], clientY: number): number {
+  for (let index = 0; index < rows.length; index += 1) {
+    const rect = rows[index].getBoundingClientRect()
     if (clientY < rect.top + rect.height / 2) return index
   }
-  return others.length
+  return rows.length
 }
 
-function onChainPointerMove(event: PointerEvent): void {
-  const state = chainDrag
-  if (!state) return
-  // 指针中途被放开（没接到 pointerup）时收尾，别留一个卡住的拖动态
-  if (event.buttons === 0) { finishChainDrag(); return }
-  const container = state.row.parentElement
-  if (!container) return
-  const rows = [...container.querySelectorAll<HTMLElement>('.ck-chain-row')]
-  const others = rows.filter(row => row !== state.row)
-  const to = chainInsertIndex(others, event.clientY)
-  if (to === state.from) return
-  const next = [...state.list]
-  const [moved] = next.splice(state.from, 1)
-  next.splice(to, 0, moved)
-  // 就地记住新秩序：下一次落点判定要用它，而不是等 React 回灌
-  state.list = next
-  state.from = to
-  state.onChange(next)
+function onPointerMove(event: PointerEvent): void {
+  if (!drag) return
+  if (event.buttons === 0) { finishDrag(); return }
+  const rows = [...drag.container.querySelectorAll<HTMLElement>('.ck-chain-row')]
+    .filter(row => row !== drag!.row)
+  const reference = rows[insertIndex(rows, event.clientY)] ?? null
+  if (reference === drag.row.nextElementSibling) return
+  if (reference === null && drag.row === drag.container.lastElementChild) return
+  drag.container.insertBefore(drag.row, reference)
 }
 
-function finishChainDrag(): void {
-  const state = chainDrag
-  chainDrag = null
-  window.removeEventListener('pointermove', onChainPointerMove)
-  window.removeEventListener('pointerup', finishChainDrag)
-  window.removeEventListener('pointercancel', finishChainDrag)
+function finishDrag(): void {
+  const state = drag
+  drag = null
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', finishDrag)
+  window.removeEventListener('pointercancel', finishDrag)
   document.body.classList.remove('ck-chain-dragging')
-  state?.row.classList.remove('dragging')
+  if (!state) return
+  state.row.classList.remove('dragging')
+  // 行上的 `data-chain-index` 记的是**原数组**下标：按 DOM 顺序读回来就是新顺序
+  const order = [...state.container.querySelectorAll<HTMLElement>('.ck-chain-row')]
+    .map(row => Number(row.dataset.chainIndex))
+    .filter(index => Number.isInteger(index))
+    .map(index => state.models[index])
+  const changed = order.length === state.models.length
+    && order.some((model, index) => model !== state.models[index])
+  if (changed) state.onChange(order)
 }
 
-/** 按住把手起拖（把手是**唯一**的拖动起点：行里还有移除按钮，整行可拖会点错） */
-function startChainDrag(
-  event: React.PointerEvent<HTMLElement>,
-  index: number,
-  models: string[],
-  onChange: (models: string[]) => void,
-): void {
-  if (event.button !== 0 || chainDrag) return
+function startDrag(event: React.PointerEvent<HTMLSpanElement>, index: number, models: string[], onChange: (next: string[]) => void): void {
+  if (event.button !== 0 || drag) return
   if (models.length < 2) return
-  const row = (event.currentTarget as HTMLElement).closest<HTMLElement>('.ck-chain-row')
-  if (!row) return
+  const row = event.currentTarget.closest<HTMLElement>('.ck-chain-row')
+  const container = row?.parentElement
+  if (!row || !container) return
   event.preventDefault()
-  chainDrag = { list: [...models], from: index, row, onChange }
+  drag = { container, row, models: [...models], onChange }
   row.classList.add('dragging')
   document.body.classList.add('ck-chain-dragging')
-  window.addEventListener('pointermove', onChainPointerMove)
-  window.addEventListener('pointerup', finishChainDrag)
-  window.addEventListener('pointercancel', finishChainDrag)
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', finishDrag)
+  window.addEventListener('pointercancel', finishDrag)
 }
 
-/**
- * 保活模型链面板。
- *
- * ── 为什么从一行输入框改成清单 ──────────────────────────────
- * 原来是一个用「、」分隔的文本框，加一个模型要挪光标、删一个要精确选中、想换顺序
- * 得手动剪贴 —— 而这条链的语义恰恰**就是顺序**（按顺序逐个尝试、第一个成功即止）。
- * 现在：一行一个模型，+ 添加、× 移除、按住把手拖动排序，整份清单一次保存
- * （清空后保存 = 恢复缺省链）。
- */
-function KeepalivePanel({ models, defaultModels, dirty, saving }: {
-  models: string[]
-  defaultModels: string[]
-  dirty: boolean
-  saving: boolean
-}) {
-  const [input, setInput] = React.useState('')
-  const add = (): void => {
-    const name = input.trim()
-    if (!name) return
-    if (models.includes(name)) {
-      toast(t('清单里已经有「{name}」', { name }), 'err')
-      return
-    }
-    setKeepaliveDraft([...models, name])
-    setInput('')
-  }
+/** 拖动把手（六点两列，与账号页顺序拖拽同一枚） */
+function GripIcon(): React.ReactElement {
   return (
-    <section className='panel ck-chain-panel'>
-      <div className='panel-head'>
-        <h2>{t('保活模型链')}</h2>
-        <span className='panel-sub'>{t('WorkBuddy 国际版日活任务的免费模型 · 全局一份，与条目无关')}</span>
-        <Button
-          size='sm'
-          variant='default'
-          className='ml-auto'
-          disabled={!dirty || saving}
-          onClick={() => void submitKeepaliveModels(models)}
-        >
-          {saving ? t('保存中…') : t('保存')}
-        </Button>
-      </div>
-      <div className='p-4'>
-        <div className='ck-set-line ck-set-line-top'>
-          <span className='ck-set-k'>{t('模型清单')}</span>
-          <span className='ck-set-v'>
-            {/* 计数与「填入缺省链」并排放在清单上方：原来想回到缺省链只能一个个 ×
-                删空了再保存，现在一键填好（仍然要点「保存」才生效） */}
-            <div className='ck-mini-row'>
-              <span className='ck-mini-note'>{t('按序逐个尝试，共 {n} 个', { n: models.length })}</span>
-              <button
-                type='button'
-                className='ck-mini-btn'
-                disabled={saving || defaultModels.length === 0}
-                title={t('把缺省链填进清单，再点「保存」生效')}
-                onClick={() => setKeepaliveDraft([...defaultModels])}
-              >
-                {t('填入缺省链')}
-              </button>
-            </div>
-            <div className='ck-chain'>
-              {models.map((model, index) => (
-                <div className='ck-chain-row' key={model}>
-                  <span
-                    className='ck-chain-grip'
-                    role='button'
-                    tabIndex={-1}
-                    aria-label={t('按住拖动调整顺序')}
-                    title={t('按住拖动，调整这个模型在链里的顺序')}
-                    onPointerDown={event => startChainDrag(event, index, models, setKeepaliveDraft)}
-                    dangerouslySetInnerHTML={{ __html: shared().wbIcons?.icon?.('gripVertical', 14) || '' }}
-                  />
-                  <span className='ck-chain-name' title={model}>{model}</span>
-                  <span className='ck-chain-index'>#{index + 1}</span>
-                  <button
-                    type='button'
-                    className='ck-chain-del'
-                    disabled={saving}
-                    aria-label={t('移除 {name}', { name: model })}
-                    title={t('从清单里移除')}
-                    onClick={() => setKeepaliveDraft(models.filter((_, keep) => keep !== index))}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-              {models.length === 0 ? (
-                <div className='ck-chain-empty'>{t('清单为空 —— 保存后恢复缺省链')}</div>
-              ) : null}
-            </div>
-            <div className='ck-chain-add'>
-              <Input
-                type='text'
-                className='max-w-[260px] font-mono text-xs'
-                placeholder={t('WorkBuddy 国际版保活模型，按顺序回退')}
-                value={input}
-                disabled={saving}
-                onChange={event => setInput(event.currentTarget.value)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter') { event.preventDefault(); add() }
-                }}
-              />
-              <Button size='sm' variant='outline' disabled={saving || input.trim() === ''} onClick={add}>
-                {t('添加模型')}
-              </Button>
-              {dirty ? <span className='ck-chain-dirty'>{t('有未保存的改动')}</span> : null}
-            </div>
-          </span>
-        </div>
-        <div className='ck-note'>
-          {t('「保活模型链」是 WorkBuddy 国际版领日活时用来保活的免费模型，按顺序逐个尝试、 第一个成功即止；清空清单并保存 = 恢复缺省链（当前缺省：{defaults}）。 当天去重 + 幂等领取：重复执行只会拿到「已领取」，不会重复加分。', {
-            defaults: defaultModels.join(t('、')),
-          })}
-        </div>
-      </div>
-    </section>
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+      <circle cx="9" cy="6" r="1.5" /><circle cx="15" cy="6" r="1.5" />
+      <circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" />
+      <circle cx="9" cy="18" r="1.5" /><circle cx="15" cy="18" r="1.5" />
+    </svg>
   )
 }
 
-/* ─── 页面 ─────────────────────────────────── */
+function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactElement {
+  const current = center.keepalive
+  const models = store.keepaliveDraft ?? current.models
+  const defaults = current.defaultModels ?? []
+  const dirty = store.keepaliveDraft !== null
+    && (store.keepaliveDraft.length !== current.models.length
+      || store.keepaliveDraft.some((item, index) => item !== current.models[index]))
+  const [input, setInput] = React.useState('')
 
-function ScheduleTab(): React.ReactElement {
-  const store = useSchedulesStore()
-  const checkin = useCheckinSnapshot()
-  // 挂载即拉一次（切到本标签页 = 重新挂载，天然刷新）
-  React.useEffect(() => { void loadSchedules() }, [])
+  const setDraft = (next: string[]) => patch({ keepaliveDraft: next })
 
-  if (!store.loaded) {
-    return (
-      <div className='ck-loading'>
-        <Spinner className='size-5' />
-        <span>{t('正在读取定时签到数据…')}</span>
-      </div>
-    )
+  const add = () => {
+    const name = input.trim()
+    if (!name) return
+    if (models.includes(name)) return
+    setDraft([...models, name])
+    setInput('')
   }
 
-  const data = store.data
-  const masterOn = data?.enabled === true
-  const entries = Array.isArray(data?.schedules) ? data!.schedules! : []
-  // 保活模型链（全局一份，随卡迁入本页）：草稿非空表示用户正在编辑，否则跟随快照
-  const keepalive = checkin.snapshot?.keepalive
-  const keepaliveModels = Array.isArray(keepalive?.models) ? keepalive!.models : []
-  const defaultModels = Array.isArray(keepalive?.defaultModels) ? keepalive!.defaultModels : []
-  const chainDraft = checkin.keepaliveDraft
-  const chainModels = chainDraft ?? keepaliveModels
-  const chainDirty = chainDraft !== null && !sameModels(chainDraft, keepaliveModels)
+  return (
+    <Card render={<section />} className="panel ck-chain-panel">
+      <CardHeader className="panel-head">
+        <h2>保活模型链</h2>
+        <span className="panel-sub">WorkBuddy 国际版日活任务的免费模型 · 全局一份，与条目无关</span>
+        <Button
+          size="sm"
+          variant="default"
+          className="ml-auto"
+          disabled={!dirty || store.saving}
+          onClick={() => void saveKeepaliveModels(models)}
+        >
+          {store.saving ? '保存中…' : '保存'}
+        </Button>
+      </CardHeader>
+      <div className="ck-panel-pad">
+        <div className="ck-set-line ck-set-line-top">
+          <span className="ck-set-k">模型清单</span>
+          <span className="ck-set-v">
+            <div className="ck-mini-row">
+              <span className="ck-mini-note">按序逐个尝试，共 {models.length} 个</span>
+              <Button size='default' variant='ghost'
+                type="button"
+                className="ck-mini-btn"
+                disabled={store.saving || defaults.length === 0}
+                title="把缺省链填进清单，再点「保存」生效"
+                onClick={() => setDraft([...defaults])}
+              >
+                填入缺省链
+              </Button>
+            </div>
+            <div className="ck-chain">
+              {models.map((model, index) => (
+                <div className="ck-chain-row" key={model} data-chain-index={index}>
+                  <span
+                    className="ck-chain-grip"
+                    role="button"
+                    aria-label="按住拖动调整顺序"
+                    title="按住拖动，调整这个模型在链里的顺序"
+                    onPointerDown={event => startDrag(event, index, models, setDraft)}
+                  >
+                    <GripIcon />
+                  </span>
+                  <span className="ck-chain-name" title={model}>{model}</span>
+                  <span className="ck-chain-index">#{index + 1}</span>
+                  <Button size='default' variant='ghost'
+                    type="button"
+                    className="ck-chain-del"
+                    disabled={store.saving}
+                    aria-label={`移除 ${model}`}
+                    title="从清单里移除"
+                    onClick={() => setDraft(models.filter((_, keep) => keep !== index))}
+                  >
+                    ×
+                  </Button>
+                </div>
+              ))}
+              {models.length === 0
+                ? <Empty className="ck-chain-empty">清单为空 —— 保存后恢复缺省链</Empty>
+                : null}
+            </div>
+            <div className="ck-chain-add">
+              <Input
+                type="text"
+                className="ck-chain-input font-mono text-xs"
+                placeholder="WorkBuddy 国际版保活模型，按顺序回退"
+                value={input}
+                disabled={store.saving}
+                onChange={event => setInput(event.currentTarget.value)}
+                onKeyDown={event => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  add()
+                }}
+              />
+              <Button size="sm" variant="outline" disabled={store.saving || input.trim() === ''} onClick={add}>
+                添加模型
+              </Button>
+              {dirty ? <span className="ck-chain-dirty">有未保存的改动</span> : null}
+            </div>
+          </span>
+        </div>
+        <div className="ck-note">
+          「保活模型链」是 WorkBuddy 国际版领日活时用来保活的免费模型，按顺序逐个尝试、
+          第一个成功即止；清空清单并保存 = 恢复缺省链（当前缺省：
+          {defaults.length ? defaults.join('、') : '（无）'}）。
+          当天去重 + 幂等领取：重复执行只会拿到「已领取」，不会重复加分。
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+/* ─── 猫猫旅行排程（国内版）────────────────── */
+
+const TRAVEL_TIP = '每天按这里的时刻自动巡检一遍 WorkBuddy 国内版账号：没有猫就领养、'
+  + '在家就派出、到站就领奖。一趟只推进一步，所以建议留两个时刻'
+  + '（早上派出、晚上领奖）。企业版与国际版账号自动跳过。'
+
+function TravelPanel({ center }: { center: CheckinCenter }): React.ReactElement {
+  const travel = center.travel
+  const times = travel.times ?? []
+  const fired = travel.firedToday ?? []
+  const draft = store.travelTimesDraft
+  const text = draft ?? times.join(', ')
+  const dirty = draft !== null && draft.replace(/\s+/g, '') !== times.join(',')
+  const last = travel.lastResult
+  const actions = Array.isArray(last?.actions) ? last.actions : []
+  const isPaused = travel.available === false
+  const failed = Number(last?.failed) || 0
+
+  const submit = () => {
+    const list = String(text)
+      .split(/[,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    void saveTravel({ times: list })
+  }
 
   return (
-    <div>
-      {store.loadError ? (
-        <div className='ck-page-error'>
-          <span>{t('读取定时签到数据失败：{error}', { error: store.loadError })}</span>
-          <Button size='sm' variant='outline' onClick={() => void loadSchedules()}>{t('重试')}</Button>
+    <Card render={<section />} className="panel">
+      <CardHeader className="panel-head">
+        <h2>猫猫旅行定时排程</h2>
+        {/* 问号提示：宿主有 desktop-tooltip.tsx，`data-tip` 是它的契约 —— 迁到宿主后
+            这条提示才真正长得和别的页一样（iframe 里拿不到那个脚本） */}
+        <span className="tip-q" data-tip={TRAVEL_TIP} />
+        <span className="panel-sub">每天定点巡检 · 一趟推进一步 · 与签到排程互相独立</span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="ml-auto flex-none"
+          disabled={travel.running || isPaused || store.saving}
+          onClick={() => void runTravelNow()}
+        >
+          {travel.running ? '巡检中…' : '立即巡检全部'}
+        </Button>
+      </CardHeader>
+      <div className="ck-panel-pad">
+        {isPaused ? (
+          <div className="ck-note">
+            {t('自动巡检已暂停：{reason}', { reason: travel.pausedReason ?? '' })}
+          </div>
+        ) : null}
+        <div className="ck-set-line">
+          <span className="ck-set-k">开关</span>
+          <span className="ck-set-v ck-set-row">
+            <Switch
+              checked={travel.enabled}
+              disabled={store.saving}
+              onCheckedChange={checked => void saveTravel({ enabled: checked === true })}
+            />
+            <span className="ck-sub">
+              {travel.enabled ? '开着：按下面的时刻自动巡检' : '关着：不自动巡检（仍可手动巡检）'}
+            </span>
+          </span>
         </div>
-      ) : null}
+        <div className="ck-set-line">
+          <span className="ck-set-k">时刻</span>
+          <span className="ck-set-v ck-set-row">
+            <Input
+              className="ck-travel-times"
+              placeholder="09:00, 21:00"
+              value={text}
+              disabled={store.saving}
+              onChange={event => patch({ travelTimesDraft: event.currentTarget.value })}
+            />
+            <Button size="sm" variant="outline" disabled={!dirty || store.saving} onClick={submit}>
+              保存
+            </Button>
+          </span>
+        </div>
+        <div className="ck-note">
+          北京时间 · 逗号分隔 · 最多 6 条 · 到点后最多晚 30 秒执行；错过时点开机后会补跑一轮。
+          {fired.length ? ` 今天已执行：${fired.join(' / ')}` : ''}
+        </div>
+        {last && (actions.length > 0 || last.error) ? (
+          <div className="ck-note">
+            {last.error ? t('巡检失败：{reason}', { reason: last.error }) : (
+              <>
+                上一轮（{last.at ? formatTime(last.at) : ''}）：{actions.length} 个动作，+{Number(last.credit) || 0} 积分
+                {failed > 0 ? ` · ${t('失败 {n}', { n: failed })}` : ''}
+                {actions.slice(0, 6).map(action =>
+                  ` · ${action.name ?? action.accountId ?? ''}: ${action.message ?? action.outcome ?? ''}`).join('')}
+              </>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </Card>
+  )
+}
 
-      <section className='panel'>
-        <div className='panel-head'>
-          <h2>{t('定时签到')}</h2>
-          <span className='tip-q' data-tip={AUTO_CHECKIN_DESC}></span>
-          <span className='panel-sub'>{t('每条条目各有时刻与范围 · 各自当天去重 · 错过时点开机自动补签')}</span>
-          {/* 新建入口放卡头（原先是卡尾的一颗按钮：条目一多就要滚到底才看得见，
-              而它恰恰是「这个页面第一件要做的事」） */}
+/* ─── 主体 ─────────────────────────────────── */
+
+const SCHEDULE_TIP = '到点后自动签到勾选提供商的可用账号。各家签到接口都是幂等的，'
+  + '重复执行不会重复领取。错过时点开机后会自动补签，不会因为当时没开机而漏掉。'
+
+export function ScheduleTab({ center }: { center: CheckinCenter }): React.ReactElement {
+  const auto = center.auto
+  const options = auto?.providerOptions ?? []
+  const entries = auto?.schedules ?? []
+  const panels = new Set(center.adminPanels ?? [])
+  const keepalive = panels.has('daily_keepalive') ? <KeepalivePanel center={center} /> : null
+  const travel = panels.has('growth_tasks') ? <TravelPanel center={center} /> : null
+  const bothRegions = keepalive !== null && travel !== null
+
+  return (
+    <div className="ck-main">
+      <Card render={<section />} className="panel">
+        <CardHeader className="panel-head">
+          <h2>定时签到</h2>
+          <span className="tip-q" data-tip={SCHEDULE_TIP} />
+          <span className="panel-sub">每条条目各有时刻与范围 · 各自当天去重 · 错过时点开机自动补签</span>
           <Button
-            size='sm'
-            variant='outline'
-            className='ml-auto flex-none'
+            size="sm"
+            variant="outline"
+            className="ml-auto flex-none"
             disabled={store.saving}
-            onClick={() => setEditingId(store.editingId === 'new' ? null : 'new')}
+            onClick={() => patch({ editingId: store.editingId === 'new' ? null : 'new' })}
           >
-            {store.editingId === 'new' ? t('收起新建') : t('添加条目')}
+            {store.editingId === 'new' ? '收起新建' : '添加条目'}
           </Button>
-        </div>
-        <div className='p-4'>
-          <div className='ck-set-line'>
-            <span className='ck-set-k'>{t('总开关')}</span>
-            <span className='ck-set-v flex items-center gap-2'>
+        </CardHeader>
+        <div className="ck-panel-pad">
+          <div className="ck-set-line">
+            <span className="ck-set-k">总开关</span>
+            <span className="ck-set-v ck-set-row">
               <Switch
-                checked={masterOn}
+                checked={auto?.enabled === true}
                 disabled={store.saving}
-                onCheckedChange={next => void toggleMaster(next === true)}
+                onCheckedChange={checked => void toggleMaster(checked === true)}
               />
-              <span className='text-subtle text-xs'>
-                {masterOn ? t('开着：启用的条目按各自时刻执行') : t('关着：所有条目都不执行')}
+              <span className="ck-sub">
+                {auto?.enabled ? '开着：启用的条目按各自时刻执行' : '关着：所有条目都不执行'}
               </span>
             </span>
           </div>
         </div>
         <div>
-          {store.editingId === 'new' ? <NewEntryRow store={store} /> : null}
-          {entries.map(entry => <ScheduleEntryRow key={entry.id} entry={entry} store={store} />)}
-          {entries.length === 0 ? (
-            <div className='ck-empty'>{t('还没有定时条目 —— 点「添加条目」建一条，或到「签到中心」手动签到。')}</div>
+          {/* 新建行落在列表首位：点「添加条目」后视线停在卡头，新行跟着出现在
+              它下面才接得上（落到底部时用户会以为没反应） */}
+          {store.editingId === 'new' ? (
+            <div className="ck-sched-row open ck-sched-row-new">
+              <div className="ck-sched-main">
+                <span className="ck-new-dot" aria-hidden="true">＋</span>
+                <div className="ck-prov-info">
+                  <div className="ck-prov-name">新建定时条目</div>
+                  <div className="ck-prov-desc">
+                    填好时刻与签到范围后点「保存」；名称可以留空（界面显示时刻）
+                  </div>
+                </div>
+              </div>
+              <EditorForm entry={null} options={options} />
+            </div>
+          ) : null}
+          {entries.map(entry => (
+            <EntryRow key={entry.id} entry={entry} options={options} masterOn={auto?.enabled === true} />
+          ))}
+          {entries.length === 0 && store.editingId !== 'new' ? (
+            <Empty className="ck-empty">
+              还没有定时条目 —— 点「添加条目」建一条，或到「签到中心」手动签到。
+            </Empty>
           ) : null}
         </div>
-      </section>
+      </Card>
 
-      {/* WorkBuddy 成长任务（自动派猫猫旅行 + 到期自动领取）：挂在定时签到面板
-          下方（它与定时签到同页，但周期语义不同，仍是独立小卡）。仅 WorkBuddy
-          国内版有成长中心：没有 travel 段时不渲染。 */}
-      {checkin.snapshot?.claimAuto ? <ClaimAutoCard store={checkin} /> : null}
+      {/* 两块地区专属面板：由插件申报的 adminPanels 决定。
+          国内版与国际版默认都启用，所以两块**会同时出现** —— 那种情况收进
+          同一行分栏（左保活模型链 / 右猫猫旅行排程）；各自独占整行时，每张卡
+          的右半截都是空白。只有一块时不套容器：模型链仍收半幅。 */}
+      {bothRegions ? (
+        <div className="ck-region-row">{keepalive}{travel}</div>
+      ) : (
+        <>
+          {keepalive}
+          {travel}
+        </>
+      )}
 
-      <KeepalivePanel
-        models={chainModels}
-        defaultModels={defaultModels}
-        dirty={chainDirty}
-        saving={checkin.keepaliveSaving}
-      />
-
-      <TravelPanel
-        travel={checkin.snapshot?.travel}
-        saving={checkin.travelSaving}
-        running={checkin.travelRunning}
-      />
+      {/* WorkBuddy 成长的「到期前自动领取」：官方没有这一档，由本 fork 的独立
+          2 小时循环负责（`core::growth_claim_auto`）。没有国内版账号时后端不给
+          `claimAuto` 这段，整卡不渲染 —— 判据与上面两块 adminPanels 同源。 */}
+      {store.center?.claimAuto ? <ClaimAutoCard /> : null}
     </div>
   )
 }
-
-/* ─── 猫猫旅行定时排程 ─────────────────────── */
-
-/**
- * 猫猫旅行定时排程面板（国内版）。
- *
- * ── 为什么与「定时签到」分卡 ────────────────────────────────
- * 两个排程完全独立（`autoCheckin` vs `growthSchedule`）：用户可能只想自动
- * 签到、不想自动派猫，或反过来。合成一张卡会让「关掉旅行」变成「关掉签到」
- * 的副作用（参考项目也是两套开关与时刻）。
- *
- * ── 时刻怎么编 ──────────────────────────────────────────────
- * 用逗号分隔的 `HH:MM` 列表（缺省 `09:00, 21:00`）：早上派出、晚上领奖。
- * 保存时后端归一化（排序去重、校验范围），界面以后端返回为准。
- */
-function TravelPanel({
-  travel,
-  saving,
-  running,
-}: {
-  travel?: TravelScheduleState
-  saving: boolean
-  running: boolean
-}): React.ReactElement {
-  const enabled = travel?.enabled === true
-  const times = Array.isArray(travel?.times) ? travel!.times : []
-  const fired = new Set(Array.isArray(travel?.firedToday) ? travel!.firedToday : [])
-  const [draft, setDraft] = React.useState<string | null>(null)
-  const text = draft ?? times.join(', ')
-  const dirty = draft !== null && draft.replace(/\s+/g, '') !== times.join(',')
-  const last = travel?.lastResult
-  const actions = Array.isArray(last?.actions) ? last!.actions! : []
-  const submit = (): void => {
-    const list = text
-      .split(/[,，\s]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-    void saveTravelSchedule({ times: list }).then(() => setDraft(null))
-  }
-  return (
-    <section className='panel'>
-      <div className='panel-head'>
-        <h2>{t('猫猫旅行定时排程')}</h2>
-        <span
-          className='tip-q'
-          data-tip={t(
-            '每天按这里的时刻自动巡检一遍 WorkBuddy 国内版账号：没有猫就领养、在家就派出、到站就领奖。一趟只推进一步，所以建议留两个时刻（早上派出、晚上领奖）。企业版与国际版账号自动跳过。',
-          )}
-        ></span>
-        <span className='panel-sub'>{t('每天定点巡检 · 一趟推进一步 · 与签到排程互相独立')}</span>
-        <Button
-          size='sm'
-          variant='outline'
-          className='ml-auto flex-none'
-          disabled={running}
-          onClick={() => void runTravelScheduleNow()}
-        >
-          {running ? t('巡检中…') : t('立即巡检全部')}
-        </Button>
-      </div>
-      <div className='p-4'>
-        <div className='ck-set-line'>
-          <span className='ck-set-k'>{t('开关')}</span>
-          <span className='ck-set-v flex items-center gap-2'>
-            <Switch
-              checked={enabled}
-              disabled={saving}
-              onCheckedChange={next => void saveTravelSchedule({ enabled: next === true })}
-            />
-            <span className='text-subtle text-xs'>
-              {enabled ? t('开着：按下面的时刻自动巡检') : t('关着：不自动巡检（仍可手动巡检）')}
-            </span>
-          </span>
-        </div>
-        <div className='ck-set-line'>
-          <span className='ck-set-k'>{t('时刻')}</span>
-          <span className='ck-set-v flex items-center gap-2'>
-            <Input
-              value={text}
-              disabled={saving}
-              placeholder='09:00, 21:00'
-              onChange={event => setDraft(event.target.value)}
-            />
-            <Button size='sm' variant='outline' disabled={!dirty || saving} onClick={submit}>
-              {t('保存')}
-            </Button>
-          </span>
-        </div>
-        <div className='ck-fold-note'>
-          {t('北京时间 · 逗号分隔 · 最多 6 条 · 到点后最多晚 30 秒执行；错过时点开机后会补跑一轮。')}
-          {fired.size > 0
-            ? ` ${t('今天已执行：{list}', { list: Array.from(fired).join(' / ') })}`
-            : ''}
-        </div>
-        {last && actions.length > 0 ? (
-          <div className='ck-fold-note'>
-            {t('上一轮（{time}）：{n} 个动作，+{credit} 积分', {
-              time: last.at ? formatTime(Number(last.at)) : '',
-              n: actions.length,
-              credit: Number(last.credit) || 0,
-            })}
-            {actions
-              .slice(0, 6)
-              .map(action => ` · ${action.name ?? action.accountId ?? ''}: ${action.message ?? action.outcome ?? ''}`)
-              .join('')}
-          </div>
-        ) : null}
-      </div>
-    </section>
-  )
-}
-
-export { ScheduleTab }

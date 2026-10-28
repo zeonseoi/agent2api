@@ -92,14 +92,15 @@ export function isToday(ts: number | null | undefined): boolean {
   return beijingDayKey(ts) === beijingDayKey()
 }
 
-/** 取账号的展示名：备注名 → 昵称 → 邮箱 → id */
+/** 展示名优先采用网关快照，旧网关缺字段时回落原来的名字链。 */
 export function accountName(account: {
+  displayName?: string
   name?: string
   nickname?: string
   email?: string
   id?: string
 }): string {
-  return account.name || account.nickname || account.email || account.id || '未命名'
+  return account.displayName || account.name || account.nickname || account.email || account.id || '未命名'
 }
 
 /** 脱敏：保留首尾各 3 个字符，中间用 • 代替 */
@@ -117,3 +118,31 @@ export function ellipsisMiddle(text: string, max = 26): string {
   const tail = Math.floor((max - 1) / 2)
   return `${value.slice(0, head)}…${value.slice(-tail)}`
 }
+
+/**
+ * 账号**当前生效**的限流记录（`rateLimits[model]`，按恢复时间升序）。
+ *
+ * 口径与后端 `routing::rate_limit_reset_at`、桌面端 `activeLimits()` 一致：
+ * 只有 `resetAt` 在**未来**才算限流；记录还在但已过期 = 冷却自然结束，
+ * 不该再显示成「限流」。后端从不主动清理过期记录，所以这里必须自己过滤 ——
+ * 只判断「有没有键」会把所有历史限流过的账号永远标红。
+ */
+export function activeLimits(account: {
+  rateLimits?: Record<string, { resetAt?: number; status?: number | string; code?: string | number; message?: string }>
+}): Array<{ model: string; resetAt: number; status?: number | string; code?: string | number; message?: string }> {
+  const limits = account.rateLimits
+  if (!limits || typeof limits !== 'object') return []
+  const now = Date.now()
+  return Object.entries(limits)
+    .map(([model, info]) => ({ model, resetAt: Number(info?.resetAt) || 0, ...(info || {}) }))
+    .filter(item => item.resetAt > now)
+    .sort((a, b) => a.resetAt - b.resetAt)
+}
+
+/** 账号此刻是否处于限流中（与 {@link activeLimits} 同一口径） */
+export function isRateLimited(account: {
+  rateLimits?: Record<string, { resetAt?: number }>
+}): boolean {
+  return activeLimits(account).length > 0
+}
+

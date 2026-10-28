@@ -71,6 +71,16 @@ RUN mkdir -p src-tauri/server/src/bin src-tauri/src \
 RUN /build/cargo-build.sh
 
 COPY desktop-tauri/src-tauri/server/src src-tauri/server/src
+# ── 为什么构建阶段也要 ui/ ──────────────────────────────────
+# `server/src/server/api/plugin_theme.rs` 用 `include_str!` /
+# `include_bytes!` 把几份静态资源编进二进制（宿主设计令牌、组件库产物、
+# 提供商图标），路径是相对该源码文件往上五层 —— 即 `desktop-tauri/ui/`。
+# 只 COPY `server/src` 时那些文件不存在，编译直接失败：
+#   error: couldn't read `.../ui/css/tokens.css`: No such file or directory
+#
+# 放在这一层而不是桩依赖层：这些文件与源码一起变，缓存失效的时机一致；
+# 放进桩层会让「只改了一行 Rust」也把整棵依赖树重编一遍。
+COPY desktop-tauri/ui ui
 RUN cd src-tauri \
     && find server/src -type f -exec touch {} + \
     && /build/cargo-build.sh

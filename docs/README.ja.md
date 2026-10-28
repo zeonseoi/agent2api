@@ -2,36 +2,37 @@
 
 # Agent2API
 
-**複数の AI デスクトップクライアントのログイン状態を、ローカルの OpenAI 互換 API ゲートウェイに**
+**AI ルーティングゲートウェイ + Agent クライアント設定管理で、モデル API とローカル設定を統合**
 
-[简体中文](../README.md) | [English](./README.en.md) | [繁體中文](./README.zh-Hant.md) | **日本語** | [한국어](./README.ko.md) | [Português (BR)](./README.pt-BR.md)
+[English](../README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-Hant.md) | **日本語** | [한국어](./README.ko.md) | [Português (BR)](./README.pt-BR.md)
 
-[![license](https://img.shields.io/badge/license-MIT%20%2B%20告知-green)](../LICENSE)
-[![release](https://img.shields.io/github/v/release/Agent2API/agent2api?include_prereleases)](https://github.com/Agent2API/agent2api/releases/latest)
+[![license](https://img.shields.io/badge/license-AGPL--3.0-green)](../LICENSE)
+[![release](https://img.shields.io/github/v/release/aimod-cc/Agent2API?include_prereleases)](https://github.com/aimod-cc/Agent2API/releases/latest)
 [![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
-[![stars](https://img.shields.io/github/stars/Agent2API/agent2api?style=flat&color=yellow)](https://github.com/Agent2API/agent2api/stargazers)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/Agent2API/agent2api/releases/latest)
+[![stars](https://img.shields.io/github/stars/aimod-cc/Agent2API?style=flat&color=yellow)](https://github.com/aimod-cc/Agent2API/stargazers)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/aimod-cc/Agent2API/releases/latest)
 
-[✨ 主な機能](#-主な機能) • [💬 コミュニティとサポート](#-コミュニティとサポート) • [🤝 対応プロバイダー](#-対応プロバイダー) • [🚀 クイックスタート](#-クイックスタート) • [📦 インストールとデプロイ](./install.ja.md) • [📸 画面プレビュー](#-画面プレビュー) • [🔧 開発とビルド](#-開発とビルド) • [📜 使用に関する告知](#-使用に関する告知)
+[✨ 主な機能](#-主な機能) • [💬 コミュニティとサポート](#-コミュニティとサポート) • [🚀 クイックスタート](#-クイックスタート) • [📦 インストールとデプロイ](./install.ja.md) • [📸 画面プレビュー](#-画面プレビュー) • [🔧 開発とビルド](#-開発とビルド) • [📜 使用に関する告知](#-使用に関する告知)
 
 </div>
 
 ---
 
-Agent2API は、複数の AI デスクトップクライアントでログイン済みのアカウントを 1 つにまとめ、OpenAI 互換のエンドポイントとして使えるようにします。カスタム `base_url` に対応したクライアントに `http://127.0.0.1:3065/v1` を設定すれば、これらのアカウントのモデル枠をそのまま呼び出せます —— **上流の API キーも、クライアントの変更も不要**です。
+Agent2API は **AI ルーティングゲートウェイと Agent クライアント設定管理**のプロジェクトです。カスタム AI プロバイダーを統一 API に接続し、アカウントのルーティング、モデルマッピング、ゲートウェイキー、リクエストレポートを集中管理します。ローカル Agent クライアントの接続プロファイルのインポート、切り替え、書き込みプレビューにも対応します。
+
+本リポジトリはゲートウェイとクライアント設定管理の基盤のみを含みます。プロバイダー固有のログイン、モデル呼び出し、認証情報の更新、残高、チェックインは独立した任意のプラグインが提供し、本体とは別に更新します。
 
 ## ✨ 主な機能
 
-- 🔌 **OpenAI 互換** —— クライアントに `base_url` を設定するだけ。Chat / Responses / Messages の 3 プロトコルに対応
-- 🏪 **17 社の組み込みプロバイダー** —— WorkBuddy、小浣熊、CatPaw、Qoder、Trae などがすぐ使え、カスタムプロバイダーにも対応
-- 🔁 **認証情報の自動更新** —— トークンは期限前に自動更新、期限切れ間近のものは一括更新、モデルカタログも追従
-- 🪂 **マルチアカウントのローテーション** —— 優先度順にキューイングし、429 は次のアカウントへ。レート制限中は待たずにスキップ
-- 🛡️ **外向きプロキシ** —— アカウントごとに出口 IP を割り当て、送信フィンガープリントは公式クライアントを装う
-- 🔑 **ゲートウェイのセキュリティ** —— 権限を分けた複数のゲートウェイキー、ログイン時の人間確認、キー未設定なら既定で拒否
-- 📊 **リクエストレポート** —— リクエスト数・成功率・トークン消費を一覧、キャッシュヒット率と 365 日ヒートマップ付き
-- ⏰ **スケジュールタスク** —— 自動チェックイン、認証情報メンテナンス、モデルカタログ更新を 1 ページで管理
-- 💰 **残高と使用量** —— アカウント行に残高と使用量を表示、複数アカウントの一括照会にも対応
-- 🖥️ **4 つの形態** —— Windows / macOS / Linux のデスクトップアプリ（トレイ常駐・Node 不要）と、パネルとゲートウェイが同一ポートの Docker 版（amd64 / arm64）。UI は 6 言語
+- 🔌 **統一モデル API** — OpenAI Chat / Responses / Images、Anthropic Messages と統一モデル一覧。Raccoon、Loomy、Antigravity が画像生成を提供し、Loomy と Antigravity は参照画像の編集にも対応。生成と編集は AI アシスタントのツールからも利用可能
+- 🧭 **AI ルーティング** — モデルマッピング、アカウント優先度、負荷分散、セッション固定、フェイルオーバー
+- 🤖 **Agent クライアント設定管理** — 複数の接続設定、既存設定のインポート、書き込みプレビュー、サービス切り替え
+- 🧩 **プラグイン拡張** — プロバイダー実装は本体に同梱せず個別にインストール・更新。ゲートウェイ単独でも利用可能
+- 🛡️ **外向きプロキシ** — アカウントと更新タスクの出口をプロキシプールから選択
+- 🔑 **ゲートウェイのセキュリティ** — 権限別キー、パネルログインの人間確認、キー未設定時のモデルリクエスト拒否
+- 📊 **リクエストレポート** — リクエスト数、成功率、トークン使用量、キャッシュヒット率、365 日ヒートマップ
+- ⏰ **バックグラウンド管理** — モデル一覧、認証情報、ソフトウェア更新を管理。固有タスクはプラグインが提供
+- 🖥️ **3 つの実行形態** — Windows / macOS / Linux デスクトップ、Windows / Linux ヘッドレスサーバー、Docker（amd64 / arm64）。Node ランタイム不要、6 言語 UI
 
 ## ❤️ スポンサー
 
@@ -48,48 +49,11 @@ Agent2API は、複数の AI デスクトップクライアントでログイン
 
 ## 💬 コミュニティとサポート
 
-- **QQ グループ**: Agent2API の交流グループ —— **グループ 1（`1127656296`）はまもなく満員のため、グループ 2（`1130894674`）への参加をお願いします**（QQ で番号を検索して参加できます）。
+- **QQ グループ**: Agent2API の交流グループ —— **グループ 1（`1127656296`）とグループ 2（`1130894674`）はまもなく満員のため、グループ 3（`1108276647`）にご参加ください**（QQ で番号を検索して参加できます）。
 - **Telegram グループ**: <https://t.me/+9gM8YPvgRL02NGRl>
 - **Discord サーバー**: <https://discord.gg/z9GzSJMWp>
 - **💖 支援**: Agent2API がお役に立ったら、[作者にコーヒーをおごる](./SPONSOR.md)のも歓迎です。支援は任意で、機能の解放などはありません。
 - **🤝 スポンサー / ビジネス**: スポンサーになりたい、またはここに製品を掲載したい場合は [541675139@qq.com](mailto:541675139@qq.com) までメールでご連絡ください。
-
-## 🤝 対応プロバイダー
-
-各プラットフォームのリバースプロキシ対応状況（✓ 対応 · ✗ 非対応 · — 該当なし）:
-
-| プラットフォーム | LLM リクエスト | トークン自動更新 | モデル一覧 | 残高照会 | チェックイン | 受け取り系 |
-| --- | :--: | :--: | :--: | :--: | :--: | :--: |
-| WorkBuddy 中国版 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| WorkBuddy 国際版 | ✓ | ✓ | ✓ | ✓ | ✗ | — |
-| 小浣熊 | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| CatPaw | ✓ | ✗ | ✓ | ✓ | ✗ | — |
-| AutoClaw（中国版 / 国際版） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| Qoder | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| Cline（Free / Pass） | ✓ | ✓ | ✓ | ✓ | — | — |
-| Accio（国際版 / 中国版） | ✓ | ✓ | ✓ | ✓ | — | — |
-| ZCode（中国版 / 国際版） | ✓ | ✗ | ✗ | ✓ | — | ✓ |
-| CodeArts | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| Trae | ✓ | ✓ | ✓ | ✓ | — | — |
-| Loomy（iFlytek） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
-| KukuAI（Baidu Wenku） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
-| MonkeyCode（長亭科技、中国版 / 国際版） | ✓ | ✗ | ✓ | — | — | — |
-| Command Code | ✓ | ✗ | ✓ | — | — | — |
-| Antigravity（Google、Gemini / Claude / GPT-OSS） | ✓ | ✓ | ✓ | — | — | — |
-| OfficeAce（Huawei Cloud、OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| OrcaTerm（Tencent Cloud） | ✓ | ✓ | ✓ | ✓ | — | — |
-| 智谱清言（Zhipu Qingyan） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| カスタムプロバイダー | ✓ | — | ✓ | — | — | — |
-
-> 注：モデル一覧の ✓ はオンラインでの自動取得に対応することを意味します（一部のプラットフォームは内蔵の静的テーブルも併用）。ZCode は内蔵の静的テーブルのみです。トークン自動更新の ✗ は、そのプラットフォームに利用可能な更新の仕組みがないことを意味します（アカウントは有効期間内はそのまま利用できます）。Qoder のチェックインは中国版のみです。
->
-> **智谱清言** は本プロジェクトで**唯一「ゲストモード」に対応**したプロバイダです。ログイン不要で、ワンクリックでそのまま会話に使える資格情報を取得できます（無料枠は上流がデバイス単位で発行します）。代わりにゲストアカウントにはポイント体系がありません —— 上表の「残高照会 / サインイン / 受け取り」、および**タスクセンターの初心者タスクとデイリータスク**は**ログイン済みアカウント**にのみ有効で（トークンを貼り付けるかクライアントのログイン状態をインポート）、ゲストではスキップされます。
-
-`/v1/chat/completions`、`/v1/responses`、`/v1/messages`（`count_tokens` を含む）と `/v1/models` はすべてのプラットフォームで同じように扱われます。モデルマッピング、グローバル優先度キュー、429 フォールバック、外向きプロキシ、送信フィンガープリントの秘匿化、リクエストレポートも全プラットフォーム共通です。
-
-> **本プロジェクトは学習・交流目的のみです。** 非公式クライアントの形態で自分のアカウントのログイン状態を再利用するため、上流サービスの規約に適合しない可能性があります。リスク（アカウントの凍結などを含む）は利用者自身が負担し、商用利用・課金の回避は禁止です。詳しくは[使用に関する告知](#-使用に関する告知)と [LICENSE](../LICENSE) をご覧ください。
->
-> 本プロジェクトは個人用途のローカルプロキシツールであり、各上流ベンダーおよびその公式製品とは一切関係ありません（一覧は[使用に関する告知](#-使用に関する告知)）。インターフェース仕様は各社クライアントの通信の観察によるもので、上流はいつでも変更される可能性があります。
 
 ## 🚀 クイックスタート
 
@@ -101,7 +65,7 @@ Agent2API は、複数の AI デスクトップクライアントでログイン
 | **サーバー**（Windows Server / Linux、GUI なし） | `agent2api-server-windows-amd64.zip`、`agent2api-server-linux-<arch>.tar.gz` | ブラウザーパネル |
 | **Docker** | `aimodcc/agent2api:latest`（amd64 / arm64） | ブラウザーパネル |
 
-**デスクトップ**: インストールして起動 → 「アカウント」ページでアカウントを追加 → クライアントの `base_url` を `http://127.0.0.1:3065/v1` に設定（`api_key` は任意の文字列で構いません。例: `sk-local`）。Node などのランタイムは不要で、ゲートウェイはアプリのプロセス内で動きトレイに常駐します。
+**デスクトップ**: カスタムプロバイダーとアカウントを追加し、ゲートウェイキーを作成。「Agent」ページで接続設定を適用するか、クライアントに `http://127.0.0.1:3065/v1` とそのキーを設定してください。追加の機能は対応プラグインのインストールが必要です。
 
 **サーバー**（GUI なし。システムサービスとして登録され、起動時に自動開始）:
 
@@ -123,6 +87,8 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 ```
 
 どの形態でも、導入後にパネル（`http://127.0.0.1:3065/`。サーバーと Docker はホストの IP に読み替え）を開いて管理者アカウントを登録し、「ゲートウェイキー」ページでキーを作成してください。疎通確認: `curl http://127.0.0.1:3065/health`
+
+**モバイル**: ブラウザーで `http://<ゲートウェイIP>:3065/m` を開けば使えます（「ホーム画面に追加」で全画面 PWA に）。独立したアイコンが欲しい場合は、Release の `Agent2API-<バージョン>.apk`（Android）または `Agent2API-<バージョン>.ipa`（iOS、未署名・自己再署名が必要）をインストールしてください。詳細: [インストールとデプロイ → モバイル](install.ja.md#モバイル)。
 
 ## 📸 画面プレビュー
 
@@ -148,10 +114,6 @@ docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/
 
 ![レポートトレンド: キャッシュヒット率とトークン消費の二軸トレンド、日別トークン棒グラフ](../assets/screenshots/report-trends.png)
 
-### チェックインセンター
-
-![チェックインセンター: チェックイン概要とプロバイダー別デイリーチェックイン](../assets/screenshots/checkin-center.png)
-
 ## 🔧 開発とビルド
 
 ### 動作環境
@@ -176,45 +138,31 @@ macOS の `.dmg` は **macOS 上でしかビルドできません**（`npm --pre
 
 ## 📜 使用に関する告知
 
-### 学習・交流目的に限る
+### 認証情報とデータの安全性
 
-本プロジェクトは、HTTP リバースプロキシ、SSE ストリーミングのパススルー、複数アップストリームのプロトコル適応、デスクトップパッケージング（Tauri）といった技術テーマを学ぶための実践プロジェクトであり、**個人の学習・研究目的のみ**を対象としています。公式製品ではなく、Tencent および WorkBuddy / CodeBuddy、Meituan および CatPaw、SenseTime および小浣熊、Zhipu および AutoClaw / autoglm、Alibaba および Qoder / Accio、Huawei Cloud および CodeArts / OfficeAce、ByteDance および Trae、iFlytek および Loomy、Baidu Wenku および KukuAI、長亭科技 および MonkeyCode、Command Code、Google および Antigravity のいずれとも一切の関係がなく、その承認やスポンサーシップも受けていません。
+認証情報はローカルデータベースで暗号化されますが、エクスポート、バックアップ、鍵ファイルには機密データが含まれる可能性があります。公開リポジトリやクラウドにアップロードしたり、他者と共有したりしないでください。
 
-### リバースプロキシの挙動について
+### 無保証
 
-本プロジェクトが実装しているのはローカルのリバースプロキシです。自分のマシン上で自分のアカウントのログイン状態を再利用し、リクエストを公式の上流ゲートウェイへ転送します。有料機能や権限チェックを突破・回避するものではなく、使用するクォータは常に自分のアカウントが元々持つ枠から来ます。ただし明確にしておくべきは、この「非公式クライアントの形態でログイン状態を再利用する」転送方法が、**上流サービスの利用規約や利用条件に適合しない可能性がある**という点です。利用するかどうか、およびそれに伴う一切の結果（レート制限、リスク管理の対象化、アカウントの停止や凍結を含みますがこれらに限りません）は、すべて利用者自身が負担します。
-
-### 禁止事項
-
-本プロジェクトを、いかなる商用目的、利益目的の再配布、大量アカウント運用、上流の課金やクォータ制限の回避、その他現地の法令に違反する活動に使用することを禁じます。関連するモデルサービスを本番環境や商用シーンで呼び出す場合は、公式チャネルと公式 API をご利用ください。
-
-### 認証情報とデータのリスク
-
-本プロジェクトはアカウントの認証情報（`accessToken` / `refreshToken` など）を**平文**で本機の設定ディレクトリ（既定は `~/.agent2api/`）に保存し、エクスポート機能が生成するファイルにも平文の認証情報が含まれます。適切に管理し、公開リポジトリへのコミット、クラウドストレージへのアップロード、第三者への共有は絶対に行わないでください。認証情報の漏えいによる損害は利用者自身が負担します。
-
-### 無保証および権利表示
-
-本プロジェクトは「現状のまま」提供され、作者はその可用性、安定性、安全性、特定目的への適合性について一切保証しません。上流のインターフェースはいつでも変更される可能性があり、本プロジェクトは予告なく動作しなくなり、メンテナンスが終了する場合があります。完全な条件は [LICENSE](../LICENSE) を参照してください。本プロジェクトにおけるインターフェース仕様やプロトコルフィールドなどの情報は、各公式クライアントの公開されたネットワーク通信を観察・整理したものであり、関連する商標とサービスの権利はそれぞれの所有者に帰属します。権利者が必要以上のものであるとお考えの場合は作者までご連絡ください。速やかに調整または削除します。
+本プロジェクトは「現状のまま」提供され、可用性、安定性、安全性、特定目的への適合性を保証しません。商標とサービスの権利は各所有者に帰属します。完全な条件は [LICENSE](../LICENSE) を参照してください。
 
 ## 📄 ライセンス
 
-本プロジェクトは [MIT License](../LICENSE) に基づき公開されており、著作権表示を保持する限り、自由に使用・改変・配布できます。
-
-注意すべき点として、LICENSE の本文の後に**使用に関する告知**が付されており、その第 3 条が MIT に対して**制限を追加**しています（商用利用の禁止、利益目的の再配布の禁止、大量アカウント運用の禁止）。したがって本プロジェクトは**純粋な MIT ではありません** —— **MIT の条件と使用に関する告知が合わせて完全なライセンスと使用条件を構成し**、同一の行為について両者が異なる結論を出す場合は、より厳しい側が優先されます。これが `Cargo.toml` で SPDX の `"MIT"` を宣言せず、`license-file` で LICENSE を指している理由でもあります。
+プラグインと同じ [GNU Affero General Public License v3.0（AGPL-3.0）](../LICENSE) を採用しています。商用利用を含む使用・改変・配布が可能です。著作権とライセンス表示を保持し、該当するソース提供義務を履行してください。改変版をネットワーク経由で提供する場合、その利用者に当該版の対応するソースを提供する必要があります。
 
 ## ⭐ Star History
 
-<a href="https://star-history.com/#Agent2API/agent2api&Date">
+<a href="https://star-history.com/#aimod-cc/Agent2API&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Agent2API/agent2api&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=aimod-cc/Agent2API&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=aimod-cc/Agent2API&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aimod-cc/Agent2API&type=Date" />
   </picture>
 </a>
 
 <div align="center">
 
-**[最新版をダウンロード](https://github.com/Agent2API/agent2api/releases/latest)** • **[問題を報告](https://github.com/Agent2API/agent2api/issues)**
+**[最新版をダウンロード](https://github.com/aimod-cc/Agent2API/releases/latest)** • **[問題を報告](https://github.com/aimod-cc/Agent2API/issues)**
 
 このプロジェクトが役に立ったら、⭐️ Star をもらえるとうれしいです！
 

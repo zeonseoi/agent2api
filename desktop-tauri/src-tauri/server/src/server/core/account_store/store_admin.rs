@@ -456,6 +456,34 @@ impl AccountStore {
             .is_ok()
     }
 
+    /// 记录成长中心**连登天数**（WorkBuddy 国内版；只读回读的结果）。
+    ///
+    /// 存下来是为了让签到中心 / 账号页不用每次打开都打一发上游
+    /// （`GET /activity/growth/streak` 是只读查询，但几十个账号就是一串请求）。
+    /// 与 [`Self::mark_checkin`] 同一口径：账号级事实、低频写、失败不致命
+    /// （返回 bool，调用方最多记一条日志）。
+    ///
+    /// **不**动 `updatedAt`：连登是上游状态的回读，不是用户改配置。
+    /// 值没变时不写库 —— 签到链每次都会回读，同一天内多次签到不该反复落盘。
+    pub fn mark_streak_days(&self, id: &str, days: i64) -> bool {
+        let _guard = self.guard();
+        let Some(mut record) = self.record_by_id(&_guard, id) else {
+            return false;
+        };
+        let existing = record
+            .fields()
+            .get("streakDays")
+            .and_then(Value::as_i64);
+        if existing == Some(days) {
+            return true;
+        }
+        record
+            .fields_mut()
+            .insert("streakDays".to_string(), Value::from(days));
+        self.with_conn(&_guard, |conn| sql::update_in_place(conn, &record))
+            .is_ok()
+    }
+
     /// 记下「这个账号的新手任务（一次性福利）已全部结算」的快照
     /// （账号记录上的 `onboardingSettled`；形状与读法见
     /// [`StoredAccount::set_onboarding_settled`] 与
@@ -566,17 +594,10 @@ impl AccountStore {
         // 只改 `provider`、不改 id（Qoder 的 id 本来就带地区段）。
         let qoder_moved = Self::migrate_qoder_intl_accounts(&mut state);
 
-        // ⑦ OfficeAce 账号名自愈（见 `officeace_accounts::heal_names_from_stored_tokens`）：
-        // 存量记录的 name 曾是十六进制的 account_id/principal_id，而显示名一直躺在**同一行**
-        // 的 refreshToken 里 —— 这里零网络地把它解出来补上，不等续期、不碰那枚一次性令牌。
-        let officeace_named =
-            super::officeace_accounts::heal_names_from_stored_tokens(&mut state.accounts);
-        if officeace_named > 0 {
-            logging::log(
-                "[Accounts]",
-                &format!("🏷️  已按登录态为 {officeace_named} 个 OfficeAce 账号补回上游显示名"),
-            );
-        }
+        // ⑦ OfficeAce 账号名自愈（存量记录的 name 曾是十六进制 id，显示名躺在
+        // refreshToken 的 claims 里）已随实现搬到插件：插件在登录时就把名字取全，
+        // 而网关不再解析这家令牌的 claims。存量记录的名字原样保留 —— 它们是
+        // 用户看得见的历史，不该因为一次升级被改写。
 
         // ⑧ 智谱清言令牌从嵌套 `auth` 抬到顶层
         // （见 `chatglm_accounts::migrate_nested_tokens`）：首版把令牌写进了嵌套
@@ -600,7 +621,6 @@ impl AccountStore {
             && cline_renamed == 0
             && workbuddy_moved == 0
             && qoder_moved == 0
-            && officeace_named == 0
             && chatglm_healed == 0
         {
             return json!({

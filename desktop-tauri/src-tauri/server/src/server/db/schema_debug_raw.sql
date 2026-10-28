@@ -1,0 +1,1 @@
+ALTER TABLE request_raw ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;

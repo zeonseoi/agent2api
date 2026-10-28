@@ -271,6 +271,9 @@ function formatMs(value: unknown): string {
  * 直发、映射上的思考等级不注入 —— 测的就是这个模型在这家上游的**真实形态**。
  */
 export function testBlockReason(provider: string, model: ManageModel): string {
+  if (model.kind === 'image') {
+    return t('图片生成模型请通过 /v1/images/generations 调用，暂不支持对话测试')
+  }
   if (!usableAccounts(provider).length) {
     return t('该提供商没有可用账号（要在账号页启用一个、且凭证完整），一行都发不出去')
   }
@@ -533,9 +536,12 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   const proxyItems: Array<{ value: string; label: string; disabled?: boolean }> = [
     { value: '', label: t('跟随账号配置') },
     { value: PROXY_DIRECT, label: t('直连（不使用代理）') },
+    // 已禁用的池条目置灰：测试会走它解析（失败即回退直连），选它测出来的
+    // 结论不是用户想要的那个 —— 与账号页代理列同一口径
     ...(pool ?? []).map(item => ({
       value: `${POOL_VALUE_PREFIX}${item.id}`,
       label: poolItemLabel(item),
+      disabled: item.enabled === false,
     })),
   ]
   if (pool === null) {

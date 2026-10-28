@@ -7,8 +7,14 @@ import { locale, localeOptions, setLocale } from '../i18n'
 import { storeApiKey } from '../api/client'
 import { usePwa } from '../lib/usePwa'
 import { applyUpdate, promptInstall } from '../lib/pwa'
-import { apiBase, baseLabel } from '../lib/servers'
+import { APP_VERSION } from '../lib/appUpdate'
+import { AppUpdatePanel } from '../components/AppUpdatePanel'
+import { CommunitySheet } from '../components/CommunitySheet'
+import { SystemInfoSheet } from '../components/SystemInfoSheet'
+import { apiBase, baseLabel, serverIdentity } from '../lib/servers'
+import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
+import { Card, Button, Badge, BadgeDot, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ui'
 
 /**
  * 设置。
@@ -26,8 +32,13 @@ export function SettingsPage() {
   const { session, packaged, server, servers } = useStore()
   const pwa = usePwa()
   const [installing, setInstalling] = useState(false)
+  const [community, setCommunity] = useState(false)
+  const [systemInfo, setSystemInfo] = useState(false)
   const currentLocale = locale()
   const options = localeOptions()
+
+  // 本页没有自己的列表请求：下拉只需重拉会话（网关状态来自它）
+  const pull = usePullToRefresh({ onRefresh: () => store.refresh(true) })
 
   const install = async () => {
     setInstalling(true)
@@ -39,16 +50,19 @@ export function SettingsPage() {
   }
 
   const signOut = async () => {
+    const identity = serverIdentity()
     const { logout } = await import('../api/auth')
     const { clearPanelAuth } = await import('../api/client')
     await logout()
+    if (serverIdentity() !== identity) return
     clearPanelAuth()
     store.setAuthLost('login')
     store.toast(t('已退出登录'))
   }
 
   return (
-    <div className='m-page'>
+    <div className='m-page' ref={pull.bindRef}>
+      <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageIntro subtitle={t('外观 · 接入 · 关于')}
         actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void store.refresh(true)} />}
       />
@@ -57,28 +71,30 @@ export function SettingsPage() {
       {packaged ? (
         <div className='m-section' style={{ marginTop: 0 }}>
           <SectionHead title={t('服务器')} />
-          <div className='m-card'>
-            <button type='button' className='m-row' onClick={() => store.push('servers')}>
+          <Card className='m-card'>
+            <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('servers')}>
               <span className='m-logo' style={{ background: 'var(--m-primary-soft)', borderColor: 'transparent', color: 'var(--m-primary)' }}>
                 <Icon name='server' />
               </span>
               <div className='m-grow'>
                 <div className='m-t1'>{server?.name || baseLabel(server?.base || '')}</div>
                 <div className='m-t2 m-mono' style={{ fontSize: 11.5 }}>
-                  {servers.length > 1 ? t('{n} 台可选 · 点此切换', { n: servers.length }) : baseLabel(server?.base || '')}
+                  {servers.length > 1
+                    ? t('{n} 台可选 · 点此切换', { n: servers.length })
+                    : t('点此添加或切换服务器')}
                 </div>
               </div>
               <span className='m-chev'>
                 <Icon name='chev' />
               </span>
-            </button>
-          </div>
+            </Button>
+          </Card>
         </div>
       ) : null}
 
       {/* 网关状态 */}
       <div className='m-section' style={packaged ? undefined : { marginTop: 0 }}>
-        <div className='m-card'>
+        <Card className='m-card'>
           <div className='m-row'>
             <span
               className='m-logo'
@@ -92,17 +108,16 @@ export function SettingsPage() {
                 {baseLabel(apiBase())}
               </div>
             </div>
-            <span className={`m-badge ${session?.health?.upstreamConfigured ? 'm-badge-ok' : 'm-badge-warn'}`}>
-              <i />
-              {session?.health?.upstreamConfigured ? t('正常') : t('待配置')}
-            </span>
+            <Badge variant={session?.health?.upstreamConfigured ? 'success' : 'warning'} shape='tag'>
+              <BadgeDot />{session?.health?.upstreamConfigured ? t('正常') : t('待配置')}
+            </Badge>
           </div>
-        </div>
+        </Card>
       </div>
 
       <div className='m-section'>
         <SectionHead title={t('外观')} />
-        <div className='m-card'>
+        <Card className='m-card'>
           <div className='m-row'>
             <span className='m-logo'>
               <Icon name='moon' />
@@ -121,36 +136,30 @@ export function SettingsPage() {
               <div className='m-t1'>{t('界面语言')}</div>
               <div className='m-t2'>{options.find(item => item.code === currentLocale)?.label || currentLocale}</div>
             </div>
-            <select
-              value={currentLocale}
-              onChange={event => setLocale(event.target.value)}
-              aria-label={t('界面语言')}
-              style={{
-                height: 34,
-                padding: '0 8px',
-                borderRadius: 9,
-                border: '1px solid var(--m-line)',
-                background: 'var(--m-surface-2)',
-                color: 'var(--m-text)',
-                // 16px 是 iOS 的阈值：小于它聚焦时 Safari 会自动放大整页
-                fontSize: 16,
-                flex: 'none',
-              }}
-            >
-              {options.map(item => (
-                <option key={item.code} value={item.code}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
+            <Select value={currentLocale} onValueChange={value => setLocale(String(value))}>
+              <SelectTrigger aria-label={t('界面语言')} className='w-auto shrink-0'>
+                <SelectValue>{options.find(item => item.code === currentLocale)?.label || currentLocale}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {options.map(item => <SelectItem key={item.code} value={item.code}>{item.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </div>
-        </div>
+        </Card>
       </div>
 
       <div className='m-section'>
         <SectionHead title={t('接入')} />
-        <div className='m-card'>
-          <button type='button' className='m-row' onClick={() => store.push('docs')}>
+        <Card className='m-card'>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('plugins')}>
+            <span className='m-logo'><Icon name='plugin' /></span>
+            <div className='m-grow'>
+              <div className='m-t1'>{t('网关插件')}</div>
+              <div className='m-t2'>{t('查看、安装和管理所连接网关的插件')}</div>
+            </div>
+            <span className='m-chev'><Icon name='chev' /></span>
+          </Button>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('docs')}>
             <span className='m-logo'>
               <Icon name='doc' />
             </span>
@@ -163,8 +172,8 @@ export function SettingsPage() {
             <span className='m-chev'>
               <Icon name='chev' />
             </span>
-          </button>
-          <button type='button' className='m-row' onClick={() => store.push('keys')}>
+          </Button>
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => store.push('keys')}>
             <span className='m-logo'>
               <Icon name='key' />
             </span>
@@ -175,16 +184,16 @@ export function SettingsPage() {
             <span className='m-chev'>
               <Icon name='chev' />
             </span>
-          </button>
-        </div>
+          </Button>
+        </Card>
       </div>
 
       <div className='m-section'>
         <SectionHead title={t('账号')} />
-        <div className='m-card'>
+        <Card className='m-card'>
           {/* APK 有真正的登录态，给「退出登录」；浏览器端只有 API Key 可清 */}
           {packaged ? (
-            <button type='button' className='m-row' onClick={() => void signOut()}>
+            <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => void signOut()}>
               <span className='m-logo'>
                 <Icon name='logout' />
               </span>
@@ -195,11 +204,11 @@ export function SettingsPage() {
               <span className='m-chev'>
                 <Icon name='chev' />
               </span>
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button size='default' variant='ghost'
               type='button'
-              className='m-row'
+              className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left'
               onClick={() => {
                 storeApiKey('')
                 store.setAuthLost(null)
@@ -217,16 +226,16 @@ export function SettingsPage() {
               <span className='m-chev'>
                 <Icon name='chev' />
               </span>
-            </button>
+            </Button>
           )}
-        </div>
+        </Card>
       </div>
 
       {/* APK 不需要装到桌面（本身就是 App），这一段只给浏览器形态 */}
       {packaged ? null : (
       <div className='m-section'>
         <SectionHead title={t('安装到桌面')} />
-        <div className='m-card'>
+        <Card className='m-card'>
           <div className='m-row'>
             <span className='m-logo'>
               <Icon name='install' />
@@ -237,9 +246,9 @@ export function SettingsPage() {
                 {pwa.standalone ? t('已作为独立应用运行') : t('浏览器标签页')}
               </div>
             </div>
-            <span className={`m-badge ${pwa.standalone ? 'm-badge-ok' : 'm-badge-mute'}`}>
+            <Badge variant={pwa.standalone ? 'success' : 'secondary'} shape='tag'>
               {pwa.standalone ? t('已安装') : t('未安装')}
-            </span>
+            </Badge>
           </div>
 
           {pwa.standalone ? (
@@ -251,16 +260,16 @@ export function SettingsPage() {
               <div style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--m-text-2)' }}>
                 {t('装成 App 后从桌面图标直接进入：全屏打开、没有地址栏。')}
               </div>
-              <button
+              <Button size='touch' variant='default'
                 type='button'
-                className='m-btn'
+                className='m-btn w-full'
                 style={{ marginTop: 10, height: 40 }}
                 disabled={installing}
                 onClick={() => void install()}
               >
                 <Icon name='download' />
                 {installing ? t('正在安装…') : t('安装到主屏幕')}
-              </button>
+              </Button>
             </div>
           ) : (
             <div style={{ borderTop: '1px solid var(--m-line)', padding: '12px 15px 14px' }}>
@@ -289,7 +298,7 @@ export function SettingsPage() {
               ) : null}
             </div>
           )}
-        </div>
+        </Card>
       </div>
       )}
 
@@ -297,7 +306,7 @@ export function SettingsPage() {
       {pwa.updateReady || pwa.swState === 'unsupported' ? (
         <div className='m-section'>
           <SectionHead title={t('应用状态')} />
-          <div className='m-card'>
+          <Card className='m-card'>
             {pwa.updateReady ? (
               <div className='m-row'>
                 <span className='m-logo' style={{ background: 'var(--m-primary-soft)', borderColor: 'transparent', color: 'var(--m-primary)' }}>
@@ -307,9 +316,9 @@ export function SettingsPage() {
                   <div className='m-t1'>{t('有新版本')}</div>
                   <div className='m-t2'>{t('重启后生效，不影响当前操作')}</div>
                 </div>
-                <button type='button' className='m-btn m-sm' onClick={() => void applyUpdate()}>
+                <Button size='touch-sm' variant='default' type='button' className='m-btn m-sm' onClick={() => void applyUpdate()}>
                   {t('重启更新')}
-                </button>
+                </Button>
               </div>
             ) : null}
             {pwa.swState === 'unsupported' ? (
@@ -323,22 +332,44 @@ export function SettingsPage() {
                 </div>
               </div>
             ) : null}
-          </div>
+          </Card>
         </div>
       ) : null}
 
+      {/*
+        APK 的更新走安装包（浏览器里没有这条路径：PWA 的更新是 Service Worker，
+        见上面的「应用状态」）。两套互斥，不会同时出现。
+      */}
+      {packaged ? <AppUpdatePanel /> : null}
+
       <div className='m-section' style={{ paddingBottom: 8 }}>
-        <div className='m-card'>
-          <div className='m-row'>
+        <Card className='m-card'>
+          {/* 「Agent2API 手机端」这一行点开是版本信息抽屉：本机版本 + 所连网关
+              的版本 / 形态 / 系统 / 路径（手机端出问题时第一句要问的就是这些，
+              而用户手里只有手机，不该被要求跑回电脑前翻设置页）。
+              版本号仍常驻在右侧 —— 一眼能读到的那个数最常用。 */}
+          <Button size='default' variant='ghost' type='button' className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left' onClick={() => setSystemInfo(true)}>
             <span className='m-logo'>
               <Icon name='info' />
             </span>
             <div className='m-grow'>
               <div className='m-t1'>{t('Agent2API 手机端')}</div>
-              <div className='m-t2'>{t('与网关同源的面板；完整管理功能在桌面端')}</div>
+              <div className='m-t2'>{t('版本信息 · 所连网关环境')}</div>
             </div>
-          </div>
-          <div className='m-row' style={{ borderTop: '1px solid var(--m-line)' }}>
+            {/* 版本号常驻：排查问题时第一句就要问「你装的哪版」 */}
+            <span className='m-mono' style={{ flex: 'none', fontSize: 11.5, color: 'var(--m-text-3)' }}>
+              v{APP_VERSION}
+            </span>
+            <span className='m-chev'>
+              <Icon name='chev' />
+            </span>
+          </Button>
+          <Button size='default' variant='ghost'
+            type='button'
+            className='m-row h-auto min-h-[52px] w-full justify-start rounded-none border-0 px-3.5 py-3 text-left'
+            style={{ borderTop: '1px solid var(--m-line)' }}
+            onClick={() => setCommunity(true)}
+          >
             <span className='m-logo'>
               <Icon name='heart' />
             </span>
@@ -349,9 +380,12 @@ export function SettingsPage() {
             <span className='m-chev'>
               <Icon name='chev' />
             </span>
-          </div>
-        </div>
+          </Button>
+        </Card>
       </div>
+
+      <CommunitySheet open={community} onClose={() => setCommunity(false)} />
+      <SystemInfoSheet open={systemInfo} onClose={() => setSystemInfo(false)} />
     </div>
   )
 }

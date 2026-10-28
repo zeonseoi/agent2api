@@ -1091,18 +1091,6 @@ pub fn remove_mapping(
 
 // ─── 小浣熊清单的默认规则种子 ────────────────────
 
-/// 小浣熊的「内部模型」id：`raccoon-` 后跟一段**纯十六进制**短哈希
-/// （`raccoon-8c4485` / `raccoon-19b265` / `raccoon-405a1c` 这种 Work 模型的
-/// 内部代号）。`raccoon-chat-ml-5-5` 这类正经命名不会命中。
-fn is_opaque_raccoon_id(id: &str) -> bool {
-    match id.strip_prefix("raccoon-") {
-        Some(rest) => !rest.is_empty()
-            && rest.len() <= 8
-            && rest.chars().all(|c| c.is_ascii_hexdigit()),
-        None => false,
-    }
-}
-
 /// 各家的**额外对外名**：`(provider, 上游 id, 额外别名)`。
 ///
 /// ── 为什么除「去前缀」外还需要这张表 ───────────────────────────
@@ -1206,83 +1194,17 @@ fn seed_extra_aliases(
 }
 
 
-/// 小浣熊清单的**默认规则种子**：对 `ids` 里每个还没种过的模型做一次默认处理 ——
-///
-///   - `raccoon-<hex>` 内部模型 → 默认**禁用**（对外不可见；管理页里仍可看到并手动启用）；
-///   - `sn-` 前缀的模型 → 默认加一条**去前缀映射**（`sn-glm-5-3` → `glm-5-3`），
-///     客户端用两种名字都行；去前缀后的名字若已被映射占用、或与小浣熊自己的
-///     另一个上游模型 id 撞名，则跳过（照常记入 seeded，不再反复尝试）；
-///   - `RACCOON_EXTRA_ALIASES` 点名的模型 → 再补一条额外对外名（如点号写法），
-///     这条与主种子**独立计时**（见 `extra_alias_key`）。
-///
-/// 处理过的 (provider, id) 记入 `seeded`（持久化在 modelRules 里）：之后用户手动启用某个
-/// 内部模型、或删掉某条自动映射，清单刷新都不会把它们改回去；上游将来新增的
-/// `sn-` 模型因为 id 没种过，会在下一次种子时自动获得映射。
-///
-/// 只处理小浣熊的清单；调用点在清单落地 / 刷新编排处（见 raccoon::models）。
-/// 返回给日志的摘要；没有任何新模型时返回 None（不落盘）。
-pub fn seed_raccoon_defaults(ids: &[String]) -> Option<String> {
-    let mut rules = current();
-    let mut disabled_added: Vec<String> = Vec::new();
-    let mut mappings_added: Vec<String> = Vec::new();
-    let mut aliases_seeded = false;
-    for id in ids {
-        let id = id.trim();
-        if id.is_empty() {
-            continue;
-        }
-        // 额外对外名先处理：**不受下面主 seeded 短路影响**（理由见 extra_alias_key）
-        aliases_seeded |= seed_extra_aliases(&mut rules, "raccoon", id, ids, &mut mappings_added);
-        if rules.is_seeded("raccoon", id) {
-            continue;
-        }
-        rules.seeded.push(format!("raccoon:{id}"));
-        if is_opaque_raccoon_id(id) {
-            // 已在 disabled 里就不重复计数（set_membership 本身幂等）
-            if !rules.is_disabled("raccoon", id) {
-                set_membership(&mut rules.disabled, Some("raccoon"), id, true);
-                disabled_added.push(id.to_string());
-            }
-        } else if let Some(alias) = id.strip_prefix("sn-") {
-            if alias.is_empty() || !alias_valid(alias) {
-                continue;
-            }
-            // alias 已有映射（不管是自动还是人工）或与小浣熊自己的上游 id 撞名 → 不动
-            if rules.has_alias(alias)
-                || ids.iter().any(|other| other.eq_ignore_ascii_case(alias))
-            {
-                continue;
-            }
-            rules.mappings.retain(|m| {
-                !(m.alias.eq_ignore_ascii_case(alias) && m.provider.as_deref() == Some("raccoon"))
-            });
-            rules.mappings.push(Mapping {
-                alias: alias.to_string(),
-                target: id.to_string(),
-                provider: Some("raccoon".to_string()),
-                reasoning: None,
-                enabled: true,
-            });
-            mappings_added.push(format!("{alias} → {id}"));
-        }
-    }
-    if disabled_added.is_empty() && mappings_added.is_empty() && !aliases_seeded {
-        return None;
-    }
-    save(&rules);
-    if disabled_added.is_empty() && mappings_added.is_empty() {
-        // 只补记了「额外别名已种过」的标记（映射本来就在）——不写日志噪音
-        return None;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    if !disabled_added.is_empty() {
-        parts.push(format!("默认禁用内部模型 [{}]", disabled_added.join(", ")));
-    }
-    if !mappings_added.is_empty() {
-        parts.push(format!("默认新增映射 [{}]", mappings_added.join(", ")));
-    }
-    Some(format!("🧩 小浣熊模型默认规则: {}", parts.join("；")))
-}
+// ─── 小浣熊的默认规则种子已随目录实现搬到插件 ────────────
+//
+// 它原本只处理「网关手里有小浣熊的模型清单」这一件事（`raccoon-<hex>` 内部
+// 模型默认禁用、`sn-` 前缀补一条去前缀映射、`EXTRA_ALIASES` 补点号写法）。
+// 目录已随实现搬到插件（`plugins/raccoon/models.rs`），清单由插件产出、默认
+// 规则也由插件在 `models.refresh` 里申报 `visibility` —— 网关这边再种一次
+// 只会与插件写同一批 `seeded` 记账，两处互相打架。
+//
+// `raccoon` 那条 `EXTRA_ALIASES` 仍然生效：它服务的是**存量**默认映射
+// （升级用户盘上已有的 `deepseek-v4.1-flash → sn-deepseek-v4-1-flash`），
+// 与清单在谁手里无关；新装用户由插件在返回清单时自己带上 `sn-` 别名。
 
 // ─── 各清单的「默认启用白名单」种子 ────────────────────
 

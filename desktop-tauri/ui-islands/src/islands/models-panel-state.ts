@@ -20,6 +20,7 @@
 
 import { buildIndex as buildReasoningIndex } from './models-reasoning'
 import * as customSource from './models-custom-source'
+import { ALL_CUSTOM } from './models-custom-source'
 import type { CustomProviderRecord, ManageMapping, ManageModel, ManageView } from './models-custom-source'
 import type { SegmentedControlOption } from '@ui'
 import { t } from '../i18n'
@@ -275,14 +276,6 @@ const COLUMNS: ColumnDecl[] = [
  */
 const CUSTOM_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(['rate', 'source', 'visibility'])
 
-/**
- * 左栏「自定义提供商」组那颗「全部」的哨兵 id：选中它时右栏聚合**所有**自定义家的
- * 模型（不含内置家 —— 内置组那颗「全部」用的是 'all'，两颗是并列的两份聚合）。
- * `custom-` 前缀 + 12 位十六进制，与它撞车判据上不可能（isCustom 判前缀但候选名单
- * 只认目录里实有的记录，哨兵不在名单里）。
- */
-const ALL_CUSTOM = 'custom-all'
-
 const EMPTY_VIEW: ManageView = { models: [], mappings: [] }
 
 /**
@@ -409,7 +402,10 @@ export function restoreSavedFilters(): void {
   if (saved.provider !== snapshot.provider || saved.state !== snapshot.stateFilter
     || saved.search !== snapshot.search || saved.sort !== snapshot.sort
     || saved.visibility !== snapshot.visibilityFilter) {
-    patch(saved)
+    patch({
+      provider: saved.provider, stateFilter: saved.state, search: saved.search,
+      sort: saved.sort, visibilityFilter: saved.visibility,
+    })
   }
 }
 
@@ -426,6 +422,7 @@ export function resolveProvider(state: PanelState): string {
   const id = state.provider
   if (id === 'all' || id === ALL_CUSTOM) return id
   if (customSource.list().some(provider => provider.id === id)) return id
+  if (state.data?.providers?.some(provider => provider.provider === id)) return id
   if (Array.isArray(state.data?.models) && state.data.models.some(model => (model.provider || '') === id)) return id
   if (!state.data || !directoryReady()) return id
   return 'all'
@@ -498,8 +495,8 @@ function aggregateView(): ManageView {
 /** 当前视图的数据（两个数据源在这里合流，下游渲染 / 搜索 / 候选自动跟着选中的家走） */
 export function viewData(): ManageView {
   const provider = currentProvider()
-  if (customSource.isCustom(provider)) return customViewOf(provider)
   if (provider === ALL_CUSTOM) return aggregateView()
+  if (customSource.isCustom(provider)) return customViewOf(provider)
   return snapshot.data || EMPTY_VIEW
 }
 
@@ -524,13 +521,13 @@ function rebuildReasoningIndex(): void {
   reasoningOf = buildReasoningIndex(mappings())
 }
 
-/**
- * 内置各家的 id → {label, n}（左栏内置组条目）。从**内置全量**（data.models）收集，
- * 不能用 models() —— 后者跟着选中项走，选中某一家的那一刻其余各家的计数会全变 0。
- * （resolveProvider 也读它做「认得出这家」的判定，语义与旧版一致：只认有清单的内置家。）
- */
+/** 家级摘要保留空目录；旧服务端没有摘要时仍从全量模型行统计。 */
 export function builtinRailCounts(): Map<string, { label: string; n: number }> {
   const counts = new Map<string, { label: string; n: number }>()
+  for (const provider of snapshot.data?.providers || []) {
+    if (!provider.provider) continue
+    counts.set(provider.provider, { label: provider.providerLabel || provider.provider, n: 0 })
+  }
   const rows = Array.isArray(snapshot.data?.models) ? snapshot.data.models : []
   for (const model of rows) {
     const key = model.provider || ''
@@ -562,10 +559,7 @@ export function customRailItems(): Map<string, { label: string; n: number }> {
   return counts
 }
 
-/**
- * 左栏当前展示的内置家 id（有清单的家）——「获取模型」弹窗据此组装刷新范围
- * （见 models-fetch-modal.tsx 的 scopeProviders）：模型管理页看不到的家不该出现在刷新结果里。
- */
+/** 左栏内置家 id，含等待获取目录的家；供「获取模型」弹窗组装刷新范围。 */
 function builtinProviders(): string[] {
   return [...builtinRailCounts().keys()]
 }
@@ -575,6 +569,8 @@ function builtinProviders(): string[] {
  * 各家清单有多旧）。数据取自 manage 视图的 `refreshedAt`，与本页「来源」列的悬停提示同源。
  */
 function providerRefreshedAt(providerId: string): number {
+  const summary = snapshot.data?.providers?.find(provider => provider.provider === providerId)
+  if (summary) return Number(summary.refreshedAt) || 0
   const rows = Array.isArray(snapshot.data?.models) ? snapshot.data.models : []
   const hit = rows.find(model => model.provider === providerId)
   return Number(hit?.refreshedAt) || 0

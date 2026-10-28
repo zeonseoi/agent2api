@@ -49,7 +49,8 @@ pub async fn api_request_text(method: String, path: String) -> Result<String, St
 #[tauri::command]
 pub async fn backend_status(app: AppHandle) -> Result<Value, String> {
     let port = gateway::proxy_port();
-    let ready = backend::is_ready(port).await;
+    let phase = crate::startup::phase();
+    let ready = phase == "ready" && backend::is_ready(port).await;
     // 失败详情存在 AppState 里（由 ensure_ready 的失败分支写入）；
     // 端口已被显式指定过（环境变量）时，界面不该再提供「更换端口」——
     // 改设置也不会生效，只会让用户白忙一场
@@ -61,10 +62,17 @@ pub async fn backend_status(app: AppHandle) -> Result<Value, String> {
         .and_then(|guard| guard.failure.clone());
     Ok(json!({
         "ready": ready,
+        "phase": phase,
         "port": port,
         "portFromEnv": gateway::port_from_env().is_some(),
         "failure": failure,
     }))
+}
+
+#[tauri::command]
+pub async fn wait_for_backend() -> Result<Value, String> {
+    crate::startup::wait().await?;
+    Ok(json!({ "ready": true, "port": gateway::proxy_port() }))
 }
 
 /// 重启整个应用。
@@ -237,7 +245,8 @@ pub async fn change_port(app: AppHandle, port: u16) -> Result<Value, String> {
 
 /// 查面板管理员是否已注册（设置页据此决定「开启局域网访问」要不要先走注册步）。
 #[tauri::command]
-pub fn panel_admin_status() -> Result<Value, String> {
+pub async fn panel_admin_status() -> Result<Value, String> {
+    crate::startup::wait().await?;
     Ok(json!({ "registered": crate::server::access::admin_registered() }))
 }
 
@@ -247,6 +256,7 @@ pub fn panel_admin_status() -> Result<Value, String> {
 /// 管理员」，重复注册（两台设备同时走流程之类的竞态）不该让用户看到失败。
 #[tauri::command]
 pub async fn panel_register(username: String, password: String) -> Result<Value, String> {
+    crate::startup::wait().await?;
     let username = username.trim();
     if username.is_empty() || username.chars().count() > 64 {
         return Err("请填写管理员账号（64 字符以内）".to_string());
@@ -275,6 +285,73 @@ pub async fn panel_register(username: String, password: String) -> Result<Value,
     }
 }
 
+// ── 面板登录（桌面壳的会话通道）──────────────────────────────
+//
+// ── 为什么桌面端也需要这套东西 ──────────────────────────────
+// 桌面窗口加载 `tauri://localhost`，网关在 `127.0.0.1:{port}`：跨源，登录响应
+// 的 HttpOnly cookie 到不了网关。所以桌面形态走网页端「中转模式」的同一条
+// 通道 —— 令牌进响应体、之后每个请求带 `x-panel-token` 头（实现见
+// `panel_session`）。这组命令只做三件事：查状态、存令牌、清令牌。
+//
+// 什么时候需要登录由 `admin_registered()` 决定：没注册过管理员时面板免鉴权
+// （桌面端「当正常软件用」的默认形态），注册过就必须登录 —— 注册本身发生在
+// 「开启局域网访问」的流程里，或用户主动从登录页注册。
+
+/// 当前面板会话状态（窗口启动时、以及每次从登录页回来时查询）。
+///
+/// 返回 `{ registered, authenticated }`：
+///   · `registered = false` → 不需要登录，直接进主界面；
+///   · `registered = true && authenticated = false` → 窗口应加载登录页；
+///   · 两者都 true → 直接进主界面。
+///
+/// `authenticated` 的判断方式是**真的打一次 `/api/session`**：本地有没有令牌
+/// 不代表它还有效（可能过期、可能被改密码撤销），只有服务端说了才算。这里
+/// 顺带触发 `gateway::call` 的自动续期 —— access 过期但 refresh 还活着时，
+/// 这一次探测就会把新令牌换回来，用户完全无感。
+#[tauri::command]
+pub async fn panel_session_status() -> Result<Value, String> {
+    crate::startup::wait().await?;
+    let registered = crate::server::access::admin_registered();
+    if !registered {
+        return Ok(json!({ "registered": false, "authenticated": false }));
+    }
+    let authenticated = crate::gateway::call("GET", "/api/session", None)
+        .await
+        .is_ok();
+    Ok(json!({ "registered": true, "authenticated": authenticated }))
+}
+
+/// 保存登录页交来的令牌（登录 / 注册成功后由页面调用）。
+///
+/// 令牌加密后写进桌面设置（见 `panel_session`），壳随后每个管理请求自动带上。
+/// `expires_in` 是服务端下发的 access 剩余秒数：壳靠它判断什么时候该**提前**
+/// 续期，而不是等 401 才发现过期（见 `panel_session::refresh_if_expiring`）。
+/// 旧版页面不传（`Option`），按「不知道」处理，行为退回 401 被动续期。
+#[tauri::command]
+pub async fn panel_session_store(
+    access_token: String,
+    refresh_token: String,
+    expires_in: Option<i64>,
+) -> Result<Value, String> {
+    crate::startup::wait().await?;
+    if access_token.is_empty() || refresh_token.is_empty() {
+        return Err("令牌为空".to_string());
+    }
+    crate::panel_session::store(&access_token, &refresh_token, expires_in.unwrap_or(0))?;
+    Ok(json!({ "saved": true }))
+}
+
+/// 清除本机的面板会话（登出 / 会话失效后由界面调用）。
+///
+/// 只清**本机**这份令牌；服务端那条会话链由界面另行调用 `/api/panel/logout`
+/// 撤销（那条请求会带上下面的令牌，所以必须在清之前发）。
+#[tauri::command]
+pub async fn panel_session_clear() -> Result<Value, String> {
+    crate::startup::wait().await?;
+    crate::panel_session::clear();
+    Ok(json!({ "cleared": true }))
+}
+
 /// 切换局域网访问：校验 →（需要时补首把 Key）→ 写设置 → 重启应用。
 ///
 /// ── 开启前必须有面板管理员 ──────────────────────────────────
@@ -292,7 +369,8 @@ pub async fn panel_register(username: String, password: String) -> Result<Value,
 /// 重启用 [`schedule_app_restart`]：监听地址在 bind 之后就改不了，
 /// 与 `change_port` 同一条铁律。
 #[tauri::command]
-pub fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<Value, String> {
+pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<Value, String> {
+    crate::startup::wait().await?;
     if enabled && !crate::server::access::admin_registered() {
         return Err("尚未注册面板管理员：请先完成注册再开启局域网访问".to_string());
     }
@@ -341,7 +419,9 @@ pub fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Result<V
 /// 面板令牌 / 用户输入的 Key，助手页对两端一视同仁，只负责合并。面板认证
 /// 没开启时多带一个头也不会被拒 —— 中间件的鉴权分支只在开启后才看它。
 #[tauri::command]
-pub fn direct_credentials() -> Result<Value, String> {
+pub async fn direct_credentials() -> Result<Value, String> {
+    crate::startup::wait().await?;
+    crate::panel_session::refresh_if_expiring().await;
     let mut headers = serde_json::Map::new();
     if let Some(key) = crate::gateway::management_key() {
         headers.insert("x-api-key".to_string(), Value::String(key));
@@ -478,8 +558,11 @@ pub async fn cancel_login(app: AppHandle) -> Result<Value, String> {
 
 /// 导出运行日志：拉取 JSONL 原文，弹系统保存框落盘。
 #[tauri::command]
-pub async fn export_logs(app: AppHandle) -> Result<Value, String> {
-    let text = gateway::call_text("GET", "/api/logs/download").await?;
+pub async fn export_logs(app: AppHandle, query: Option<String>) -> Result<Value, String> {
+    let query = query.unwrap_or_default();
+    let query = query.trim_start_matches('?');
+    let path = if query.is_empty() { "/api/logs/download".to_string() } else { format!("/api/logs/download?{query}") };
+    let text = gateway::call_text("GET", &path).await?;
     let count = text.lines().filter(|line| !line.trim().is_empty()).count();
     if count == 0 {
         return Ok(json!({ "count": 0 }));
@@ -539,7 +622,8 @@ pub async fn pick_folder(app: AppHandle, default_dir: Option<String>) -> Result<
 /// 用户可能在任务管理器的「启动」页里单独禁用了本应用，
 /// 那种情况下配置文件仍是 true，界面会显示成「已开启」，与实际不符。
 #[tauri::command]
-pub fn get_app_settings(app: AppHandle) -> AppSettings {
+pub async fn get_app_settings(app: AppHandle) -> Result<AppSettings, String> {
+    crate::startup::wait().await?;
     let mut current = settings::load();
     if let Ok(enabled) = app.autolaunch().is_enabled() {
         current.autostart = enabled;
@@ -547,7 +631,7 @@ pub fn get_app_settings(app: AppHandle) -> AppSettings {
     // 顺手把缓存与磁盘对齐：拦截关窗时要用到最新值
     app.state::<AppState>().window.set_close_to_tray(current.close_to_tray);
     app.state::<AppState>().window.set_lightweight(current.lightweight_mode);
-    current
+    Ok(current)
 }
 
 /// 覆盖保存应用设置，返回保存后的结果。
@@ -562,7 +646,8 @@ pub fn get_app_settings(app: AppHandle) -> AppSettings {
 /// 「更换端口」设过的端口悄悄抹掉，下次开机又回到 3065 上撞冲突。
 /// 端口不归这个命令管，就原样保留磁盘上的值。
 #[tauri::command]
-pub fn save_app_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings, String> {
+pub async fn save_app_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings, String> {
+    crate::startup::wait().await?;
     let mut saved = patch;
     // 端口由 change_port 专门负责，这里保持磁盘现值不被覆盖
     saved.proxy_port = settings::load().proxy_port;
@@ -640,8 +725,8 @@ pub async fn export_accounts(app: AppHandle) -> Result<Value, String> {
 
 /// 从文件导入账号（merge 语义：按身份匹配，命中更新、未命中追加）。
 ///
-/// 兼容两种形态：整体导出文件 `{ version, exportedAt, customProviders, accounts }`
-/// 与直接的账号数组 `[...]`。`customProviders` 段（v2 起的自定义提供商定义）
+/// 兼容整体导出文件 `{ version, exportedAt, customProviders, accounts }`、
+/// 单账号对象与直接的账号数组 `[...]`。`customProviders` 段（v2 起的自定义提供商定义）
 /// 原样透传给后端 —— 账号的 provider 字段指向这些定义，丢了它们自定义账号
 /// 就导不回。
 #[tauri::command]
@@ -667,15 +752,15 @@ pub async fn import_accounts(app: AppHandle) -> Result<Value, String> {
         .map_err(|error| format!("文件不是有效 JSON: {error}"))?;
     let document = unwrap_envelope_file(parsed);
     let accounts = match &document {
-        // 整体导出文件
-        Value::Object(map) => map
+        Value::Object(map) if map.contains_key("accounts") => map
             .get("accounts")
             .and_then(Value::as_array)
             .cloned()
-            .ok_or("文件中缺少 accounts 字段")?,
-        // 直接就是账号数组
+            .ok_or("文件中缺少 accounts 数组")?,
+        Value::Object(map) if map.get("id").and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty()) => vec![document.clone()],
         Value::Array(items) => items.clone(),
-        _ => return Err("文件内容既不是导出文件也不是账号数组".to_string()),
+        _ => return Err("文件内容既不是导出文件、单账号文件，也不是账号数组".to_string()),
     };
 
     let mut payload = json!({ "accounts": accounts, "mode": "merge" });
@@ -735,12 +820,27 @@ pub async fn export_database(
         // 前端不传（旧壳直调）时按完整导出
         "includeLogs": includeLogs.unwrap_or(true),
     });
-    let mut data = gateway::call("POST", "/api/backup/export", Some(&payload)).await?;
+    let mut data = gateway::call_with_timeout(
+        "POST",
+        "/api/backup/export",
+        Some(&payload),
+        BACKUP_TRANSFER_TIMEOUT_MS,
+    )
+    .await?;
     if let Value::Object(map) = &mut data {
         map.insert("file".to_string(), Value::String(path.to_string_lossy().to_string()));
     }
     Ok(data)
 }
+
+/// 整库恢复 / 备份的请求预算：30 分钟。
+///
+/// 60 秒的通用预算对这两条完全不成立 —— 恢复要读整份 SQL、在暂存库上执行、
+/// 校验、拍安全备份、覆盖主库、重载内存态；几百 MB 的库在慢盘上跑几分钟很
+/// 正常（实测一台机器 61 秒就被壳掐断，后端其实还在跑）。**超时的那一方必须
+/// 是后端**：它自己失败会回一条带原因的 500，而壳提前掐断只会让用户看到
+/// 「连接本地代理超时」，还误以为数据没进去。
+const BACKUP_TRANSFER_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
 /// 整库恢复：弹系统打开框，后端校验该 SQL 文件后整体替换数据库。
 ///
@@ -762,7 +862,88 @@ pub async fn import_database(app: AppHandle) -> Result<Value, String> {
         .into_path()
         .map_err(|error| format!("文件路径无效: {error}"))?;
     let payload = json!({ "filePath": path.to_string_lossy() });
-    gateway::call("POST", "/api/backup/import", Some(&payload)).await
+    // 即便放宽到 30 分钟，请求仍可能先于后端收尾而超时（超大库 / 极慢盘）。
+    // 那时**不能**报失败：后端照旧在跑，进度弹窗还在轮询。所以超时后去问一次
+    // 进度快照 —— 它带着真实阶段，界面据此继续显示「正在替换主数据库…」，
+    // 而不是弹出一条「恢复失败：连接本地代理超时」。
+    match gateway::call_with_timeout(
+        "POST",
+        "/api/backup/import",
+        Some(&payload),
+        BACKUP_TRANSFER_TIMEOUT_MS,
+    )
+    .await
+    {
+        Ok(data) => Ok(data),
+        Err(message) if message.contains("超时") => {
+            let progress = gateway::call("GET", "/api/backup/progress", None).await;
+            match progress {
+                Ok(snapshot) if snapshot.get("active").and_then(Value::as_bool) == Some(true) => {
+                    // 后端仍在恢复：把错误换成一句「还在跑」，界面继续等
+                    Err("恢复仍在进行中，请等待进度弹窗里的结果".to_string())
+                }
+                Ok(snapshot) => {
+                    let failed = snapshot.get("failed").and_then(Value::as_bool) == Some(true);
+                    let detail = snapshot
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if failed && !detail.is_empty() {
+                        Err(detail)
+                    } else {
+                        Err(message)
+                    }
+                }
+                Err(_) => Err(message),
+            }
+        }
+        Err(message) => Err(message),
+    }
+}
+
+/// 云同步上传 / 下载的请求预算。
+///
+/// 60 秒是管理 API 的通用超时，而这两条要打外网传几 MB：慢速云盘 / 家用上行
+/// 上 60 秒很容易不够，被壳提前掐断时后端其实还在传（用户看到「超时」，远端
+/// 却可能已经写了一半）。300 秒与后端传输层的单次超时（`cloud_sync::webdav`
+/// 的 `TRANSFER_TIMEOUT_SECS`）对齐 —— 两边预算一致，谁先到都不会造成
+/// 「壳说失败、后端还在跑」的分叉。
+const CLOUD_SYNC_TIMEOUT_MS: u64 = 300_000;
+
+/// 云同步上传（设置页「数据 → 云同步」的「上传」）。
+#[tauri::command]
+pub async fn cloud_sync_upload() -> Result<Value, String> {
+    gateway::call_with_timeout(
+        "POST",
+        "/api/cloud-sync/upload",
+        Some(&json!({})),
+        CLOUD_SYNC_TIMEOUT_MS,
+    )
+    .await
+}
+
+/// 云同步下载（下载成功会整体替换本机业务数据）。
+#[tauri::command]
+pub async fn cloud_sync_download() -> Result<Value, String> {
+    gateway::call_with_timeout(
+        "POST",
+        "/api/cloud-sync/download",
+        Some(&json!({})),
+        CLOUD_SYNC_TIMEOUT_MS,
+    )
+    .await
+}
+
+/// 用同步密码解出远端账号密钥并装到本机。
+///
+/// 走壳命令而不是通用 `call`：密码作为参数出现在 Tauri IPC 里，不经过
+/// HTTP 请求体（少一处可能被中间层记录的落点）。
+#[tauri::command]
+pub async fn cloud_sync_import_key(password: String) -> Result<Value, String> {
+    let payload = json!({ "password": password });
+    gateway::call("POST", "/api/cloud-sync/import-key", Some(&payload)).await
 }
 
 /// 检查新版本：把本应用版本作为 query 参数交给后端比较。
@@ -776,6 +957,53 @@ pub async fn check_update(app: AppHandle) -> Result<Value, String> {
     let current = app.package_info().version.to_string();
     let path = format!("/api/update/check?current={}", urlencoding(&current));
     gateway::call("GET", &path, None).await
+}
+
+/// 设置页「版本信息」：后端那份环境快照 + 壳侧独有的三项。
+///
+/// ── 为什么不让界面直接打 `/api/system-info` ──────────────────
+/// 桌面端的界面来自 Tauri 自定义协议、网关在 `127.0.0.1:{port}`：跨源，且
+/// 面板认证开启后裸 fetch 会被 401 挡下（与 `direct_credentials` 那段注释
+/// 说的是同一件事）。走壳命令由 `gateway::request_builder` 自动补凭证，
+/// 两种形态（开 / 没开面板认证）都不用界面操心。
+///
+/// ── 壳侧补的三项 ────────────────────────────────────────────
+///   · `app.version`：运行时 `package_info` 覆盖后端编译期常量 —— 与
+///     `check_update` 同一口径（版本号在 Cargo.toml 与 tauri.conf.json 各一份，
+///     装到机器上的那个包以 tauri.conf.json 为准）；
+///   · `runtime.webviewVersion`：WebView2 / WKWebView 的版本。界面白屏、
+///     CSS 不生效、`structuredClone` 之类的 API 缺失时，这是第一个要看的值；
+///     拿不到（Linux 上没装运行时等）就给空串，界面显示「—」；
+///   · `runtime.debugBuild`：后端那份说的是 **server crate** 的编译形态，
+///     而用户装的是壳 —— 桌面端以壳为准（`tauri dev` 与正式包都是同一个
+///     server crate，但壳一个带 `[Dev]` 一个不带）。
+#[tauri::command]
+pub async fn system_info(app: AppHandle, hide_username: Option<bool>) -> Result<Value, String> {
+    let path = if hide_username.unwrap_or(false) {
+        "/api/system-info?hideUsername=1"
+    } else {
+        "/api/system-info"
+    };
+    let mut info = gateway::call("GET", path, None).await?;
+
+    // 三处覆盖都做「有才写」：结构异常（老后端 / 响应被改）时保持后端那份，
+    // 不让整条命令因为少一个对象就失败。
+    if let Some(object) = info.as_object_mut() {
+        if let Some(app_section) = object.get_mut("app").and_then(Value::as_object_mut) {
+            app_section.insert(
+                "version".to_string(),
+                Value::String(app.package_info().version.to_string()),
+            );
+        }
+        if let Some(runtime) = object.get_mut("runtime").and_then(Value::as_object_mut) {
+            // wry 的 webview_version 只在运行时可用；Linux 缺 webkit2gtk 等
+            // 极端情形下会失败 —— 失败给空串，不把整条命令带崩。
+            let webview = tauri::webview_version().unwrap_or_default();
+            runtime.insert("webviewVersion".to_string(), Value::String(webview));
+            runtime.insert("debugBuild".to_string(), Value::Bool(cfg!(debug_assertions)));
+        }
+    }
+    Ok(info)
 }
 
 /// 下载安装包（后端负责联网与落盘，这里只转发参数）

@@ -97,8 +97,8 @@ pub async fn set_state(State(state): State<ServerState>, body: Bytes) -> Respons
         Vec::new()
     };
     if let Some(provider) = provider_opt {
-        if crate::server::core::providers::kind_from_id(provider).is_none() {
-            return errors::management_error(400, format!("未知的内置提供商: {provider}"));
+        if !crate::server::core::providers::is_known_provider_id(provider) {
+            return errors::management_error(400, format!("未知的提供商: {provider}"));
         }
     }
     if let Err(error) = model_rules::set_state(provider_opt, &id, enabled, &others) {
@@ -149,7 +149,7 @@ pub async fn add_mapping(State(state): State<ServerState>, body: Bytes) -> Respo
     if let Some(kind) = provider_opt {
         // provider 必须是注册表里的家：它决定候选链里追加谁，写错名字会让
         // 映射悄悄变成一条永远路由不到的死路
-        if !crate::server::core::providers::kind_from_id(kind).is_some() {
+        if !crate::server::core::providers::is_known_provider_id(kind) {
             return errors::management_error(400, format!("未知的提供商: {kind}"));
         }
     }
@@ -179,7 +179,7 @@ pub async fn add_mapping(State(state): State<ServerState>, body: Bytes) -> Respo
         Some(_) => return errors::management_error(400, "enabled 必须是布尔值"),
     };
     let others = catalog::providers_for_model(&target).into_iter()
-        .filter(|id| crate::server::core::providers::kind_from_id(id).is_some())
+        .filter(|id| crate::server::core::providers::is_known_provider_id(id))
         .filter(|id| Some(id.as_str()) != provider_opt)
         .collect::<Vec<_>>();
     if let Err(error) = model_rules::add_mapping(&alias, &target, provider_opt, reasoning, enabled, &others) {
@@ -274,7 +274,9 @@ pub async fn add_custom(State(state): State<ServerState>, body: Bytes) -> Respon
     if provider.is_empty() {
         return errors::management_error(400, "缺少提供商");
     }
-    if crate::server::core::providers::kind_from_id(&provider).is_none() {
+    // 插件家同样算已知（判据见 `providers::is_known_provider_id` 的说明）：
+    // 只问枚举会让已装入的插件家在模型规则页一律收到「未知的提供商」。
+    if !crate::server::core::providers::is_known_provider_id(&provider) {
         return errors::management_error(400, format!("未知的提供商: {provider}"));
     }
     if id.is_empty() {
@@ -362,10 +364,10 @@ pub async fn set_capabilities(State(state): State<ServerState>, body: Bytes) -> 
     if provider.is_empty() || id.is_empty() {
         return errors::management_error(400, "缺少提供商或模型 id");
     }
-    if crate::server::core::providers::kind_from_id(&provider).is_none() {
+    if !crate::server::core::providers::is_known_provider_id(&provider) {
         return errors::management_error(
             400,
-            format!("未知的内置提供商: {provider}（自定义提供商的能力走整表保存接口）"),
+            format!("未知的提供商: {provider}（自定义提供商的能力走整表保存接口）"),
         );
     }
     let patch = match object.get("capabilities") {

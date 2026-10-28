@@ -14,12 +14,17 @@
 //!   - `core::growth_scheduler::run_once`：官方定时 / 手动「立即巡检全部」；
 //!   - `api::growth::travel_run`：签到中心成长任务行里的单账号「巡检一次」。
 //!
+//! ── 为什么按 JSON 解而不是按类型 ─────────────────────────────
+//! 官方 v3.3.0 把执行体整体搬进了提供商插件（`ProvidersPlugin/Agent2Providers`），
+//! `AccountTravelReport` / `TravelReport` 都不再随本仓库编译。宿主这一侧拿到的是
+//! 插件定义的摘要 JSON（键集由插件 `admin.rs` 的 `batch_travel` 给出，
+//! 与官方 `lastResult` 同形），所以这里按 `Value` 读，**不重建那套类型**。
+//!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
-use crate::server::core::providers::workbuddy::growth::travel::{
-    AccountTravelReport, TravelReport,
-};
+use serde_json::Value;
+
 use crate::server::core::providers::workbuddy::Region as WorkBuddyRegion;
 use crate::server::core::travel_records;
 
@@ -68,34 +73,47 @@ fn record_outcome(
 ///
 /// `plan_time` 有值 = 到点触发的计划时刻；无值 = 用户在界面上手动点的那一轮。
 /// 只影响台账里的 `source` 档位，不改变记录内容。
-pub fn record_schedule(plan_time: Option<&str>, reports: &[AccountTravelReport]) {
+///
+/// 入参是插件返回的摘要（含 `actions` 数组），每项 `{accountId, name, outcome,
+/// message, credit}`；插件已过滤掉跳过类，这里仍按 `outcome` 再核一次。
+pub fn record_schedule_from_summary(plan_time: Option<&str>, summary: &Value) {
     let (source, reason) = match plan_time {
         Some(time) => ("auto", format!("到点触发（{time}）")),
         None => ("manual", "手动巡检".to_string()),
     };
-    for report in reports {
+    let Some(actions) = summary.get("actions").and_then(Value::as_array) else {
+        return;
+    };
+    for action in actions {
+        let account_id = action.get("accountId").and_then(Value::as_str).unwrap_or("");
+        if account_id.is_empty() {
+            continue;
+        }
         record_outcome(
             source,
             &reason,
-            &report.account_id,
-            &report.name,
-            report.outcome,
-            &report.message,
-            report.credit,
+            account_id,
+            action.get("name").and_then(Value::as_str).unwrap_or(""),
+            action.get("outcome").and_then(Value::as_str).unwrap_or(""),
+            action.get("message").and_then(Value::as_str).unwrap_or(""),
+            action.get("credit").and_then(Value::as_i64).unwrap_or(0),
         );
     }
 }
 
 /// 官方单账号「巡检一次」按钮的记账入口（`api::growth::travel_run` 调用）。
-pub fn record_manual(account_id: &str, account_name: &str, report: &TravelReport) {
+///
+/// 单账号那条走的是插件 `admin.action` 的同一条路，回包是 `{outcome, message,
+/// credit}` 的平铺对象（无 `actions` 数组）。
+pub fn record_manual(account_id: &str, account_name: &str, report: &Value) {
     record_outcome(
         "manual",
         "手动巡检",
         account_id,
         account_name,
-        report.outcome,
-        &report.message,
-        report.credit,
+        report.get("outcome").and_then(Value::as_str).unwrap_or(""),
+        report.get("message").and_then(Value::as_str).unwrap_or(""),
+        report.get("credit").and_then(Value::as_i64).unwrap_or(0),
     );
 }
 

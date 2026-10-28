@@ -52,8 +52,21 @@ pub async fn refresh(
 ) -> Vec<Value> {
     let mut results = Vec::new();
     let mut cline_result: Option<Value> = None;
+    // ── 插件家的目录刷新单独一轮 ────────────────────────────────
+    // 它们的 id 不在 `implemented_kinds()`（那是编译期枚举）。用运行时注册表
+    // 拿到全部已装入的插件 provider，与内置家走同一套「支持才刷」的判据。
+    // 排在最前：内置家的结果顺序是存量契约（前端按它渲染），插件家的行
+    // 追加在后面也不会打乱已有条目 —— 所以实际是**先内置、后插件**，见下面
+    // 那次单独调用。
     for kind in implemented_kinds() {
         let provider = kind_id(kind);
+        // 这一家已被插件接管 → 交给下面的插件循环。
+        // 不跳过会让同一个 provider 在一轮里刷两次（内置实现与插件各打一次
+        // 上游），而且结果行会重复 —— 前端按 provider 匹配，第二行覆盖第一行，
+        // 用户看到的是「刷新了但清单没变」。
+        if crate::server::core::plugin_host::serves_provider(provider) {
+            continue;
+        }
         if providers.is_some_and(|allowed| !allowed.iter().any(|id| id == provider)) {
             continue;
         }
@@ -146,6 +159,57 @@ pub async fn refresh(
             item["message"] = json!(error);
         }
         if cline { cline_result = Some(item.clone()); }
+        results.push(item);
+    }
+    // ── 插件家（运行时注册表）─────────────────────────────────
+    // 它们的 id 不在 `implemented_kinds()`（那是编译期枚举）。与内置家同一套
+    // 「支持才刷」的判据，结果**追加在末尾** —— 内置家的行序是存量契约
+    // （前端按 provider 匹配），追加不影响已有条目。
+    for id in crate::server::core::plugin_host::installed_ids() {
+        if providers.is_some_and(|allowed| !allowed.iter().any(|allowed_id| allowed_id == &id)) {
+            continue;
+        }
+        let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(&id) else {
+            continue;
+        };
+        let label = adapter.label();
+        let requested = accounts.get(&id).and_then(Value::as_str).unwrap_or("").trim();
+        let mut item = json!({
+            "provider": id,
+            "providerLabel": label,
+            "refreshedAt": catalog::refresh_meta_for_provider(&id).1,
+        });
+        if adapter.refresh_uses_account() {
+            let used = if requested.is_empty() {
+                store.current_entry_for_provider(&id).map(|entry| entry.id)
+            } else {
+                Some(requested.to_string())
+            };
+            if let Some(account_id) = used {
+                item["accountId"] = json!(account_id);
+            }
+        }
+        if !adapter.supports_model_refresh() {
+            item["status"] = json!("skipped");
+            item["fixed"] = json!(true);
+            item["message"] = json!("该提供商使用固定模型清单");
+            results.push(item);
+            continue;
+        }
+        let account = accounts.get(&id).and_then(Value::as_str).unwrap_or("");
+        let outcome = adapter.refresh_models(store, account, manual).await;
+        item["status"] = json!(if outcome.refreshed {
+            "refreshed"
+        } else if outcome.message.is_some() {
+            "failed"
+        } else {
+            "skipped"
+        });
+        item["count"] = json!(outcome.count);
+        item["refreshedAt"] = json!(catalog::refresh_meta_for_provider(&id).1);
+        if let Some(message) = outcome.message {
+            item["message"] = json!(message);
+        }
         results.push(item);
     }
     results
