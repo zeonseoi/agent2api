@@ -244,12 +244,8 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
-        // Credits 是浮点：各路求和与总量必然有 1e-15 级的舍入差。这个残值必须
-        // **夹成 0**（见 `credit_residue`）—— 「未知」组的建组与保留虽只由
-        // requests / tokens 判定（见上），但报表的 Credits 环形图是按
-        // `credits > 0` 取段的，2.8e-14 会骗过那个判据、在图上留下一行
-        // 「未知 0 0.0%」（读数被 toFixed(2) 舍成 0，却占着一行图例）
-        credit_residue(totals.credits, covered_credits),
+        // 浮点残值必须夹成 0（为什么与阈值见 `core::credits::residue`）
+        crate::server::core::credits::residue(totals.credits, covered_credits),
     );
 
     // ── 账号维度同理 ────────────────────────────────────────────
@@ -268,30 +264,10 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
-        // 理由同 provider 那一段（浮点残值同样要夹掉）
-        credit_residue(totals.credits, covered_credits),
+        // 理由同 provider 那一段
+        crate::server::core::credits::residue(totals.credits, covered_credits),
     );
     totals
-}
-
-/// 未被任何组覆盖的 Credits 余量（`总量 − 各组之和`），并把浮点舍入残值夹成 0。
-///
-/// ── 为什么必须夹 ────────────────────────────────────────────
-/// 各组的 credits 是逐条累加的浮点数，其和与总量的差在数学上恒为 0，浮点下
-/// 却是 1e-14 级的噪声。这个噪声值本身无害，但它是**真值 > 0**：报表的
-/// Credits 环形图按 `credits > 0` 决定画不画一段，于是噪声会凭空多出一段
-/// 「未知 0 0.0%」—— 读数被 toFixed(2) 舍成 0，图例却留着那一行。
-/// 真正的余量（旧聚合行没有 providerStats / accountStats 键时，那段请求的
-/// credits 会整个落进来）是 0.01 以上的量级，与噪声隔着十几个数量级。
-/// 取 1e-6 作阈值：远高于任何规模的累加噪声（哪怕是百万级的 credits），
-/// 又远低于一分 credit —— 两者之间没有任何真实取值。
-fn credit_residue(total: f64, covered: f64) -> f64 {
-    let residue = total - covered;
-    if residue.abs() < 1e-6 {
-        0.0
-    } else {
-        residue
-    }
 }
 
 /// 把一次请求（或一天的累计）并进按模型的累计表。
@@ -923,33 +899,4 @@ pub(super) fn normalize_status_filter(value: Option<&str>) -> Option<StatusFilte
 /// `YYYY-MM-DD` → NaiveDate（手改文件里的坏值返回 None，调用方各自兜底）
 fn parse_key(text: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::credit_residue;
-
-    /// 纯浮点噪声必须夹成 0：报表的 Credits 环形图按 `credits > 0` 取段，
-    /// 2.8e-14 会凭空多出一行「未知 0 0.0%」（实测复现过，见函数注释）。
-    #[test]
-    fn credit_residue_clamps_floating_noise() {
-        // 库里实测的那一组：各组之和与总量的差是 1e-14 级
-        assert_eq!(credit_residue(120.2500000000001, 120.25000000000007), 0.0);
-        // 正负两侧的噪声都夹
-        assert_eq!(credit_residue(100.0, 100.0 + 1e-9), 0.0);
-        assert_eq!(credit_residue(100.0, 100.0 - 1e-9), 0.0);
-    }
-
-    /// 真正的余量（旧聚合行没有 providerStats / accountStats 键时整段落进来）
-    /// 是 0.01 以上的量级，**不能**被夹掉 —— 夹了就丢数据了。
-    #[test]
-    fn credit_residue_keeps_real_remainder() {
-        assert_eq!(credit_residue(120.25, 100.0), 20.25);
-        // 一分 credit 是真实可读的最小量级，阈值必须远低于它。
-        // 余量本身带浮点尾数（`1.0 - 0.99` → `0.010000000000000009`），
-        // 所以这里比量级而不是比字面相等 —— 关键是被**保留**（> 0，没夹成 0）
-        let tiny = credit_residue(1.0, 0.99);
-        assert!(tiny > 0.0, "真实余量不该被夹掉，得到 {tiny}");
-        assert!((tiny - 0.01).abs() < 1e-9);
-    }
 }

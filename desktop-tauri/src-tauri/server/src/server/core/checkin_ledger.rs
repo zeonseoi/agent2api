@@ -4,7 +4,7 @@
 //! 两张表记的是同一件事的两半，同属「签到中心的动作明细」：
 //!   · `checkin_records`（schema v11）：每账号一次签到的结果（成功 / 已领 /
 //!     等窗口 / 失败），写入方 `core::checkin_records`；
-//!   · `travel_records`（schema v14，本 fork）：猫猫旅行的真动作（派出 / 领回 /
+//!   · `travel_records`（本 fork 的表，见 `db::schema_fork`）：猫猫旅行的真动作（派出 / 领回 /
 //!     领养）与成长任务的到期自动领取（领任务 / 领取失败），写入方
 //!     `core::growth_scheduler`（经 `core::travel_ledger`）与 `core::growth_claim_auto`。
 //! 改造前它们是「签到记录」「成长记录」两个并排的标签页，列与筛选逐字相同 ——

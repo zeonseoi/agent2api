@@ -181,8 +181,7 @@ pub(super) fn summarize(
             "requests": totals.requests,
             "successful": totals.successful,
             "tokens": totals.tokens,
-            // 上游扣费 Credits 合计（与 tokens 同一口径的累加，只是换了量纲）。
-            // 前端概览卡片与两张环形图都读它；`credits` 是浮点，JSON 里就是小数
+            // 上游扣费 Credits 合计（前端概览卡片与两张环形图读它）
             "credits": totals.credits,
             "activeDays": totals.active_days,
             "streak": consecutive,
@@ -230,8 +229,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         day.successful += 1;
     }
     day.tokens += item.total_tokens;
-    // Credits 与 token 同一条「终态行才累加」的路径：失败请求的 credit 已在
-    // `normalize` 里清零，所以这里直接加就是「真实产生扣费的那些请求」的合计
+    // 失败请求的 credit 已在 `normalize` 清零，这里直接加即可
     day.credits += item.credit;
     day.cache_hit_tokens += item.cache_read_tokens;
     day.cache_input_tokens += item.prompt_tokens;

@@ -25,11 +25,9 @@ use super::source::{ApiKeyAccum, ClientAccum};
 /// `request_daily` 的列顺序（所有 SELECT 都按这个顺序取，`decode_daily`
 /// 依赖它；不写 `SELECT *` 的理由同 `sql::REQUEST_COLUMNS`）
 ///
-/// `credits` 排在 `account_stats` 之后：与明细侧那条「加列只加在末尾」的纪律同理 ——
-/// 中间插一列会让后面所有 `row.get(n)` 的序号整体挪一位，改动在 diff 里看不出错，
-/// 只会静默取错值（schema v11 加的列）。官方 v18 的三列排在它后面，也是同一理由。
-/// 物理列序不保证一致（撞号库经 `reconcile` 补的 `credits` 会落到表尾），所以
-/// 这里**永远显式列名**，`decode_daily` 只认本常量的顺序。
+/// `credits`（本 fork）与官方 v18 三列都只加在末尾：中间插一列会让后面所有
+/// `row.get(n)` 静默错位。物理列序不保证一致（存量库上 `credits` 落在表尾），
+/// 所以永远显式列名。
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
      cache_input_tokens, model_tokens, provider_stats, account_stats, credits, \
      client_stats, api_key_stats, source_stats_version";
@@ -64,7 +62,7 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         model_tokens: decode_accum::<ModelAccum>(&model_tokens),
         provider_stats: decode_accum::<ProviderAccum>(&provider_stats),
         account_stats: decode_accum::<AccountAccum>(&account_stats),
-        // 末列是 schema v11 加的（当天 Credits 合计）；旧行 DEFAULT 0 原样读出
+        // 当天 Credits 合计（本 fork 加的列，见 `db/schema_fork.rs`）；旧行 DEFAULT 0 原样读出
         credits: row.get(9)?,
         client_stats: decode_accum::<ClientAccum>(&row.get::<_, String>(10)?),
         api_key_stats: decode_accum::<ApiKeyAccum>(&row.get::<_, String>(11)?),

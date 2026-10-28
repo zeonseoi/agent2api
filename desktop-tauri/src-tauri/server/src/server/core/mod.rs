@@ -71,6 +71,7 @@ pub mod auth_http;
 pub mod assistant_sessions;
 pub mod assistant_images;
 pub mod auto_checkin;
+pub mod checkin_catch_up;
 pub mod beijing;
 pub mod billing;
 pub mod capability;
@@ -78,6 +79,7 @@ pub mod checkin_history;
 pub mod checkin_ledger;
 pub mod checkin_records;
 pub mod checkin_schedules;
+pub mod credits;
 pub mod clash;
 pub mod client;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。

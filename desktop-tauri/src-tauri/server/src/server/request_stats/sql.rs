@@ -65,7 +65,7 @@ use super::report::{normalize_status_filter, SummaryRow};
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
 ///
 /// 末尾两列（`attempt_details` / `sensitive_hits`）是 schema v2 新增的 JSON 文本列
-/// （见 `db/schema.rs` 的 `ADDED_COLUMNS`）。它们必须排在**最后**：`decode_request`
+/// （见 `db/schema.rs` 的 `V2_SCHEMA`）。它们必须排在**最后**：`decode_request`
 /// 按序号取值，而「加列」这件事只有在末尾才不牵动前面的序号 —— 中间插一列会让
 /// 所有后续字段的序号整体挪一位，那种改动在整个文件里看不出错，只会静默取错值。
 pub(super) const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
@@ -149,9 +149,8 @@ pub(super) fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
             .get::<_, Option<String>>(24)?
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null),
-        // 倒数第三列是 schema v12 加的（上游扣费 Credits）；旧行 DEFAULT 0 原样读出。
-        // 它排在 `client` 之前：本 fork 的 v12 与官方的 v12 撞号，两条 ALTER 同属
-        // 那一版（见 db/schema.rs 的 V12_SCHEMA），这里按 fork 常量里的顺序读。
+        // 倒数第三列是上游扣费 Credits（本 fork 加的列，见 `db/schema_fork.rs`）；
+        // 旧行 DEFAULT 0 原样读出。
         credit: row.get(25)?,
         // 末三列是 schema v12/v18 加的请求来源维度；旧行的 DEFAULT '' 原样
         // 读出 —— 空串 = 没有记录（前端显示占位符），与无 UA 的请求同一形态。

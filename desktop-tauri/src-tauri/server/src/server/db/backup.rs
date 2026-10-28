@@ -72,6 +72,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
 use super::schema;
+use super::schema_fork;
 use super::Db;
 use crate::server::core::crypto;
 use crate::server::logging;
@@ -786,7 +787,7 @@ fn import_with_progress(db: &Db, source: &Path, config_dir: &Path) -> Result<Val
     }
     validate_required_tables(conn)?;
     // 补齐缺失表（精简备份的日志表）并把版本升到当前
-    schema::migrate(conn).map_err(|e| format!("对齐备份库 schema 失败: {e}"))?;
+    schema_fork::migrate(conn).map_err(|e| format!("对齐备份库 schema 失败: {e}"))?;
 
     let tables = table_row_counts(conn, &[]);
 

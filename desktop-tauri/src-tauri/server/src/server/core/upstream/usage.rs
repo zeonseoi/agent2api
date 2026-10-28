@@ -61,17 +61,15 @@ use crate::server::logging;
 /// 一次上报的用量（四种 token 计数 + 本次扣费，字段名对应存储契约）。
 ///
 /// 前四个 token 槽是因为存储契约只有四列（见模块头部「为什么不设 cache_write」那条）。
-///
-/// `credit` 是**上游按请求返回的 Credits 扣费**（WorkBuddy 国内版实测非零，
-/// 见 `extract_usage`）。与 token 一样是「有就记、没有就 0」的旁路读数，
-/// 不参与转发、缺失不影响任何东西。它是 `f64`，因此本结构体**不能**派生 `Eq`。
+/// `credit` 是 fork 加的旁路读数（解析见 `core::credits`）；它是 `f64`，
+/// 因此本结构体**不能**派生 `Eq`。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UsageTokens {
     pub prompt: i64,
     pub completion: i64,
     pub total: i64,
     pub cache_read: i64,
-    /// 本次扣费 Credits（浮点；上游没给则 0）
+    /// 本次扣费 Credits（上游没给则 0）
     pub credit: f64,
 }
 
@@ -122,8 +120,7 @@ const CACHE_READ_CONTAINERS: &[&str] = &["prompt_tokens_details", "input_tokens_
 /// 对象内单个字段缺失**或为非正数**按「这项没说话」处理，交给别名表的下一项；
 /// 全部落空才按 0 算。`total` 的兜底是 prompt + completion。
 ///
-/// `credit` 兼容三种别名（对照 buddy-proxy 的 `credit`/`credits`/`cost`）：
-/// 上游不同家/不同版本对「本次扣费」的命名不统一，取到哪个算哪个。
+/// 扣费的别名兼容与取值规则见 `core::credits`。
 pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
     let object = usage.as_object()?;
     let prompt = first_positive(object, PROMPT_KEYS).unwrap_or(0);
@@ -136,23 +133,8 @@ pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
         .find_map(|details| first_positive(details, CACHE_READ_KEYS))
         .or_else(|| first_positive(object, CACHE_READ_KEYS))
         .unwrap_or(0);
-    let credit = float_field(object.get("credit"))
-        .or_else(|| float_field(object.get("credits")))
-        .or_else(|| float_field(object.get("cost")))
-        .unwrap_or(0.0);
+    let credit = crate::server::core::credits::credit_of(object);
     Some(UsageTokens { prompt, completion, total, cache_read, credit })
-}
-
-/// 取浮点数值字段：整数 / 浮点 / 数字字符串都认（Credits 是小数，不能用
-/// `number_field` 那个取整的版本），非数值返回 None。
-fn float_field(value: Option<&Value>) -> Option<f64> {
-    let value = value?;
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-    .filter(|number| number.is_finite())
 }
 
 /// 按别名表依次取**第一个正数**（口径见模块头部）。
@@ -306,13 +288,10 @@ pub struct TelemetrySnapshot {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
-    /// 本次请求的上游扣费 Credits（浮点；上游没给则 0）。
-    ///
-    /// 与四个 token 字段同一「最后一次为准」口径（`report_usage` 覆盖式写入）。
-    /// 只在部分上游（如 WorkBuddy 国内版）非零，其余家多为 0 —— 展示层据此
-    /// 决定「有没有这张读数」，不要给 0 编一个「免费」的语义。
+    /// 本次请求的上游扣费 Credits（上游没给则 0；口径与别名见 `core::credits`）
     pub credit: f64,
-    pub quota_channel: String,    /// 上游首帧到达的**绝对时刻**（毫秒 Unix 时间戳；None = 全程没有帧到达，
+    pub quota_channel: String,
+    /// 上游首帧到达的**绝对时刻**（毫秒 Unix 时间戳；None = 全程没有帧到达，
     /// 例如转发前就失败 / 请求尚未开始下发）。
     ///
     /// 为什么存绝对时刻而不是相对耗时：采集点（响应流）与记账点（请求收尾）

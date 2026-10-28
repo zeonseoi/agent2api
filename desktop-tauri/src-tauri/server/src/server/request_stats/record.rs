@@ -86,12 +86,7 @@ pub struct RequestEntry {
     pub total_tokens: i64,
     #[serde(rename = "cacheReadTokens", default)]
     pub cache_read_tokens: i64,
-    /// 本次请求的上游扣费 Credits（浮点；上游没给 / 旧行则 0）。
-    ///
-    /// 与 token 四件套同源同口径：转发时从上游响应的 `usage` 旁路抄出
-    /// （`core::upstream::usage::extract_usage`，兼容 `credit`/`credits`/`cost`）。
-    /// **不是所有家都给**：WorkBuddy 国内版实测非零，国际版/其他家多为 0。
-    /// 前端据此决定「有没有这张读数」，不要给 0 编「免费」的语义。
+    /// 本次请求的上游扣费 Credits（上游没给 / 旧行则 0；口径见 `core::credits`）
     #[serde(rename = "credit", default)]
     pub credit: f64,
     /// 实际承载本次请求的 provider id（架构文档 §3.6）。
@@ -697,11 +692,7 @@ pub struct DailyEntry {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
-    /// 当天的上游扣费 Credits 合计（与 `tokens` 同一口径的累加，只是换了量纲）。
-    ///
-    /// 与明细行的 `credit` 同源（`core::upstream::usage` 的旁路提取），失败请求
-    /// 已在 `normalize` 里清零，所以这里累加的就是「真实产生扣费的那些请求」。
-    /// `f64` 而不是整数：Credits 本身是小数（0.07 / 5.3）。
+    /// 当天的上游扣费 Credits 合计（小数；失败请求已在 `normalize` 清零）
     #[serde(default)]
     pub credits: f64,
     /// 命中缓存的输入 token 数
@@ -778,8 +769,7 @@ pub struct ModelAccum {
     pub requests: i64,
     #[serde(default)]
     pub tokens: i64,
-    /// 该模型当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
-    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    /// 该模型当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
     #[serde(default)]
     pub credits: f64,
 }
@@ -802,8 +792,7 @@ pub struct ProviderAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
-    /// 该 provider 当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
-    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    /// 该 provider 当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
     #[serde(default)]
     pub credits: f64,
 }
@@ -834,8 +823,7 @@ pub struct AccountAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
-    /// 该账号当天的上游扣费 Credits 合计（口径见 `DailyEntry::credits`）。
-    /// `default` 让缺这个键的旧聚合行照常读入（按 0 算）。
+    /// 该账号当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
     #[serde(default)]
     pub credits: f64,
 }

@@ -81,6 +81,7 @@
 pub mod backup;
 pub mod migrate;
 pub mod schema;
+pub mod schema_fork;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -148,7 +149,7 @@ impl Db {
         }
         let conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
         apply_pragmas(&conn)?;
-        schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
+        schema_fork::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
         install_cloud_sync_hook(&conn);
         Ok(Db {
             inner: Arc::new(DbInner {

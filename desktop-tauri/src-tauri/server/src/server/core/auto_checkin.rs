@@ -23,24 +23,18 @@
 //! 「今日已签到」也按错误的日期显示。移植自 Node 版（作者在国内，`Local`
 //! 恰好等于 UTC+8）时没有显式钉住这个前提，这里补上。
 //!
-//! ── 补签（「已过点才补」，别改回无条件补）────────────────────
+//! ── 补签（有意的行为，别「顺手优化」）────────────────────────
 //! Node 版 `start()` 的条件是**「今天还没签过」**，并不判「时间点是否已过」：
-//! 开着自动签到却在 00:01 时没开机、白天才启动 → 立刻补一次。签到的每日额度
-//! 按自然日重置，用户开着开关却整天没签到才是反直觉的结果；上游签到接口幂等，
-//! 重复调用只返回「已领取」。
+//! 开着自动签到却在 00:01 时没开机、白天才启动 → 立刻补一次。
+//! 签到的每日额度按自然日重置，用户开着开关却整天没签到才是反直觉的结果；
+//! 上游签到接口幂等，重复调用只返回「已领取」。实测（2026-09-17）在 18:44
+//! 把 enabled 设为 true、time 设为 23:00（未来时点）时，Node 版立即执行了
+//! 一次 reason='启动补签' 的签到 —— 所以这里的条件同样只看日期键。
+//! 多条目之后按条目各补各的：今天没跑过的**启用**条目每条补一次。
 //!
-//! 但**未到点不该在启动时抢跑**（判据 `catch_up_due`）：设 10:10、早上 9 点开机
-//! 时立刻补一次会把当天的名额提前用掉，到点时被去重挡下、整天不再重跑（需要
-//! 窗口的提供商如 Qoder 就此漏掉）。所以启动补签要求「今天的触发时刻**已过**」，
-//! 未到点则什么都不做，交给调度循环在到点后的第一个 tick 正常执行 —— 「错过会
-//! 补签」的语义保留（设 10:10、下午 3 点才开机，仍然马上签一次）。
-//!
-//! 多条目之后按条目各补各的：今天没跑过、且已到点的**启用**条目每条补一次，
-//! 串在一个任务里跑（fire 的全局防重本来就只允许一轮在跑，串行省得互相抢空）。
-//!
-//! ── 启动补签与「到点触发」的分工 ──────────────────────────────
-//! 两条路径共用 `fire`，区别只在**由谁判定该不该跑**：`start` 判「已过点且未签」
-//! （补签），`tick` 判「已到点且未签」（正常触发）。
+//! **本 fork 不同**：启动补签额外要求「今天的触发时刻已过」，判据与理由见
+//! `core::checkin_catch_up`（未到点就补会把当天名额提前用掉，到点那轮被去重
+//! 挡下、整天不再重跑）。
 //!
 //! ── 配置读写 ────────────────────────────────────────────────
 //! 状态存在 config.json 的 `autoCheckin` 字段：`enabled` 是总开关，
@@ -432,7 +426,7 @@ pub fn today_key() -> String {
 /// 今天的触发时刻（北京时间）；已过则返回 Some，未到返回 None。
 /// 对应 Node 版 dueNow：非法的 time 文本在这里同样表现为 None（Node 是抛异常，
 /// 但调用方一律 catch 后 return，结果一致）。
-fn due_now(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
+pub(crate) fn due_now(time_text: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
     let target = today_at(time_text, now)?;
     if now >= target {
         Some(target)
@@ -454,33 +448,6 @@ fn next_run_at_ms(time_text: &str, fired_today: bool, now: DateTime<FixedOffset>
         target += chrono::Duration::days(1);
     }
     Some(target.timestamp_millis())
-}
-
-/// 启动时是否该立刻补签一次。
-///
-/// 两个条件**缺一不可**（2026-10 修复：漏了第二条会吃掉当天的设定时刻那一轮）：
-///   · 今天还没签过（`lastFiredDate` 不是今天）；
-///   · 今天的触发时刻**已过**。
-///
-/// ── 为什么第二条不能省 ──────────────────────────────────────
-/// `fire` 在执行前就**无条件**落 `lastFiredDate`（防进程中途被杀后反复补签）。
-/// 若启动时不看时刻就补签，「设定 10:10、早上 9 点开机」会在 9 点把当天的
-/// 名额用掉，10:10 到点时 `tick` 被去重挡下、整天不再重跑 —— 需要窗口的
-/// 提供商（Qoder 的国际版与国内版活动都在 10:00 后才有）就此漏掉，且没有
-/// 任何重试机会。
-///
-/// 触发时刻是用户自定的任意时刻，所以这里只判「到了没有」，不假设具体几点。
-/// 启动时已过点且今天没签 → 照旧立刻补（「错过会补签」的语义保留：设 10:10、
-/// 下午 3 点才开机，仍然马上签一次）。
-fn catch_up_due(
-    time_text: &str,
-    last_fired_date: Option<&str>,
-    now: DateTime<FixedOffset>,
-) -> bool {
-    if last_fired_date == Some(date_key(now).as_str()) {
-        return false;
-    }
-    due_now(time_text, now).is_some()
 }
 
 /// 今天的 HH:MM 时刻（北京时间）；time 文本非法时 None。
@@ -911,14 +878,10 @@ impl AutoCheckin {
 
     /// 启动调度（对应 Node 版 start 的多条目版）。
     ///
-    /// 开启状态下检查一次是否该**立即补签**：今天还没签过、且今天的触发时刻
-    /// **已过**（判据在 `catch_up_due`）。未到点则什么都不做，交给调度循环在
-    /// 到点后的第一个 tick 正常执行 —— 否则启动时那次会把当天的名额提前用掉，
-    /// 设定时刻那轮被去重挡下、整天不再重跑（见模块头「补签」）。
-    ///
-    /// 多条目之后按条目各补各的：今天没跑过、且**已到点**的**启用**条目每条
-    /// 补一次，串在一个任务里跑（fire 的全局防重本来就只允许一轮在跑，串行
-    /// 省得互相抢空）。
+    /// 开启状态下立即检查一次：**只看「今天签过没有」**，外加本 fork 的一条
+    /// 「今天的触发时刻**已过**」（判据与理由见 `core::checkin_catch_up`）。
+    /// 多条目之后按条目各补各的：今天没跑过的**启用**条目每条补一次，串在一个
+    /// 任务里跑（fire 的全局防重本来就只允许一轮在跑，串行省得互相抢空）。
     pub fn start(&self) {
         if !master_enabled() {
             return;
@@ -928,22 +891,19 @@ impl AutoCheckin {
         let pending: Vec<Schedule> = checkin_schedules::list()
             .into_iter()
             .filter(|schedule| {
-                schedule.enabled
-                    && match retry::due_accounts(schedule.last_result.as_ref(), logging::now_ms()) {
-                        // 官方那份的「失败重试」：重试时刻是逐账号算出来的，与计划
-                        // 时刻无关，到期就该补。
-                        Some(accounts) => !accounts.is_empty(),
-                        // 没有待重试的：仍按本 fork 的「到点才补」（见 `catch_up_due`）。
-                        // 官方的 `last_fired_date != today` 少了「已到点」这一半，
-                        // 启动时会把当天名额提前用掉，到点那轮被去重挡下、整天不再跑。
-                        None => {
-                            catch_up_due(&schedule.time, schedule.last_fired_date.as_deref(), now)
-                        }
-                    }
+                schedule.enabled && match retry::due_accounts(schedule.last_result.as_ref(), logging::now_ms()) {
+                    Some(accounts) => !accounts.is_empty(),
+                    // 本 fork：未到点不补（理由见 `core::checkin_catch_up`）
+                    None => crate::server::core::checkin_catch_up::due(
+                        &schedule.time,
+                        schedule.last_fired_date.as_deref(),
+                        now,
+                    ),
+                }
             })
             .collect();
         if pending.is_empty() {
-            logging::verbose("[Checkin]", "定时签到无到点未执行的条目，无需补签");
+            logging::verbose("[Checkin]", "定时签到条目均已执行，无需补签");
             return;
         }
         let service = self.clone();
@@ -1102,62 +1062,5 @@ pub fn init_global(service: AutoCheckin) -> AutoCheckin {
 pub fn stop_global() {
     if let Some(service) = GLOBAL.get() {
         service.stop();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    //! 启动补签的判据（`catch_up_due`）。
-    //!
-    //! 2026-10 修复的回归保护：修复前 `start` 只看「今天签过没有」，
-    //! 「设定 10:10、早上 9 点开机」会在 9 点补签并把当天名额用掉，10:10 到点
-    //! 被去重挡下、整天不再重跑 —— 需要 10 点后窗口的 Qoder 就此漏掉。
-    //! 下面第一条与第二条一起钉住「未到点不执行、已过点才补」这两个方向。
-    use super::catch_up_due;
-    use crate::server::core::beijing;
-    use chrono::TimeZone;
-
-    /// 造一个北京时间当天 HH:MM 的时刻
-    fn at(hour: u32, minute: u32) -> chrono::DateTime<chrono::FixedOffset> {
-        beijing::offset()
-            .with_ymd_and_hms(2026, 10, 12, hour, minute, 0)
-            .single()
-            .expect("北京时间固定偏移恒可构造")
-    }
-
-    /// 未到点：即使今天还没签，也不该补 —— 否则会吃掉当天设定时刻那一轮。
-    #[test]
-    fn startup_before_the_configured_time_does_not_fire() {
-        // 设定 10:10，9:00 启动
-        assert!(!catch_up_due("10:10", None, at(9, 0)));
-        // 用户自定任意时刻都成立：设定 11:00，10:59 启动
-        assert!(!catch_up_due("11:00", None, at(10, 59)));
-        // 边界：恰好到点前一分钟
-        assert!(!catch_up_due("10:10", None, at(10, 9)));
-    }
-
-    /// 已过点且今天没签：照旧立刻补（「错过会补签」的语义保留）。
-    #[test]
-    fn startup_after_the_configured_time_catches_up() {
-        // 设定 10:10，下午 3 点才开机
-        assert!(catch_up_due("10:10", None, at(15, 0)));
-        // 恰好到点（now == target，`due_now` 取 >=）
-        assert!(catch_up_due("10:10", None, at(10, 10)));
-    }
-
-    /// 今天签过了：任何时刻都不再补（同一天不跑两次）。
-    #[test]
-    fn already_fired_today_never_repeats() {
-        let today = beijing::date_key(at(9, 0));
-        // 未到点、已过点都返回 false
-        assert!(!catch_up_due("10:10", Some(&today), at(9, 0)));
-        assert!(!catch_up_due("10:10", Some(&today), at(15, 0)));
-    }
-
-    /// 时刻文本非法：不补（与 `due_now` 的 None 一致，不 panic）。
-    #[test]
-    fn invalid_time_text_does_not_fire() {
-        assert!(!catch_up_due("not-a-time", None, at(15, 0)));
-        assert!(!catch_up_due("", None, at(15, 0)));
     }
 }

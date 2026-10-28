@@ -1,4 +1,4 @@
-//! 派猫猫旅行与成长任务领取的**每账号明细台账**（`travel_records` 表，schema v14）。
+//! 派猫猫旅行与成长任务领取的**每账号明细台账**（`travel_records` 表，建表在 `db::schema_fork`）。
 //!
 //! ── 解决什么问题（与 `checkin_records` 同一动机）────────────────
 //! 官方旅行排程只把上一轮摘要写进配置（`growthSchedule.lastResult`），只反映
