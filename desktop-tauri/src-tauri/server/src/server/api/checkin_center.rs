@@ -307,9 +307,6 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // `supports_growth` 里 —— 那是**账号形态**，不是 provider 能力。
     // 与新手福利同一先例：快照只给账号入口清单，任务详情由前端展开时按需调
     // `GET /api/accounts/{id}/growth`（那是一次上游查询）。
-    //
-    // 「有没有国内版账号」也决定快照给不给 `travel` 键（那张自动派猫卡只在
-    // 有国内版账号时才有意义）—— 与上面同一判据，不另立一套。
     let growth_rows: Vec<Value> = accounts
         .iter()
         .filter(|account| {
@@ -344,12 +341,10 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
         "keepalive": crate::server::core::billing::keepalive::state(),
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
         // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
-        // 成长任务的「到期前自动领取」是官方没有的一档，单独挂在 `claimAuto` 下
-        // （独立开关与独立调度，见 core::growth_claim_auto）。
         "travel": crate::server::core::growth_scheduler::state(),
-        "claimAuto": has_cn_account.then(|| {
-            json!({ "enabled": crate::server::core::growth_claim_auto::claim_auto_enabled() })
-        }),
+        // 成长任务的「到期前自动领取」：官方没有这一档，判据与开关都在 fork 的
+        // `core::growth_claim_auto` 里（独立开关与独立调度）。
+        "claimAuto": crate::server::core::growth_claim_auto::center_entry(has_cn_account),
         "history": checkin_history::list(),
         // 插件申报的管理面板：界面据此决定「猫猫旅行」「保活模型链」这两块
         // 显不显示。它们的能力由 WorkBuddy 插件的不同地区版本提供（国内版

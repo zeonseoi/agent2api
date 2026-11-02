@@ -17,14 +17,12 @@
 //! 走 `management_error`(400)，前端只看 message。
 
 use axum::body::Bytes;
-use axum::extract::State;
 use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::core::growth_claim_auto;
 use crate::server::errors::management_error;
 use crate::server::http::ok_json;
-use crate::server::ServerState;
 
 /// GET /api/claim-auto —— 读「到期自动领取」开关。
 pub async fn get_claim_auto() -> Response {
@@ -32,7 +30,7 @@ pub async fn get_claim_auto() -> Response {
 }
 
 /// POST /api/claim-auto —— 存开关并起停后台轮询。
-pub async fn set_claim_auto(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn set_claim_auto(body: Bytes) -> Response {
     let payload = match serde_json::from_slice::<Value>(&body) {
         Ok(value) => value,
         Err(error) => return management_error(400, format!("请求体不是合法 JSON：{error}")),
@@ -40,10 +38,6 @@ pub async fn set_claim_auto(State(state): State<ServerState>, body: Bytes) -> Re
     let Some(enabled) = payload.get("enabled").and_then(Value::as_bool) else {
         return management_error(400, "需要 enabled（布尔值）");
     };
-    match state.claim_auto() {
-        Some(service) => service.set_enabled(enabled),
-        // 全局句柄未装入（理论上启动时已装）：仍然写配置，只是本次不排调度
-        None => growth_claim_auto::set_claim_auto(enabled),
-    }
+    growth_claim_auto::set_enabled_global(enabled);
     ok_json(json!({ "enabled": growth_claim_auto::claim_auto_enabled() }))
 }

@@ -1865,34 +1865,6 @@ pub fn shim_js() -> &'static str {
       return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
     },
 
-    // ── WorkBuddy 成长任务自动调度（上游调用与单账号「巡检一次」在官方 growth
-    // 那侧，与 bridge.rs 同名方法成对维护 —— 这里只有开关与「立即执行一轮」）──
-    // patch 形如 `{enabled}`（旅行）/ `{claimEnabled}`（到期领取），两项可分别提交
-    getClaimAuto: function () { return call('GET', '/api/claim-auto'); },
-    setClaimAuto: function (patch) { return call('POST', '/api/claim-auto', patch); },
-    // 合并台账（签到记录页实际用的那条，与 bridge.rs 同名方法成对）：后端把
-    // checkin_records 与 travel_records（猫猫旅行 + 成长任务领取）合并成一张表
-    // 返回，见 api::checkin_ledger。上面那对 getCheckinRecords /
-    // clearCheckinRecords 是上游的原接口（只含签到行），界面已不用它。
-    getCheckinLedger: function (params) {
-      const query = new URLSearchParams();
-      for (const key of Object.keys(params || {})) {
-        const value = params[key];
-        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
-      }
-      const text = query.toString();
-      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
-    },
-    clearCheckinLedger: function (params) {
-      const query = new URLSearchParams();
-      for (const key of Object.keys(params || {})) {
-        const value = params[key];
-        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
-      }
-      const text = query.toString();
-      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
-    },
-
     // ── 间隔型定时任务 ──
     getScheduledTasks: function () { return call('GET', '/api/scheduled-tasks'); },
     saveScheduledTask: function (id, patch) {
@@ -2249,6 +2221,34 @@ pub fn shim_js() -> &'static str {
     // 恢复进度：网页端与桌面端同一条后端端点（见 api::backup_api）
     getBackupProgress: function () { return call('GET', '/api/backup/progress'); },
   };
+
+  // fork 追加的桥方法：挂在对象外面而不是写进上面的字面量 —— 那个对象是官方
+  // 重构最频繁的地方，追加在这里可以让本文件内的冲突面保持为零。
+  //   · claimAuto 两条：成长任务「到期前自动领取」的开关（core::growth_claim_auto）
+  //   · checkinLedger 两条：合并台账（checkin_records + travel_records），
+  //     界面用的那一条；上面 /api/checkin-records 那对是上游原接口（只含签到行）
+  Object.assign(window.workbuddyDesktop, {
+    getClaimAuto: function () { return call('GET', '/api/claim-auto'); },
+    setClaimAuto: function (patch) { return call('POST', '/api/claim-auto', patch); },
+    getCheckinLedger: function (params) {
+      var query = new URLSearchParams();
+      for (var key in params || {}) {
+        var value = params[key];
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      var text = query.toString();
+      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
+    },
+    clearCheckinLedger: function (params) {
+      var query = new URLSearchParams();
+      for (var key in params || {}) {
+        var value = params[key];
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      var text = query.toString();
+      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
+    },
+  });
 
   // 把筛选条件转成查询串（与桌面 bridge 的 toQuery 同语义：空值跳过）
   function toQuery(query) {

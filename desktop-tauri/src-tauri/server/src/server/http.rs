@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 
 use crate::server::api;
 use crate::server::errors;
+use crate::server::fork_routes::fork_routes;
 use crate::server::logging;
 use crate::server::ServerState;
 
@@ -466,11 +467,10 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）
         .route("/api/checkin-activity", post(api::billing::run_activity))
-        // 成长任务「到期前自动领取」的开关（旅行排程走官方的 /api/travel-schedule）
-        .route(
-            "/api/claim-auto",
-            get(api::claim_auto::get_claim_auto).post(api::claim_auto::set_claim_auto),
-        )
+        // fork 的路由：成长任务到期领取开关 + 合并台账（见 core::checkin_ledger
+        // 与 core::growth_claim_auto 的模块头）。收成一个入口是为了让本文件只留
+        // 一行 —— 路由表是官方重构最频繁的地方，越少改越不易冲突。
+        .merge(fork_routes())
         // ── 会话与登录 ──
         // 只读动态登录元数据也必须走管理面鉴权；不是任意 admin.action 通道。
         .route("/api/session/login/methods", get(api::session::login_methods))
@@ -776,16 +776,6 @@ pub fn panel_router(state: ServerState) -> Router {
         )
         .route("/api/checkin-records/", any(api::logs_api::not_found))
         .route("/api/checkin-records/{*rest}", any(api::logs_api::not_found))
-        // 合并台账（签到中心「签到记录」页用的那个）：把 checkin_records 与
-        // travel_records（猫猫旅行 + 成长任务领取）合并成一张表返回，见
-        // core::checkin_ledger。与 /api/checkin-records 同形（GET 查询 /
-        // DELETE 清空，全清护栏 all=1）—— 上面那条是它的子集视图，界面只认这一条。
-        .route(
-            "/api/checkin-ledger",
-            get(api::checkin_ledger::query_records).delete(api::checkin_ledger::clear_records),
-        )
-        .route("/api/checkin-ledger/", any(api::logs_api::not_found))
-        .route("/api/checkin-ledger/{*rest}", any(api::logs_api::not_found))
         // ── 签到中心的聚合快照 ──
         // 只读一条：分组与「今日已签」的判定复用批量签到同一对判据
         // （CHECKIN_PROVIDERS ∩ supports_checkin），见 api::checkin_center 的模块头。

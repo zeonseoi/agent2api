@@ -350,6 +350,35 @@ pub fn init_global(service: ClaimAuto) -> ClaimAuto {
     service
 }
 
+/// 启动期装配：装句柄并在开关打开时起调度。
+///
+/// 收成一个入口是为了让 `server/mod.rs` 只留一行 —— 句柄、开关判定、
+/// 启动日志都留在这里，官方那个文件不必为 fork 多出字段或访问器。
+pub fn install(store: AccountStore) {
+    let service = init_global(ClaimAuto::new(store));
+    if !claim_auto_enabled() {
+        return;
+    }
+    logging::log("[Growth]", "🎁 成长任务到期领取已启用（每 2 小时一轮）");
+    service.start();
+}
+
+/// 改开关并起停调度（没有全局句柄时只写配置）。
+pub fn set_enabled_global(enabled: bool) {
+    match GLOBAL.get() {
+        Some(service) => service.set_enabled(enabled),
+        None => set_claim_auto(enabled),
+    }
+}
+
+/// 签到中心快照里的 `claimAuto` 段（没有国内版账号时给 `Null`）。
+pub fn center_entry(has_cn_account: bool) -> Value {
+    if !has_cn_account {
+        return Value::Null;
+    }
+    json!({ "enabled": claim_auto_enabled() })
+}
+
 /// 进程退出时停调度（`backend::shutdown` 调用）。
 pub fn stop_global() {
     if let Some(service) = GLOBAL.get() {

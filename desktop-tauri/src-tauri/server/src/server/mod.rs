@@ -143,6 +143,9 @@ pub mod config_migration;
 pub mod core;
 pub mod db;
 pub mod errors;
+// fork 追加的管理路由（/api/claim-auto、/api/checkin-ledger）：单独一个文件，
+// 让官方 http.rs 的路由表里只多一行 `merge`（见该文件模块头）。
+pub mod fork_routes;
 pub mod http;
 pub mod logging;
 pub mod logs_store;
@@ -160,7 +163,6 @@ use crate::port_conflict::{ConflictKind, PortConflict};
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auto_checkin::AutoCheckin;
-use crate::server::core::growth_claim_auto::ClaimAuto;
 use crate::server::core::billing::BillingService;
 use crate::server::core::login::LoginService;
 use crate::server::core::update::UpdateManager;
@@ -214,9 +216,6 @@ pub struct ServerState {
     upstream: UpstreamService,
     /// 定时签到句柄（轮询调度 + 启动补签；内部 Mutex + 后台任务）
     auto_checkin: AutoCheckin,
-    /// 成长任务到期领取句柄（WorkBuddy 国内版；独立于旅行排程的轮询调度）。
-    /// `Option`：handler 取不到时降级为自由函数（理论恒为 Some）。
-    claim_auto: Option<ClaimAuto>,
     /// 软件更新句柄（GitHub Release 检测 / 安装包下载；内部 Mutex）
     update: UpdateManager,
     /// 请求统计存储句柄（明细 + 按天聚合，现在同居统一库的两张表）。
@@ -365,15 +364,12 @@ impl ServerState {
         // `core::billing::checkin::run_checkin`（唯一），台账全量保留 ——
         // 清历史走签到记录页自己的「清空 / 按筛选删除」（见 checkin_records 模块头）。
         core::checkin_records::install(db.clone());
-        // 旅行记录的明细台账：装句柄即可，记账点在 `core::growth_scheduler`
-        // （官方旅行排程，经 core::travel_ledger）与 `core::growth_claim_auto`
-        // （成长任务领取），全量保留。它取代了
-        // config.json 的 travelHistory。**读侧不单独开接口** —— 签到记录页把这张表
-        // 与 checkin_records 合并成一张表展示（见 core::checkin_ledger）。
-        core::travel_records::install(db.clone());
-        // 合并台账的读侧（GET/DELETE /api/checkin-ledger）：查询 / 删除同时作用于
-        // 上面两张表（见 core::checkin_ledger 模块头）。
-        core::checkin_ledger::install(db.clone());
+        // fork 的台账：写入侧（猫猫旅行 + 成长任务领取的明细）与读侧（与签到记录
+        // 合并成一张表的 GET/DELETE /api/checkin-ledger，见 core::checkin_ledger）。
+        // 记账点在 `core::growth_scheduler`（官方旅行排程，经 core::travel_ledger）
+        // 与 `core::growth_claim_auto`（成长任务领取），全量保留；它取代了
+        // config.json 的 travelHistory，读侧不单独开接口。
+        core::checkin_ledger::install_tables(db.clone());
         // AI 助手的对话会话（左边那列历史会话）：装句柄即可，写入发生在每轮
         // 回答之后（见 `core::assistant_sessions` 的模块头）。
         core::assistant_sessions::install(db.clone());
@@ -517,7 +513,7 @@ impl ServerState {
         ));
         // 成长任务到期领取：与官方旅行排程**完全独立**的调度（各有各的开关、
         // 循环与防重入闸，关一个不影响另一个；见 core::growth_claim_auto 的模块头）。
-        let claim_auto = Some(core::growth_claim_auto::init_global(ClaimAuto::new(store.clone())));
+        core::growth_claim_auto::install(store.clone());
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
 
@@ -594,7 +590,6 @@ impl ServerState {
             billing,
             upstream,
             auto_checkin,
-            claim_auto,
             update,
             request_stats,
             db,
@@ -749,12 +744,6 @@ impl ServerState {
             state.auto_checkin.start();
         }
 
-        // 成长任务到期领取：独立开关、独立调度（与官方旅行排程互不影响）。
-        if core::growth_claim_auto::claim_auto_enabled() {
-            logging::log("[Growth]", "🎁 成长任务到期领取已启用（每 2 小时一轮）");
-            state.claim_auto().map(ClaimAuto::start);
-        }
-
         // 间隔型定时任务（凭证自动维护 / 模型目录刷新）：
         // 起一个循环，按各自配置的开关与间隔重复执行。
         //
@@ -827,11 +816,6 @@ impl ServerState {
     /// 定时签到句柄（/api/auto-checkin* 三条路由 + 启动调度）
     pub fn auto_checkin(&self) -> &AutoCheckin {
         &self.auto_checkin
-    }
-
-    /// 成长任务到期领取句柄（独立轮询；与旅行句柄互不影响）
-    pub fn claim_auto(&self) -> Option<&ClaimAuto> {
-        self.claim_auto.as_ref()
     }
 
     /// 软件更新句柄（/api/update/* 四条路由）

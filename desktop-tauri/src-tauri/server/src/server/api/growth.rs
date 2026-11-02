@@ -143,19 +143,10 @@ pub async fn school_run(state: &ServerState, account_id: &str, body: &Bytes) -> 
 pub async fn travel_run(state: &ServerState, account_id: &str) -> Response {
     match call_action(state, account_id, "growth.travel", &Value::Null).await {
         Ok(data) => {
-            // 明细台账：官方这个手动「巡检一次」也落一行（source = manual）——
-            // 台账是旅行这一路的统一日志，不分手动与自动（见 core::travel_ledger
-            // 的模块头）。账号名从账号记录取：插件回包不带昵称。
-            let name = account_of(state, account_id)
-                .ok()
-                .and_then(|account| {
-                    ["name", "nick"]
-                        .iter()
-                        .find_map(|key| account.get(*key).and_then(Value::as_str))
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
-            crate::server::core::travel_ledger::record_manual(account_id, &name, &data);
+            // 明细台账（fork）：手动「巡检一次」也落一行，不分手动与自动。
+            crate::server::core::travel_ledger::record_manual_of(
+                state.store(), account_id, &data,
+            );
             ok_json(data)
         }
         Err(response) => response,

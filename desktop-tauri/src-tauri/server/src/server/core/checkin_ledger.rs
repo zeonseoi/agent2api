@@ -40,6 +40,15 @@ pub fn install(db: Option<Db>) {
     let _ = DB.set(db);
 }
 
+/// fork 台账的启动装配：写入侧（`travel_records`）与读侧（本模块）一起装。
+///
+/// 收成一个入口是为了让 `server/mod.rs` 只留一行 —— 两张表的依赖关系
+/// （读侧依赖写入侧的同库表）留在这里，官方那个文件不必为 fork 多两行。
+pub fn install_tables(db: Option<Db>) {
+    crate::server::core::travel_records::install(db.clone());
+    install(db);
+}
+
 fn database() -> Option<&'static Db> {
     DB.get().and_then(Option::as_ref)
 }

@@ -610,31 +610,6 @@ const BRIDGE_JS: &str = r#"
       return call('DELETE', '/api/checkin-records' + (text ? '?' + text : ''));
     },
 
-    // ── 成长任务「到期前自动领取」的开关（官方旅行排程没有这一档；旅行走上面的
-    // /api/travel-schedule 三条）──
-    getClaimAuto: () => call('GET', '/api/claim-auto'),
-    setClaimAuto: patch => call('POST', '/api/claim-auto', patch),
-    // 合并台账（签到记录页实际用的那条，与 web_shim.rs 的同名方法成对）：
-    // 后端把 checkin_records 与 travel_records（猫猫旅行 + 成长任务领取）合并成
-    // 一张表返回，见 api::checkin_ledger。上面那对 getCheckinRecords /
-    // clearCheckinRecords 是上游的原接口（只含签到行），界面已不用它。
-    getCheckinLedger: params => {
-      const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(params || {})) {
-        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
-      }
-      const text = query.toString();
-      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
-    },
-    clearCheckinLedger: params => {
-      const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(params || {})) {
-        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
-      }
-      const text = query.toString();
-      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
-    },
-
     // ── 间隔型定时任务（凭证自动维护 / 定时查询积分 / 模型刷新 / 两个前端自动刷新）──
     // 改一条任务用 PATCH（后端同时受理 POST 作别名：CORS 允许方法里没有 PATCH，
     // 浏览器直连时预检会拦下它；走本桥的调用两种都能用，这里按规范用 PATCH）。
@@ -1006,5 +981,31 @@ const BRIDGE_JS: &str = r#"
     cloudSyncDownload: () => invoke('cloud_sync_download'),
     importCloudSyncKey: password => invoke('cloud_sync_import_key', { password }),
   };
+
+  // fork 追加的桥方法：挂在对象外面而不是写进上面的字面量 —— 那个对象是官方
+  // 重构最频繁的地方，追加在这里可以让本文件内的冲突面保持为零。
+  //   · claimAuto 两条：成长任务「到期前自动领取」的开关（core::growth_claim_auto）
+  //   · checkinLedger 两条：合并台账（checkin_records + travel_records），
+  //     界面用的那一条；上面 /api/checkin-records 那对是上游原接口（只含签到行）
+  Object.assign(window.workbuddyDesktop, {
+    getClaimAuto: () => call('GET', '/api/claim-auto'),
+    setClaimAuto: patch => call('POST', '/api/claim-auto', patch),
+    getCheckinLedger: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('GET', '/api/checkin-ledger' + (text ? '?' + text : ''));
+    },
+    clearCheckinLedger: params => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const text = query.toString();
+      return call('DELETE', '/api/checkin-ledger' + (text ? '?' + text : ''));
+    },
+  });
 })();
 "#;

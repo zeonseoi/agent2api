@@ -25,6 +25,7 @@
 
 use serde_json::Value;
 
+use crate::server::core::account_store::AccountStore;
 use crate::server::core::providers::workbuddy::Region as WorkBuddyRegion;
 use crate::server::core::travel_records;
 
@@ -104,7 +105,8 @@ pub fn record_schedule_from_summary(plan_time: Option<&str>, summary: &Value) {
 /// 官方单账号「巡检一次」按钮的记账入口（`api::growth::travel_run` 调用）。
 ///
 /// 单账号那条走的是插件 `admin.action` 的同一条路，回包是 `{outcome, message,
-/// credit}` 的平铺对象（无 `actions` 数组）。
+/// credit}` 的平铺对象（无 `actions` 数组）。账号名由调用方查（插件回包不带
+/// 昵称）—— 这里只收已查好的名字，不反向依赖账号库。
 pub fn record_manual(account_id: &str, account_name: &str, report: &Value) {
     record_outcome(
         "manual",
@@ -115,6 +117,30 @@ pub fn record_manual(account_id: &str, account_name: &str, report: &Value) {
         report.get("message").and_then(Value::as_str).unwrap_or(""),
         report.get("credit").and_then(Value::as_i64).unwrap_or(0),
     );
+}
+
+/// 同上，但自己从账号库取昵称（插件回包不带昵称）。
+///
+/// 单账号「巡检一次」的调用方只需要这一行 —— 查名字的细节留在这里，
+/// 官方的 `api/growth.rs` 不必为 fork 展开 8 行。
+pub fn record_manual_of(store: &AccountStore, account_id: &str, report: &Value) {
+    let name = store
+        .list_accounts()
+        .get("accounts")
+        .and_then(Value::as_array)
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account.get("id").and_then(Value::as_str) == Some(account_id))
+        })
+        .and_then(|account| {
+            ["name", "nick"]
+                .iter()
+                .find_map(|key| account.get(*key).and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    record_manual(account_id, &name, report);
 }
 
 #[cfg(test)]
