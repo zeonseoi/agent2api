@@ -55,7 +55,7 @@ pub(super) fn fold_sources(day: &mut DailyEntry, item: &RequestEntry) {
         clients: vec![ClientAccum { client: item.source.client.clone(), usage }],
         models: vec![ModelAccum {
             model: model_stat_key(&item.model, &item.upstream_model).to_string(),
-            requests: 1, tokens: item.total_tokens, credits: item.credit,
+            requests: 1, tokens: item.total_tokens, credits: item.credit.unwrap_or(0.0),
         }],
     });
 }

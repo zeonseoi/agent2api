@@ -1,6 +1,9 @@
 import * as React from 'react'
 import { Badge, Button, HtmlContent, StatusDot } from '@ui'
 import { t } from '../../i18n'
+import { NameEyeButton } from '../accounts-panels'
+import { maskName } from '../accounts-store'
+import { numberText } from '../accounts-shared'
 import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 
 export type RequestEntry = {
@@ -10,8 +13,9 @@ export type RequestEntry = {
   clientReasoning?: string; upstreamReasoning?: string
   durationMs?: number; firstResponseMs?: number | null
   promptTokens?: number; completionTokens?: number; totalTokens?: number; cacheReadTokens?: number
-  /** 本次请求的上游扣费 Credits（浮点；上游没给 / 旧行则 0） */
-  credit?: number
+  /** 上游按请求上报的积分消耗（后端 `credit`）；null / 缺键 = 这一家没上报，
+   *  与 0（确实零消耗）是两件事 —— 前者显示「—」 */
+  credit?: number | null
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
@@ -49,21 +53,6 @@ function formatDuration(ms: unknown): string {
  * 按流式段算、也可能按总用时算（回落），不说明白会让人拿它对不上别的工具。
  */
 const SPEED_TIP = t('生成速度：输出 token ÷ 流式段用时（总用时 − 首响）；流式段不足总用时一半时按总用时计')
-
-/**
- * Credits 读数：上游按请求返回的扣费（小数）。与 token 不同，它不是量级词，
- * 而是「这次花了多少钱」——保留两位小数、去掉无意义的尾零（5.3 不写成 5.30）。
- *
- * **0 也照样显示**（方案 B）：上游没给 credit 的家/版本会返回 0，但「这次真的是
- * 0」与「这家压根没这个读数」在展示层不区分 —— 始终显示这一行，用户一眼能确认
- * 功能在跑，而不是以为坏了。代价是免费模型/国际版会一直显示 `0 credits`。
- */
-function formatCredit(value: unknown): string {
-  const credit = Number(value) || 0
-  if (!Number.isFinite(credit) || credit < 0) return '0'
-  // 两位小数、去尾零：5.3 → "5.3"，0.07 → "0.07"，1 → "1"，0 → "0"
-  return String(Number(credit.toFixed(2)))
-}
 
 /** 流式段的下界（毫秒）：低于它按总用时计，见 tokensPerSecond */
 const STREAM_MS_FLOOR = 500
@@ -200,7 +189,7 @@ function runningFirstLine(entry: RequestEntry): React.ReactNode {
  * 一处实现 —— 列设置重排时才不会各画一个样。类名与旧实现的产出逐字一致（CSS 与窄窗口重排都按
  * 这些类名走），空态占位的类名也照旧（重试列空时只有 .req-none，没有 .req-retry）。
  */
-export function RequestCell({ entry, column }: { entry: RequestEntry; column: VisibleColumn }): React.ReactNode {
+export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntry; column: VisibleColumn; namesHidden: boolean }): React.ReactNode {
   const { align, key } = column
   const base = column.sel.slice(1) + (key === 'dur' || key === 'speed' ? ' req-num' : '')
   const className = `${base} ta-${align}`
@@ -237,7 +226,9 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
               title={t('这条明细没有记录提供商（旧数据或请求未走到转发）')}>—</span>
           )}
           {entry.accountName ? (
-            <span className='req-acct' title={entry.accountId || entry.accountName}>{entry.accountName}</span>
+            <span className='req-acct' title={namesHidden ? undefined : entry.accountId || entry.accountName}>
+              {namesHidden ? maskName(entry.accountName) : entry.accountName}
+            </span>
           ) : (
             <span className='req-acct is-empty'
               title={t('请求在任何账号接手之前就失败了')}>—</span>
@@ -406,6 +397,29 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       return <span key={key} className={`${className}${speed ? '' : ' req-none'}`} title={SPEED_TIP}>{speed || '—'}</span>
     }
 
+    case 'credit': {
+      // 进行中：积分要等上游最后一个 chunk 的 usage 才到，此刻没有读数可给
+      // （与「用量」列同一处置：留空比「-」更准确）。
+      if (isRunning(entry)) return <span key={key} className={className} />
+      // 失败请求不记录用量（后端 normalize 已把 credit 清成 None）：这里与
+      // 「用量」列用同一句说明，避免把「失败清零」误读成「这一家没上报」。
+      if (!isOk(entry)) {
+        return <span key={key} className={`${className} is-empty`} title={t('失败请求不记录用量')}>—</span>
+      }
+      const value = entry.credit
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+        return (
+          <span key={key} className={`${className} is-empty`} title={t('上游没有返回积分消耗')}>—</span>
+        )
+      }
+      return (
+        <span key={key} className={className}
+          title={t('本次请求消耗 {credit} 积分', { credit: numberText(value) })}>
+          {numberText(value)}
+        </span>
+      )
+    }
+
     case 'usage': {
       // 进行中：用量要等收尾才记账，此刻没有任何读数可给 —— 留空比「-」更准确
       if (isRunning(entry)) return <span key={key} className={className} />
@@ -413,24 +427,18 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       if (!isOk(entry)) {
         return (
           <span key={key} className={className} title={t('失败请求不记录用量')}>
-            <span className='req-usage-line'>credits: -</span>
-            <span className='req-usage-line sub'>in: - / out: - / all: -</span>
+            <span className='req-usage-line'>in: - / out: - / all: -</span>
             <span className='req-usage-line sub'>{t('缓存读取: - / 命中率: -')}</span>
           </span>
         )
       }
-      // 三行：Credits（上游扣费，独立一行放最上）→ in/out/all → 缓存/命中率。
-      // Credits 之所以独立一行而不并进下面两行：它是「花了多少钱」，与 token
-      // 是不同性质的信息，挤在同一行会糊在一起、也不好对齐比较。
-      const creditLine = `credits: ${formatCredit(entry.credit)}`
       const line1 = `in: ${formatTokens(entry.promptTokens)} / out: ${formatTokens(entry.completionTokens)} / all: ${formatTokens(entry.totalTokens)}`
       const line2 = t('缓存读取: {cache} / 命中率: {rate}', {
         cache: formatTokens(entry.cacheReadTokens), rate: cacheRate(entry),
       })
       return (
-        <span key={key} className={className} title={[creditLine, line1, line2].filter(Boolean).join('\n')}>
-          <span className='req-usage-line'>{creditLine}</span>
-          <span className='req-usage-line sub'>{line1}</span>
+        <span key={key} className={className} title={[line1, line2].join('\n')}>
+          <span className='req-usage-line'>{line1}</span>
           <span className='req-usage-line sub'>{line2}</span>
         </span>
       )
@@ -463,14 +471,19 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
 }
 
 /** 表头：按可见列逐格产出，顺序与数据行逐格一致（两处都走 visibleColumns） */
-export function headRow(columns: VisibleColumn[]): React.ReactNode {
+export function headRow(columns: VisibleColumn[], namesHidden: boolean): React.ReactNode {
   return (
     <div className='req-head' key='__head'>
       {columns.map(column => (
         <span key={column.key} data-col={column.key}
           className={`${column.sel.slice(1)}${column.key === 'dur' || column.key === 'speed' ? ' req-num' : ''} ta-${column.align}`}
           title={column.key === 'speed' ? SPEED_TIP : undefined}>
-          {column.label}
+          {column.key === 'target' ? (
+            <span className='req-target-label'>
+              {column.label}
+              <NameEyeButton hidden={namesHidden} />
+            </span>
+          ) : column.label}
         </span>
       ))}
     </div>

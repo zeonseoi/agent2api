@@ -53,18 +53,22 @@ CREATE INDEX IF NOT EXISTS idx_travel_records_provider ON travel_records(provide
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     repair_legacy(conn)?;
     schema::migrate(conn)?;
-    install(conn)
+    install(conn)?;
+    finish_credit_legacy(conn)
 }
 
 /// 补齐老 fork 库因版本撞号被跳过的官方对象。
 ///
-/// 判据是「有没有 fork 的 `credit` 列」：官方血统的库从来没有它，不需要修。
-/// 必须在 [`install`] 补 `credit` **之前**判断 —— 补完就分不清血统了。
+/// 判据是「有没有 fork 的 `credit` 列」：官方血统的库直到 v23 才有这一列，
+/// 所以「有 credit 且版本 < 23」一定是老 fork 库。必须在 [`install`] 动
+/// `credit` **之前**判断，也必须早于官方迁移（v18 的索引缺 `client` 就打不开）。
 fn repair_legacy(conn: &Connection) -> rusqlite::Result<()> {
-    if !column_exists(conn, "requests", "credit")? {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // 官方 v23 起也有 requests.credit（可空 REAL），所以「有 credit」只在
+    // 版本 < 23 时才是 fork 血统的判据。
+    if version >= 23 || !column_exists(conn, "requests", "credit")? {
         return Ok(());
     }
-    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     // 官方 v10：requests.route（选路决策快照）
     if version >= 10 {
         ensure_column(conn, "requests", "route", "TEXT")?;
@@ -77,14 +81,41 @@ fn repair_legacy(conn: &Connection) -> rusqlite::Result<()> {
     if version >= 12 {
         ensure_column(conn, "requests", "client", "TEXT NOT NULL DEFAULT ''")?;
     }
-    Ok(())
+    // 官方 v23 要往 requests 加 `credit REAL`（可空），而 fork 老库的同名列是
+    // `NOT NULL DEFAULT 0` —— 那句 ALTER 会以 `duplicate column name` 失败，
+    // 整个库打不开；即便不撞名，官方写入侧（`Option<f64>`）写 NULL 也会被
+    // NOT NULL 拒绝。SQLite 改不了列约束，于是先把旧列改名让位，官方 v23 建出
+    // 合规的新列后由 [`finish_credit_legacy`] 把读数搬回去并删掉过渡列。
+    conn.execute_batch("ALTER TABLE requests RENAME COLUMN credit TO credit_fork_legacy;")
+}
+
+/// 官方 v23 建出可空 `credit` 后，把老 fork 的读数搬回去并删掉过渡列。
+///
+/// 名为 `0` 的旧读数**按「没上报」处理（留 NULL）**：fork 侧 `0` 就是没读数的
+/// 兜底值（见 `core::upstream::usage` 的历史注释），官方 v23 用 NULL 表达同一
+/// 件事 —— 原样搬成 0 会被展示层读成「这次确实花了 0 积分」。
+fn finish_credit_legacy(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "requests", "credit_fork_legacy")? {
+        return Ok(());
+    }
+    // 官方迁移没跑到 v23（例如库被更旧的程序打开过）时先留着过渡列，
+    // 下次打开再来；此时新列还不存在，搬也无处可搬。
+    if !column_exists(conn, "requests", "credit")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "UPDATE requests SET credit = credit_fork_legacy \
+         WHERE credit IS NULL AND credit_fork_legacy > 0;
+         ALTER TABLE requests DROP COLUMN credit_fork_legacy;",
+    )
 }
 
 /// 把 fork 独有的对象补齐（每次打开都核对，幂等）。
 fn install(conn: &Connection) -> rusqlite::Result<()> {
     // 单次请求的上游扣费：REAL —— 上游给的是 0.07 / 5.3 这种小数。
-    // 与 token 分列：它是「花费」不是「用量」，量纲不同；0 就是「没上报」。
-    ensure_column(conn, "requests", "credit", "REAL NOT NULL DEFAULT 0")?;
+    // 官方 v23 起由官方迁移建这一列（可空 = 没上报），这里的 ensure 只为
+    // 「官方还没到 v23 的老库」兜底。
+    ensure_column(conn, "requests", "credit", "REAL")?;
     // 当天合计（报表只走聚合表、寿命与明细无关，所以聚合行上也要有落点）。
     ensure_column(conn, "request_daily", "credits", "REAL NOT NULL DEFAULT 0")?;
     conn.execute_batch(TRAVEL_RECORDS)
@@ -294,6 +325,62 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         migrate(&conn).unwrap();
         migrate(&conn).expect("第二次迁移应当是无操作");
+        drop(conn);
+        remove_temp(&path);
+    }
+
+    /// 停在官方 v22 的 fork 库：`requests.credit` 已是 fork 的
+    /// `NOT NULL DEFAULT 0`，而官方 v23 要加同名**可空**列。
+    ///
+    /// 直接跑官方 v23 会以 `duplicate column name` 失败、整个库打不开；
+    /// 即便不撞名，官方写入侧写 NULL 也会被 NOT NULL 拒绝。修复是先把旧列改名，
+    /// 官方建出新列后再把读数搬回去。
+    #[test]
+    fn upgrades_fork_v22_credit_column() {
+        let path = temp_path("v22");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut cleaned = 0usize;
+            for version in 1..=22 {
+                schema::apply_version(&conn, version, &mut cleaned).unwrap();
+            }
+            conn.execute_batch(
+                "ALTER TABLE requests ADD COLUMN credit REAL NOT NULL DEFAULT 0;
+                 INSERT INTO requests (id, ts, model, status, credit)
+                 VALUES ('a', 1, 'm', 200, 0.25), ('b', 2, 'm', 200, 0);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 22).unwrap();
+        }
+
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).expect("fork v22 库应当能升到 v23");
+
+        let requests = columns(&conn, "requests");
+        assert!(
+            !requests.iter().any(|column| column == "credit_fork_legacy"),
+            "过渡列应当已被删掉：{requests:?}"
+        );
+        // 有读数的行搬进新列；fork 的 0 是「没上报」的兜底值，按 NULL 处理
+        // （原样搬成 0 会被读成「确实花了 0 积分」）。
+        let rows: Vec<(String, Option<f64>)> = conn
+            .prepare("SELECT id, credit FROM requests ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(vec![("a".to_string(), Some(0.25)), ("b".to_string(), None)], rows);
+        // 新列必须可空：官方写入侧按 `Option<f64>` 落 NULL。
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('requests') WHERE name = 'credit'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(0, notnull, "官方 v23 的 credit 列必须可空");
+        assert_eq!(version(&conn), schema::SCHEMA_VERSION);
         drop(conn);
         remove_temp(&path);
     }

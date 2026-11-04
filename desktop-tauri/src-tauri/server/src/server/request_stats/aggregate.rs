@@ -229,8 +229,10 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         day.successful += 1;
     }
     day.tokens += item.total_tokens;
-    // 失败请求的 credit 已在 `normalize` 清零，这里直接加即可
-    day.credits += item.credit;
+    // 没上报（None）按 0 计入合计：日报是「花了多少」的总账，缺读数不该让整行
+    // 消失；明细列那边保留 None 以区分「没上报」与「花了 0」。
+    let credit = item.credit.unwrap_or(0.0);
+    day.credits += credit;
     day.cache_hit_tokens += item.cache_read_tokens;
     day.cache_input_tokens += item.prompt_tokens;
     // 模型维度用「上游真名」当统计键（见 `model_stat_key`）：映射只是代名，
@@ -240,7 +242,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         model_stat_key(&item.model, &item.upstream_model),
         item.total_tokens,
         1,
-        item.credit,
+        credit,
     );
     // 空 provider 也建组（见 push_provider_accum 的注释）
     push_provider_accum(
@@ -249,7 +251,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
-        item.credit,
+        credit,
     );
     push_account_accum(
         &mut day.account_stats,
@@ -258,6 +260,6 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
-        item.credit,
+        credit,
     );
 }

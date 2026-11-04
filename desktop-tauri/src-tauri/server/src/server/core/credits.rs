@@ -1,36 +1,9 @@
-//! 上游扣费 **Credits** 在 fork 侧的纯函数：从 `usage` 里解析、把浮点余量夹成 0。
+//! 上游扣费 **Credits** 在 fork 侧的纯函数：把浮点余量夹成 0。
 //!
 //! ── 为什么单独一个文件 ──────────────────────────────────────
-//! Credits 是本 fork 加的旁路读数，官方文件（`core::upstream::usage`、
-//! `request_stats::{report,record,...}`）里只留字段与调用点，细则放这里 ——
-//! 合并时那几处改动越少越好。
-
-use serde_json::Value;
-
-/// 从 `usage` 对象里取本次扣费；缺失或非数值按 0。
-///
-/// ── 三种别名 ────────────────────────────────────────────────
-/// 不同家 / 不同版本对「本次扣费」的命名不统一，对照 buddy-proxy 取
-/// `credit` / `credits` / `cost`，取到哪个算哪个。都没有 = 这次没上报，
-/// 记 0 —— 不给 0 编一个「免费」的语义。
-pub fn credit_of(object: &serde_json::Map<String, Value>) -> f64 {
-    float_field(object.get("credit"))
-        .or_else(|| float_field(object.get("credits")))
-        .or_else(|| float_field(object.get("cost")))
-        .unwrap_or(0.0)
-}
-
-/// 取浮点数值字段：整数 / 浮点 / 数字字符串都认（Credits 是小数，不能用
-/// 取整的 `number_field`），非数值与非有限值返回 None。
-fn float_field(value: Option<&Value>) -> Option<f64> {
-    let value = value?;
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-    .filter(|number| number.is_finite())
-}
+//! Credits 的**解析**已由官方接管（`core::upstream::usage` 的 `first_amount`
+//! 与别名表），本文件只剩报表侧那一个夹取函数 —— 官方文件里只留调用点，细则
+//! 放这里，合并时那几处改动越少越好。
 
 /// 未被任何组覆盖的 Credits 余量（`总量 − 各组之和`），并把浮点舍入残值夹成 0。
 ///
@@ -54,30 +27,7 @@ pub fn residue(total: f64, covered: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{credit_of, residue};
-    use serde_json::{json, Value};
-
-    fn object(value: Value) -> serde_json::Map<String, Value> {
-        value.as_object().cloned().unwrap_or_default()
-    }
-
-    /// 三种别名都认，数字字符串也认。
-    #[test]
-    fn credit_aliases_are_recognized() {
-        assert_eq!(credit_of(&object(json!({ "credit": 0.07 }))), 0.07);
-        assert_eq!(credit_of(&object(json!({ "credits": 5.3 }))), 5.3);
-        assert_eq!(credit_of(&object(json!({ "cost": 12 }))), 12.0);
-        assert_eq!(credit_of(&object(json!({ "credit": "0.25" }))), 0.25);
-    }
-
-    /// 缺失 / 非数值 / 非有限值都按 0（不给 0 编「免费」的语义）。
-    #[test]
-    fn missing_or_invalid_credit_is_zero() {
-        assert_eq!(credit_of(&object(json!({}))), 0.0);
-        assert_eq!(credit_of(&object(json!({ "credit": null }))), 0.0);
-        assert_eq!(credit_of(&object(json!({ "credit": "abc" }))), 0.0);
-        assert_eq!(credit_of(&object(json!({ "credit": true }))), 0.0);
-    }
+    use super::residue;
 
     /// 纯浮点噪声必须夹成 0：报表的 Credits 环形图按 `credits > 0` 取段，
     /// 2.8e-14 会凭空多出一行「未知 0 0.0%」（实测复现过，见函数注释）。

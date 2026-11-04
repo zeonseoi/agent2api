@@ -27,6 +27,7 @@ export const MODE_TITLE: Record<string, string> = {
  *  startup 三档，与签到同名同义，不另立一套）。 */
 export const SOURCE_LABEL: Record<string, string> = {
   schedule: '定时',
+  makeup: '补签',
   startup: '补签',
   manual: '手动',
   single: '单签',

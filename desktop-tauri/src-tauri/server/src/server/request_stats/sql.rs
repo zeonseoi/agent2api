@@ -70,15 +70,16 @@ pub(super) use raw::{
 /// `requests` 的列顺序（所有 SELECT 都按这个顺序取，`decode_request` 依赖它；
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
 ///
-/// 末尾两列（`attempt_details` / `sensitive_hits`）是 schema v2 新增的 JSON 文本列
-/// （见 `db/schema.rs` 的 `V2_SCHEMA`）。它们必须排在**最后**：`decode_request`
-/// 按序号取值，而「加列」这件事只有在末尾才不牵动前面的序号 —— 中间插一列会让
-/// 所有后续字段的序号整体挪一位，那种改动在整个文件里看不出错，只会静默取错值。
+/// **新列一律追加在末尾**：`decode_request` 按序号取值，只有追加才不会牵动
+/// 前面字段的序号（中间插一列会让所有后续字段整体挪一位，那种改动在整个文件里
+/// 看不出错，只会静默取错值）。因此后加的列都在最后：
+///   - `attempt_details` / `sensitive_hits`（schema v2 的 JSON 文本列）；
+///   - `credit`（schema v23 的积分消耗，可空 REAL）。
 pub(super) const REQUEST_COLUMNS: &str = "id, ts, model, account_id, account_name, status, duration_ms, \
      first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
      cache_read_tokens, provider, client_model, upstream_model, attempt_details, sensitive_hits, \
-     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, credit, client, \
-     api_key_id, api_key_name, api_key_source";
+     client_reasoning, upstream_reasoning, phase, phase_started_at, is_test, route, client, \
+     api_key_id, api_key_name, api_key_source, credit";
 
 /// 报表窄列查询的列顺序 —— **与 `db::schema` 的 `idx_requests_summary` 列序一致**
 /// （索引是 `ts, is_test` 前缀 + 这里的后 5 列），改任一侧都要回来对一眼。
@@ -155,19 +156,19 @@ pub(super) fn decode_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
             .get::<_, Option<String>>(24)?
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null),
-        // 倒数第三列是上游扣费 Credits（本 fork 加的列，见 `db/schema_fork.rs`）；
-        // 旧行 DEFAULT 0 原样读出。
-        credit: row.get(25)?,
-        // 末三列是 schema v12/v18 加的请求来源维度；旧行的 DEFAULT '' 原样
-        // 读出 —— 空串 = 没有记录（前端显示占位符），与无 UA 的请求同一形态。
+        // 末列是 schema v12 加的（请求来源客户端）；旧行的 DEFAULT '' 原样
+        // 读出 —— 空串 = 没有记录（前端显示占位符），与无 UA 的请求同一形态
         source: super::RequestSource {
-            client: row.get(26)?,
+            client: row.get(25)?,
             api_key: super::ApiKeyIdentity {
-                id: row.get(27)?,
-                name: row.get(28)?,
-                source: row.get(29)?,
+                id: row.get(26)?,
+                name: row.get(27)?,
+                source: row.get(28)?,
             },
         },
+        // 末列是 schema v23 加的（积分消耗）；旧行 / 没上报的行是 NULL ——
+        // 读成 None，与「上报了 0」分开（前端前者显示「—」）。
+        credit: row.get(29)?,
     })
 }
 
@@ -816,8 +817,8 @@ pub(super) fn update_running_request(
          completion_tokens = ?12, total_tokens = ?13, cache_read_tokens = ?14, provider = ?15, \
          client_model = ?16, upstream_model = ?17, attempt_details = ?18, sensitive_hits = ?19, \
          client_reasoning = ?20, upstream_reasoning = ?21, phase = '', phase_started_at = NULL, \
-         is_test = ?22, route = ?23, credit = ?24, client = ?25, \
-         api_key_id = ?26, api_key_name = ?27, api_key_source = ?28 \
+         is_test = ?22, route = ?23, client = ?24, \
+         api_key_id = ?25, api_key_name = ?26, api_key_source = ?27, credit = ?28 \
          WHERE id = ?1 AND status = 0",
         params![
             entry.id,
@@ -845,13 +846,13 @@ pub(super) fn update_running_request(
             // 无进行中行时的兜底之外的主路径，写一次保证两条插入路径口径一致
             entry.is_test as i64,
             encode_optional_json(&entry.route),
-            entry.credit,
             // 客户端同 is_test：首发已写过一次，收尾再写一次保证
             // 「有进行中行」与「直接插入」两条路径落库的值同源
             entry.source.client,
             entry.source.api_key.id,
             entry.source.api_key.name,
             entry.source.api_key.source,
+            entry.credit,
         ],
     )
 }
@@ -877,8 +878,8 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
         "INSERT INTO requests (id, ts, model, account_id, account_name, status, duration_ms, \
          first_response_ms, attempts, error, prompt_tokens, completion_tokens, total_tokens, \
          cache_read_tokens, provider, client_model, upstream_model, attempt_details, \
-         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, credit, client, \
-         api_key_id, api_key_name, api_key_source) \
+         sensitive_hits, client_reasoning, upstream_reasoning, is_test, route, client, \
+         api_key_id, api_key_name, api_key_source, credit) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         params![
@@ -905,11 +906,11 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
             entry.upstream_reasoning,
             entry.is_test as i64,
             encode_optional_json(&entry.route),
-            entry.credit,
             entry.source.client,
             entry.source.api_key.id,
             entry.source.api_key.name,
             entry.source.api_key.source,
+            entry.credit,
         ],
     )?;
     Ok(())
