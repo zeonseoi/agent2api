@@ -53,7 +53,7 @@ const RANGES = [
  *  手写第二份必然会漏（加一个新档位时下拉里选不到，只能靠翻全部结果找）。`failed`
  *  是两表共用的中性档，选它会同时筛出签到失败与猫猫旅行失败。 */
 const OUTCOME_OPTIONS = [
-  { value: "", label: "全部结果" },
+  { value: '', label: '全部结果' },
   ...Object.entries(OUTCOME_VIEW).map(([value, view]) => ({ value, label: view.label })),
 ]
 
