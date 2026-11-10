@@ -251,10 +251,13 @@ export type Store = {
   }
   /** 新手福利的任务缓存：账号 id → 缓存（切标签页不丢） */
   onboarding: Map<string, OnboardingCache>
+  onboardingBatch: string[] | null
+  plansBatch: 'query' | 'claim' | null
   /** 成长任务的缓存：账号 id → 缓存 */
   growth: Map<string, GrowthCache>
   /** 成长任务**单任务**在途（键 `${id}:${code}`，任务行按钮的去重闸） */
   growthTaskRunning: Set<string>
+  growthBatch: { mode: 'full' | 'claim'; accountIds: string[] } | null
 }
 
 const recordsPageSize = readPageSize('checkin-records', SERVER_PAGE_SIZES)
@@ -281,8 +284,11 @@ export const store: Store = {
     offset: 0, outcome: '', kind: '', provider: '', keyword: '',
   },
   onboarding: new Map(),
+  onboardingBatch: null,
+  plansBatch: null,
   growth: new Map(),
   growthTaskRunning: new Set(),
+  growthBatch: null,
 }
 
 const listeners = new Set<() => void>()
@@ -649,7 +655,7 @@ function normalizeGrowthTask(raw: unknown): GrowthTask | null {
 /** 查询一个账号的成长任务盘点（只读，打一次上游） */
 export async function queryGrowth(id: string): Promise<void> {
   const current = growthOf(id)
-  if (current.status === 'loading' || current.running) return
+  if (current.status === 'loading' || current.running || current.runningSchool) return
   patchGrowth(id, { status: 'loading', error: '' })
   try {
     const data = await bridge().getGrowthStatus?.(id)
@@ -691,9 +697,9 @@ export async function queryGrowth(id: string): Promise<void> {
  * （点亮是写操作，不属于「领取」的语义）；`light` 模式跳过已领与已完成的
  * （已完成的该去「领取」，再点亮没有意义）。
  */
-export async function runGrowth(id: string, mode: 'light' | 'claim'): Promise<void> {
+export async function runGrowth(id: string, mode: 'full' | 'light' | 'claim'): Promise<void> {
   const current = growthOf(id)
-  if (current.running) return
+  if (current.status !== 'loaded' || current.running || current.runningSchool) return
   const targets = current.tasks.filter(task => growthTaskRunnable(task, mode))
   if (targets.length === 0) {
     toast('没有需要执行的任务')
@@ -720,6 +726,8 @@ export async function runGrowth(id: string, mode: 'light' | 'claim'): Promise<vo
   patchGrowth(id, { running: false })
   if (mode === 'claim') {
     toast(failed > 0 ? `领取完成，${failed} 项失败` : '✅ 领取完成', failed > 0 ? 'err' : 'ok')
+  } else if (mode === 'full') {
+    toast(failed > 0 ? `执行完成，${failed} 项失败` : '✅ 执行完成', failed > 0 ? 'err' : 'ok')
   } else {
     toast(failed > 0 ? `点亮完成，${failed} 项失败` : '✅ 已点亮，到「可领取」后手点「领取」', failed > 0 ? 'err' : 'ok')
   }
@@ -779,6 +787,31 @@ export async function setClaimAuto(enabled: boolean): Promise<void> {
     async () => { await bridge().setClaimAuto?.({ enabled }) },
     { success: enabled ? '✅ 已开启到期自动领取' : '已关闭到期自动领取', failure: '保存失败' },
   )
+}
+
+export async function runGrowthBatch(accountIds: string[], mode: 'full' | 'claim'): Promise<void> {
+  if (store.growthBatch) return
+  const ids = [...new Set(accountIds)].filter(id => {
+    const cache = growthOf(id)
+    return cache.status !== 'loading' && !cache.running && !cache.runningSchool
+  })
+  if (ids.length === 0) return
+  patch({ growthBatch: { mode, accountIds: ids } })
+  try {
+    for (const id of ids) {
+      await queryGrowth(id)
+      const cache = growthOf(id)
+      if (cache.status !== 'loaded' || cache.error) {
+        toast(t('查询失败：{error}', { error: cache.error || id }), 'err')
+        continue
+      }
+      await runGrowth(id, mode)
+    }
+  } catch (error) {
+    toast(t('成长任务执行失败：{error}', { error: errorMessage(error) }), 'err')
+  } finally {
+    patch({ growthBatch: null })
+  }
 }
 
 /** 开学季任务 + 抽奖 */

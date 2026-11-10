@@ -6,13 +6,18 @@ export { dayKey, defaultCustomRange, DAY_KEY_RE } from '../../../ui-shared/date-
 
 /* ─── 数据形状（后端 /api/stats/summary，字段都可缺省） ─── */
 
-export type StatsSlice = { id?: string; model?: string; label?: string; tokens?: number; requests?: number }
-export type StatsDay = {
-  date?: string; tokens?: number; requests?: number
+export type StatsUsage = {
+  requests?: number; success?: number | null; failures?: number | null; totalTokens?: number
+  successRate?: number | null; promptTokens?: number | null; completionTokens?: number | null
+  cacheReadTokens?: number | null; cacheRate?: number | null; tokenDetailsComplete?: boolean
+}
+export type StatsSlice = StatsUsage & { id?: string; model?: string; label?: string; tokens?: number }
+export type StatsDay = StatsUsage & {
+  date?: string; tokens?: number
   models?: StatsSlice[]; clients?: StatsSlice[]; apiKeys?: StatsSlice[]
 }
-export type StatsHour = {
-  hour?: string; rate?: number; totalTokens?: number; hitTokens?: number; inputTokens?: number
+export type StatsHour = StatsUsage & {
+  hour?: string; rate?: number; hitTokens?: number; inputTokens?: number
   models?: StatsSlice[]
 }
 /** 排行 / 环形图共用的一条：模型维度用 model 当身份，提供商与账号维度用 id */
@@ -26,8 +31,8 @@ export type StatsGroup = {
   tokenDetailsComplete?: boolean
   source?: string; filterValue?: string; state?: 'enabled' | 'disabled' | 'deleted'
 }
-export type StatsOverview = {
-  requests?: number; successful?: number; tokens?: number; activeDays?: number; streak?: number
+export type StatsOverview = StatsUsage & {
+  successful?: number; tokens?: number; activeDays?: number; streak?: number
   /** 上游扣费 Credits 合计（与 tokens 同源同区间；后端可能不给这个键） */
   credits?: number
   topModel?: { model?: string; tokens?: number; percentage?: number } | null
@@ -124,12 +129,8 @@ export function formatPercent(rate: unknown): string {
  *
  * 为什么不像 Token 那样走 units.js 的量级缩写（万 / 亿 / k / M）：Credits 是
  * **钱**，量级远小于 Token（一次请求 0.07，一天可能才几十），缩写会把它压成
- * 「0.1k」这种看不出差别的形态 —— 钱要的是能对账的精确读数，不是「一眼看量级」。
+ * 「0.1k」这种看不出差别的形态 —— 钱要的是能对账的精确读数。
  * 两位小数是上游扣费的实际精度（`extract_usage` 读到的就是这种小数）。
- *
- * 与请求日志用量列的 `formatCredit`（requests-page.tsx）是**两处独立实现**：
- * 那边是单条明细的读数、这里是一段区间的合计，用途不同、各自演化；但小数位与
- * 去尾零的口径刻意保持一致，同一个数在两页看到的样子相同。
  */
 export function formatCredits(value: unknown): string {
   const credits = Number(value) || 0
@@ -137,7 +138,6 @@ export function formatCredits(value: unknown): string {
   return String(Number(credits.toFixed(2)))
 }
 
-/** 坐标保留一位小数即可，串更短、与旧实现的输出也逐字一致 */
 export function round1(value: number): number {
   return Math.round(value * 10) / 10
 }
@@ -197,10 +197,6 @@ export function overviewCells(overview: StatsOverview | undefined, range: string
 
   const cells: OverviewCell[] = [
     { key: 'tokens', label: t('总 Token'), value: formatTokens(data.tokens), sub: t('输入 + 输出'), mono: false },
-    // 总 Credits 紧跟在总 Token 后面：两个都是「这一段的用量合计」，并排放才好对照。
-    // 后端没给这个键（旧后端）时给 0 —— 与「确实没花钱」在数值上同形，但这一格本来
-    // 就是「上游报了多少就显示多少」，没有可编的语义（见 formatCredits 的说明）
-    { key: 'credits', label: t('总 Credits'), value: formatCredits(data.credits), sub: t('上游扣费'), mono: false },
     { key: 'successful', label: t('成功请求数'), value: formatInt(successful), sub: t('成功率 {rate}', { rate: successRate }), mono: false },
     { key: 'requests', label: t('总请求数'), value: formatInt(requests), sub: RANGE_LABEL[range] || '', mono: false },
     { key: 'activeDays', label: t('活跃天数'), value: formatInt(data.activeDays), sub: t('区间共 {n} 天', { n: days }), mono: false },
@@ -267,12 +263,12 @@ export function rankTotalText(list: StatsGroup[]): string {
 
 /* ─── 板块三：用量环形图（模型 / 提供商）──── */
 
-export const SLICE_COLORS: readonly string[] = [
-  '#f73b00', '#f7bb07', '#4aaa4d', '#1872cb', '#3444a3', '#13c2c2',
-  '#722ed1', '#eb2f96', '#a0d911', '#34d399', '#d946ef', '#ff85c0',
-  '#b37feb', '#9d174d', '#ffa39e', '#69b1ff',
-]
-export const TIP_DOT_FALLBACK = '#9aa0a6'
+export const SLICE_COLORS: readonly string[] = Array.from({ length: 16 }, (_, index) => `var(--report-slice-${index + 1})`)
+export const TIP_DOT_FALLBACK = 'var(--chart-other)'
+
+export const DONUT_THRESHOLDS = [0.1, 0.5, 1, 2, 3, 5] as const
+export type DonutSettings = { enabled: boolean; threshold: number }
+export const DEFAULT_DONUT_SETTINGS: DonutSettings = { enabled: true, threshold: 1 }
 
 export type DonutDatum = {
   key: string; name: string; fill: string; tip: string
@@ -280,11 +276,61 @@ export type DonutDatum = {
   value: number
   /** 本量纲的展示串（Token 走量级缩写，Credits 走两位小数） */
   valueText: string
-  /** 本量纲的单位名（中心格下方那行小字） */
+  /** 本量纲的单位名（中心格与图例的单位说明） */
   unit: string
   requests: number; percentage: number
+  members?: DonutDatum[]
 }
-export type DonutView = { size: number; data: DonutDatum[]; totalText: string; totalLabel: string }
+export type DonutView = {
+  size: number; data: DonutDatum[]; rows: DonutDatum[]; total: number
+  totalText: string; totalLabel: string; count: number
+}
+
+export function formatUsagePercent(rate: number): string {
+  return rate > 0 && rate < 0.001 ? '<0.1%' : formatPercent(rate)
+}
+
+/**
+ * 环形图的**量纲**：同一套几何与配色，只换「读哪一个数、怎么写成字」。
+ *
+ * 模型 / 提供商 / 账号三维各要两张环形图（Token 一张、Credits 一张），六处渲染
+ * 共用的是**占比逻辑与图例**，差的是「取哪个字段、怎么格式化、气泡里写什么单位」。
+ * 把这三件事收成一张表，六处调用只传一个枚举 —— 逻辑只有一份。
+ *
+ * 两个 `tip` 模板分开写（而不是共用一个 `{value}` 占位）是刻意的：单位词
+ * 「tokens / credits」要能被各语言按自己的语序安放。
+ */
+export type DonutMetric = 'tokens' | 'credits'
+
+type DonutMetricSpec = {
+  /** 从一行聚合里取本量纲的数值（缺字段按 0） */
+  pick: (item: StatsGroup) => number
+  /** 数值 → 展示串（Token 走量级缩写，Credits 走两位小数） */
+  format: (value: number) => string
+  /** 中心格下方的单位说明 */
+  unitLabel: () => string
+  /** 图例气泡：`名字 · 读数 单位 · 请求数 · 占比` */
+  tip: (name: string, value: number, requests: number, percent: number) => string
+}
+
+const DONUT_METRICS: Record<DonutMetric, DonutMetricSpec> = {
+  tokens: {
+    pick: item => Number(item?.totalTokens ?? item?.tokens) || 0,
+    format: formatTokens,
+    unitLabel: () => t('总 Token'),
+    tip: (name, value, requests, percent) => t('{name} · {tokens} tokens · {n} 次请求 · {pct}', {
+      name, tokens: formatTokens(value), n: formatInt(requests), pct: formatUsagePercent(percent),
+    }),
+  },
+  credits: {
+    pick: item => Number(item?.credits) || 0,
+    format: formatCredits,
+    unitLabel: () => t('总 Credits'),
+    tip: (name, value, requests, percent) => t('{name} · {credits} credits · {n} 次请求 · {pct}', {
+      name, credits: formatCredits(value), n: formatInt(requests), pct: formatUsagePercent(percent),
+    }),
+  },
+}
 
 function usageGroups(list: StatsGroup[] | undefined) {
   return (Array.isArray(list) ? list : [])
@@ -307,78 +353,12 @@ export function modelColorMap(list: StatsGroup[] | undefined): Map<string, strin
   return map
 }
 
-/**
- * 环形图的**量纲**：同一套几何与配色，只换「读哪一个数、怎么写成字」。
- *
- * ── 为什么做成两个指标而不是给 donutView 加布尔开关 ─────────────
- * 模型 / 提供商 / 账号三维各要两张环形图（Token 一张、Credits 一张），六处渲染
- * 共用的是**占比逻辑与图例**，差的是「取哪个字段、怎么格式化、气泡里写什么单位」。
- * 把这三件事收成一张表，六处调用只传一个枚举 —— 逻辑只有一份，加第三种量纲也
- * 只是往表里加一行。
- *
- * 两个 `tip` 的模板分开写（而不是共用一个 `{value}` 占位）是刻意的：单位词
- * 「tokens / credits」要能被各语言按自己的语序安放，塞进同一个键里就得把单位
- * 拼进值、让译者看不到它。两条键各自独立，互不影响既有译文。
- */
-export type DonutMetric = 'tokens' | 'credits'
-
-type DonutMetricSpec = {
-  /** 从一行聚合里取本量纲的数值（缺字段按 0） */
-  pick: (item: StatsGroup) => number
-  /** 数值 → 展示串（Token 走量级缩写，Credits 走两位小数） */
-  format: (value: number) => string
-  /** 中心格下方的单位说明 */
-  unitLabel: () => string
-  /** 扇区气泡：`名字 · 读数 单位 · 占比` */
-  sliceTip: (label: string, value: number, percent: number) => string
-  /** 图例气泡：比扇区多一个请求次数 */
-  legendTip: (name: string, value: number, requests: number, percent: number) => string
-}
-
-const DONUT_METRICS: Record<DonutMetric, DonutMetricSpec> = {
-  tokens: {
-    pick: item => Number(item?.totalTokens ?? item?.tokens) || 0,
-    format: formatTokens,
-    unitLabel: () => t('总 Token'),
-    sliceTip: (label, value, percent) => t('{name} · {tokens} tokens · {pct}', {
-      name: label, tokens: formatTokens(value), pct: formatPercent(percent),
-    }),
-    legendTip: (name, value, requests, percent) => t('{name} · {tokens} tokens · {n} 次请求 · {pct}', {
-      name, tokens: formatTokens(value), n: formatInt(requests), pct: formatPercent(percent),
-    }),
-  },
-  credits: {
-    pick: item => Number(item?.credits) || 0,
-    format: formatCredits,
-    unitLabel: () => t('总 Credits'),
-    sliceTip: (label, value, percent) => t('{name} · {credits} credits · {pct}', {
-      name: label, credits: formatCredits(value), pct: formatPercent(percent),
-    }),
-    legendTip: (name, value, requests, percent) => t('{name} · {credits} credits · {n} 次请求 · {pct}', {
-      name, credits: formatCredits(value), n: formatInt(requests), pct: formatPercent(percent),
-    }),
-  },
-}
-
-/**
- * 环形图 + 右侧图例（模型 / 提供商 / 账号三维、Token 与 Credits 两量纲的共用实现）。
- * `null` = 这一维在这个量纲下没数据（全零也返回 null：扇区角为 0 什么也看不见）。
- *
- * 数据形状（`[{label, totalTokens, credits, requests}]`）：三维同形，身份字段名
- * 不同（模型是 `model`、提供商与账号是 `id`），按「label → model → id」依次兜底。
- *
- * 颜色从 [`modelColorMap`] 取（与图表气泡同一份）；取不到（空名的手改数据）才回落
- * 到按行下标取色 —— 那条路径正常不会走到。
- */
-export function donutView(
-  list: StatsGroup[] | undefined,
-  unknownLabel: string,
-  metric: DonutMetric = 'tokens',
-): DonutView | null {
+export function donutView(list: StatsGroup[] | undefined, unknownLabel: string,
+  settings: DonutSettings = DEFAULT_DONUT_SETTINGS, metric: DonutMetric = 'tokens'): DonutView | null {
   const spec = DONUT_METRICS[metric]
   const rows = (Array.isArray(list) ? list : [])
     .map(item => ({
-      name: String(item?.label ?? item?.model ?? item?.id ?? '').trim() || unknownLabel,
+      name: String(item?.label ?? item?.model ?? item?.id ?? '').trim(),
       value: spec.pick(item),
       requests: Number(item?.requests) || 0,
     }))
@@ -389,18 +369,31 @@ export function donutView(
   if (!total) return null
   const colors = modelColorMap(list)
   const data = rows.map((item, index): DonutDatum => {
-    const percentage = item.value / total
+    const name = item.name || unknownLabel
     return {
-      key: `${index}-${item.name}`, name: item.name,
-      fill: colors.get(item.name) ?? SLICE_COLORS[index % SLICE_COLORS.length],
-      value: item.value,
-      valueText: spec.format(item.value),
-      unit: spec.unitLabel(),
-      requests: item.requests, percentage,
-      tip: spec.legendTip(item.name, item.value, item.requests, percentage),
+      key: `${index}-${name}`, name,
+      fill: colors.get(name) ?? SLICE_COLORS[index % SLICE_COLORS.length],
+      value: item.value, valueText: spec.format(item.value), unit: spec.unitLabel(),
+      requests: item.requests, percentage: item.value / total,
+      tip: spec.tip(name, item.value, item.requests, item.value / total),
     }
   })
-  return { size: 220, data, totalText: spec.format(total), totalLabel: spec.unitLabel() }
+  const threshold = settings.enabled ? settings.threshold / 100 : 0
+  const members = data.filter(item => item.percentage < threshold)
+  const visible = data.filter(item => item.percentage >= threshold)
+  if (members.length) {
+    const value = members.reduce((sum, item) => sum + item.value, 0)
+    const requests = members.reduce((sum, item) => sum + item.requests, 0)
+    const name = t('其他（{n} 项）', { n: formatInt(members.length) })
+    visible.push({
+      key: 'donut-other', name, fill: 'var(--chart-other)', value, valueText: spec.format(value), unit: spec.unitLabel(),
+      requests, percentage: value / total, tip: spec.tip(name, value, requests, value / total), members,
+    })
+  }
+  return {
+    size: 232, data: visible, rows: data, total, totalText: spec.format(total),
+    totalLabel: spec.unitLabel(), count: rows.length,
+  }
 }
 
 /* ─── 板块四：热力图 ──────────────────────── */
