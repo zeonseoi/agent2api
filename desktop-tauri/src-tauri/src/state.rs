@@ -30,6 +30,9 @@ pub struct BackendHandle {
     /// 就再也看不到「为什么起不来」——只能看到一个永远灰着的状态灯。
     /// 存一份让界面随时能查，事件只负责「提醒你现在就去查」。
     pub failure: Option<StartupFailure>,
+    /// 看门狗判定：网关在监听却连续多次健康检查失败（进程内服务卡死）。
+    /// 与 `failure` 分开：`failure` 是「启动失败」，这是「启动过、现在不响应」。
+    pub unresponsive: bool,
 }
 
 /// 一次进行中的登录：state 用于轮询后端，edition/mode 供界面展示与取消时判断。

@@ -469,6 +469,9 @@ pub fn run() {
                 } else {
                     startup::complete(&started);
                     let _ = handle.emit("backend:ready", ());
+                    // 就绪后启动看门狗：进程内服务没有独立进程可观察，运行时
+                    // 卡死时只能靠独立线程探活把「无响应」告诉界面
+                    backend::start_watchdog(handle.clone());
                 }
             });
 

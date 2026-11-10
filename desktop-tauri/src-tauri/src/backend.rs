@@ -27,6 +27,8 @@
 
 #[cfg(windows)]
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
@@ -70,6 +72,18 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 const HEALTH_INTERVAL: Duration = Duration::from_millis(100);
 
+/// bootstrap 总超时（分钟级：正常 1–2 秒，慢盘实测出现过 46 秒）。
+///
+/// 超过它仍未完成就判定「卡死」并把当前阶段写进失败文案，而不是让界面
+/// 永远停在「网关启动中」—— 没有这条闸门时，bootstrap 里任何一步阻塞都
+/// 没有任何出口（`ensure_ready` 只 await 结果，没有超时）。
+const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 看门狗节奏：每 30 秒探一次 /health，连续 3 次失败（约 90 秒）判定无响应。
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
+const WATCHDOG_FAILURES: u32 = 3;
+
 /// 探测本机网关是否已就绪（只看能否拿到 /health 响应）。
 ///
 /// 同时被 `commands::backend_status` 使用（前端启动阶段显示「服务已就绪」提示），
@@ -82,6 +96,93 @@ pub async fn is_ready(port: u16) -> bool {
         client.get(format!("http://127.0.0.1:{port}/health")).send().await,
         Ok(response) if response.status().is_success()
     )
+}
+
+/// 网关无响应看门狗（就绪后启动）。
+///
+/// ── 为什么用 std::thread + 裸 TCP，而不是 tokio 任务 ────────────
+/// 要监视的正是「卡住」本身：如果进程里的 Tokio 工作线程被阻塞任务占满，
+/// 建在同一个运行时上的看门狗任务也会一起停下 —— 它与工作负载一起沉默。
+/// 独立线程 + 原生 TCP 探活不依赖运行时与 HTTP 客户端，即使运行时卡死也能
+/// 在约 90 秒后给出「无响应」，界面据此提供一键重启（进程内重建不可行，
+/// 见 `commands::schedule_app_restart` 的说明）。
+pub fn start_watchdog(app: AppHandle) {
+    let _ = std::thread::Builder::new()
+        .name("gateway-watchdog".to_string())
+        .spawn(move || {
+            let mut failures = 0u32;
+            let mut reported = false;
+            loop {
+                std::thread::sleep(WATCHDOG_INTERVAL);
+                let state = app.state::<AppState>();
+                if state.window.is_exiting() {
+                    return;
+                }
+                let port = proxy_port();
+                if health_probe(port) {
+                    failures = 0;
+                    if reported {
+                        reported = false;
+                        if let Ok(mut guard) = state.backend.lock() {
+                            guard.unresponsive = false;
+                        }
+                        server::logging::console_line("[Watchdog]", "网关已恢复响应");
+                    }
+                    continue;
+                }
+                failures += 1;
+                if failures >= WATCHDOG_FAILURES && !reported {
+                    reported = true;
+                    if let Ok(mut guard) = state.backend.lock() {
+                        guard.unresponsive = true;
+                    }
+                    server::logging::console_line(
+                        "[Watchdog]",
+                        &format!(
+                            "网关连续 {failures} 次健康检查失败（端口 {port}），判定无响应；可在侧栏重启程序"
+                        ),
+                    );
+                }
+            }
+        });
+}
+
+/// 一次最小健康探针：只读 HTTP 状态行，不依赖任何第三方客户端。
+fn health_probe(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, WATCHDOG_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(WATCHDOG_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(WATCHDOG_TIMEOUT));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    // 只读到状态行（+ 头部第一段）就够了；对端不吐数据时读超时会把我们放出去
+    let mut response = Vec::with_capacity(256);
+    let mut chunk = [0u8; 128];
+    while response.len() < 1024 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                response.extend_from_slice(&chunk[..read]);
+                if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&response);
+    let Some(status) = head.lines().next() else {
+        return false;
+    };
+    let mut parts = status.split_whitespace();
+    let _protocol = parts.next();
+    parts.next().is_some_and(|code| code.starts_with('2'))
 }
 
 /// 确保后端可用：构造服务状态 → 绑定端口 → 异步 accept 循环 → 本地自检。
@@ -115,12 +216,27 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     // 「局域网访问」后绑 0.0.0.0，此时免鉴权语义由下面的闸门接管
     // （headless 形态由 agent2api-server 二进制按 AGENT2API_HOST 自行决定）。
     // 数据库迁移和历史回填会阻塞，不能占住处理 IPC 与启动等待的异步线程。
-    let mut state = tauri::async_runtime::spawn_blocking(move || {
-        server::ServerState::bootstrap(port, host)
-    })
+    let mut state = match tokio::time::timeout(
+        BOOTSTRAP_TIMEOUT,
+        tauri::async_runtime::spawn_blocking(move || server::ServerState::bootstrap(port, host)),
+    )
     .await
-    .map_err(|error| StartupFailure::other(format!("网关初始化任务失败: {error}")))?
-    .map_err(StartupFailure::other)?;
+    {
+        Ok(joined) => joined
+            .map_err(|error| StartupFailure::other(format!("网关初始化任务失败: {error}")))?
+            .map_err(StartupFailure::other)?,
+        Err(_) => {
+            // 不能中断已卡住的那一步，只能让 bootstrap 在下一个阶段边界收手，
+            // 避免它继续做后续初始化（超时文案里带上当前阶段，排障直接定位）
+            server::boot_stage::cancel();
+            let stage = server::boot_stage::current();
+            return Err(StartupFailure::other(format!(
+                "网关启动超时（{} 秒），卡在「{}」阶段。请查看运行日志；重启程序可重试",
+                BOOTSTRAP_TIMEOUT.as_secs(),
+                stage
+            )));
+        }
+    };
 
     // 访问控制与桌面壳使用同一份进程内会话状态。
     server::access::attach_db(state.db().cloned());
@@ -206,6 +322,10 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     while std::time::Instant::now() < deadline {
         if is_ready(port).await {
             let scope = if lan.lan_access { "，网络访问已开启" } else { "" };
+            server::logging::log(
+                "[Startup]",
+                &format!("启动完成，总用时 {} ms", server::boot_stage::total_ms()),
+            );
             server::logging::log("[Server]", &format!("服务已就绪（127.0.0.1:{port}{scope}）"));
             crate::panel_session::ensure_local_access().map_err(StartupFailure::other)?;
             // 起来了就清掉上一次的失败记录：那条记录描述的是「之前起不来」，

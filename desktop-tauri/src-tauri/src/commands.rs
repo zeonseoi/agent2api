@@ -76,18 +76,24 @@ pub async fn backend_status(app: AppHandle) -> Result<Value, String> {
     // 失败详情存在 AppState 里（由 ensure_ready 的失败分支写入）；
     // 端口已被显式指定过（环境变量）时，界面不该再提供「更换端口」——
     // 改设置也不会生效，只会让用户白忙一场
-    let failure = app
-        .state::<AppState>()
-        .backend
-        .lock()
-        .ok()
-        .and_then(|guard| guard.failure.clone());
+    // 查询到就绪就同时清掉看门狗的「无响应」标记：探针已经通了，界面不该
+    // 继续显示无响应（看门狗自己下一次探测也会清，这里只是让它更及时）。
+    let (failure, unresponsive) = match app.state::<AppState>().backend.lock() {
+        Ok(mut guard) => {
+            if ready {
+                guard.unresponsive = false;
+            }
+            (guard.failure.clone(), guard.unresponsive)
+        }
+        Err(_) => (None, false),
+    };
     Ok(json!({
         "ready": ready,
         "phase": phase,
         "port": port,
         "portFromEnv": gateway::port_from_env().is_some(),
         "failure": failure,
+        "unresponsive": unresponsive,
     }))
 }
 

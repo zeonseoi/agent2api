@@ -126,6 +126,8 @@ type BackendStatus = {
   port?: number
   portFromEnv?: boolean
   failure?: PortFailure | null
+  /** 看门狗判定：网关在监听却连续多次健康检查失败（进程内服务卡死） */
+  unresponsive?: boolean
 }
 
 /** `getPortOccupant` 的返回 */
@@ -341,6 +343,7 @@ function SidebarStatus({ container }: { container: HTMLElement }) {
   const failure = backend?.failure || null
   const port = portLabel()
   const ready = backend?.ready
+  const unresponsive = backend?.unresponsive === true
 
   // ── 状态灯与那一行文案：三种状态 + 「还没查过」 ──
   // 文案里的端口用 portLabel()（与顶栏徽标同一份读数），短标签由后端给
@@ -352,6 +355,10 @@ function SidebarStatus({ container }: { container: HTMLElement }) {
   } else if (failure) {
     dotVariant = 'destructive'
     text = t('{label} · {port}', { label: failure.label || t('网关启动失败'), port })
+  } else if (unresponsive) {
+    // 与「启动中」分开：启动阶段已经过去，是已就绪的服务不响应了
+    dotVariant = 'destructive'
+    text = t('网关无响应 · {port}', { port })
   } else if (ready === false) {
     text = t('网关启动中… · {port}', { port })
   }
@@ -359,9 +366,11 @@ function SidebarStatus({ container }: { container: HTMLElement }) {
   /** 完整说明（可能上百字）只进 title 与弹窗：状态条只有一行 */
   const title = failure
     ? failure.message ?? ''
-    : ready === true
-      ? t('本地网关正在监听 {url}，可直接调用 OpenAI 兼容接口', { url: gatewayBase })
-      : t('正在确认网关是否已就绪')
+    : unresponsive
+      ? t('网关连续多次健康检查失败，可能已卡死；重启程序可恢复')
+      : ready === true
+        ? t('本地网关正在监听 {url}，可直接调用 OpenAI 兼容接口', { url: gatewayBase })
+        : t('正在确认网关是否已就绪')
 
   // 启动失败事件可能早于订阅，挂载时读取当前状态补齐。
   React.useEffect(() => {
@@ -473,6 +482,14 @@ function SidebarStatus({ container }: { container: HTMLElement }) {
           ) : null}
           <Button size='sm' onClick={() => void openPortModal()}>
             {t('更换端口')}
+          </Button>
+        </div>
+      ) : null}
+
+      {unresponsive ? (
+        <div className='status-actions'>
+          <Button size='sm' onClick={() => void restartApp(t('网关无响应，正在重启…'))}>
+            {t('重启程序')}
           </Button>
         </div>
       ) : null}

@@ -136,6 +136,7 @@
 
 pub mod api;
 mod account_bootstrap;
+pub mod boot_stage;
 pub mod access;
 pub mod altcha;
 pub mod config;
@@ -303,6 +304,7 @@ impl ServerState {
     /// 往上传（`ensure_ready` 原样透给 UI 的 `backend:error`），不 panic、
     /// 也不静默降级。
     pub fn bootstrap(port: u16, host: IpAddr) -> Result<Self, String> {
+        boot_stage::begin();
         if let Some(reason) = config_migration::pending_reason() {
             return Err(reason);
         }
@@ -363,6 +365,7 @@ impl ServerState {
                 None
             }
         };
+        boot_stage::stage("打开数据库")?;
         // 配置快照：**在库就绪之后、迁移之前**装入（理由见上面那段注释）。
         // 搬回来之后它的降级链是「库 → 旧文件 → 默认值」（`config::read_raw`），
         // 于是库里还没配置时（迁移尚未跑、或全新安装）读到的是与改造前一致的
@@ -423,6 +426,7 @@ impl ServerState {
         // 时只读内嵌快照（功能仍在，只是拿不到上次的刷新结果），所以位置不敏感；
         // 放在这里是为了和另外两个 kv 使用者排在一起，便于核对「谁在用这个库」。
         core::model_meta::install(db.clone());
+        boot_stage::stage("装载配置与存储句柄")?;
         // ── 旧文件一次性迁移：**本切片起不再自动跑** ────────────────
         // 它现在由用户在升级弹窗里点「升级」触发（`POST /api/upgrade/run`）。
         // 为什么改成手动：需求是「弹窗告诉用户换了 SQLite，点升级才开始导」——
@@ -466,6 +470,8 @@ impl ServerState {
         // 但写入静默丢弃、读取返回空（日志丢一条不影响任何业务，降级值见
         // `LogStore` 各方法的说明）。
         logging::init_store(db.clone(), verbose);
+        // 日志库就绪：把此前缓存的阶段耗时补写进库，之后各阶段直接写库
+        boot_stage::flush();
         // 调试模式的原始报文存储：无论开关是否打开都初始化 —— 开关是**逐请求**
         // 判定的（改完设置下一个请求就生效），存储没就绪会让开启后的第一批
         // 请求无处可落。
@@ -473,6 +479,7 @@ impl ServerState {
         // 由 `migrate::import_debug` 一次性搬入），所以传的是**同一个 `Db`** ——
         // `Option<Db>`：打不开时报文写入静默丢弃（丢一份调试报文不影响任何业务）。
         core::debug_traffic::init(db.clone());
+        boot_stage::stage("初始化日志与报文存储")?;
         // 注意这里**不再有 `config::storage_dirs()`**：三类数据的保存目录
         // （`logDir` / `requestStatsDir` / `debugDir`）已经全部失去消费方 ——
         // 数据都在统一库的配置目录里，各 store 的构造只接 `Db`。
@@ -498,6 +505,7 @@ impl ServerState {
         let auth = AuthService::new(store.clone());
         let login = LoginService::new(store.clone());
         let billing = BillingService::new(auth.clone());
+        boot_stage::stage("初始化账号与鉴权")?;
         // 模型目录：**没有本进程的目录对象了**。原先这里持一份 WorkBuddy 的
         // `ModelCatalog`（内置清单 + `/v3/config` 远程刷新 + 按地区分槽的持久化
         // 缓存），随该家的实现整体搬到提供商插件 —— 拉清单是「怎么打上游」，
@@ -509,7 +517,9 @@ impl ServerState {
         // 的 RPC 缓存在这里首次填充），于是首个 `/v1/models` 请求不必等一次 RPC。
         // 必须在上面那次 `install` 之后 —— 账号库先就绪，插件才能读到记录。
         core::providers::adapter::restore_cached_catalogs();
+        boot_stage::stage("预热模型目录")?;
         let upstream = UpstreamService::new(store.clone(), auth.clone());
+        boot_stage::stage("初始化转发服务")?;
 
         // ── 定时签到与软件更新（切片 6）──────────────────────────
         // 两者都是进程级句柄（同 config / logging 的模式）：
@@ -525,6 +535,7 @@ impl ServerState {
         core::growth_claim_auto::install(store.clone());
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
+        boot_stage::stage("初始化定时任务")?;
 
         // 请求统计：本切片起数据进统一库的 `requests` / `request_daily` 两张表
         // （旧 `requests.jsonl` / `request-daily.jsonl` 由 `migrate::import_requests`
@@ -567,6 +578,7 @@ impl ServerState {
                 sweep_stats.sweep_stale_running();
             }
         });
+        boot_stage::stage("初始化请求统计")?;
 
         // ── 账号侧的启动期一次性迁移：**有待迁移数据时整块跳过** ──────
         // 那一组迁移（auth.json 旧登录态、`migrate_startup` 的整队与拆池、
@@ -584,6 +596,7 @@ impl ServerState {
             // `start_background_maintenance` 放进阻塞线程池跑；待迁移数据导入
             // 之后的那一次仍由 `api::upgrade_api` 补调，顺序不变。
         }
+        boot_stage::stage("账号启动迁移")?;
 
         let state = Self {
             port,
@@ -604,6 +617,7 @@ impl ServerState {
             upgrade_pending: Arc::new(AtomicBool::new(upgrade_pending)),
             startup_maintenance: Arc::new(AtomicBool::new(false)),
         };
+        boot_stage::stage("构造服务状态")?;
         logging::log("[Server]", "Agent2API 多提供商本地网关（Rust 进程内服务）启动中…");
         logging::log("[Config]", &format!("API 端口: {}", port));
         logging::log("[Config]", &format!("API 监听地址: {}", host));
@@ -793,6 +807,7 @@ impl ServerState {
         // 的 `redirect_uri` 由插件自己拼），所以先登记端口再起宿主。
         core::plugin_host::set_loopback_port(port);
         core::plugin_host::spawn_bootstrap(state.store.clone());
+        boot_stage::stage("启动后台调度")?;
 
         Ok(state)
     }
