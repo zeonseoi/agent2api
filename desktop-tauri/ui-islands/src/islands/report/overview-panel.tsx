@@ -16,6 +16,7 @@ export function ReportOverview({ summary, loading }: { summary: StatsSummary | n
   const success = overview?.successful || 0
   const cells = [
     { key: 'tokens', label: t('总 Token'), value: <CompactValue value={overview?.tokens} />, sub: t('输入 + 输出') },
+    { key: 'credits', label: t('总 Credits'), value: formatCredits(overview?.credits), sub: t('上游扣费') },
     { key: 'requests', label: t('总请求数'), value: <CompactValue value={requests} />, sub: t('{n} 次请求', { n: formatInt(requests) }) },
     { key: 'success', label: t('成功请求数'), value: <CompactValue value={success} />, sub: t('成功率 {rate} · 失败 {n} 次', { rate: requests ? formatPercent(success / requests) : '—', n: formatInt(Math.max(0, requests - success)) }) },
     { key: 'cache', label: t('缓存读取'), value: cached === null ? '—' : <CompactValue value={cached} />, sub: cached === null ? t('历史明细不完整') : t('占输入 Token 的 {rate}', { rate }) },
@@ -29,8 +30,6 @@ export function ReportOverview({ summary, loading }: { summary: StatsSummary | n
     {summary ? <div className='report-overview-secondary'>
       <span>{t('活跃天数')} <strong>{formatInt(overview?.activeDays)}</strong><small>/ {formatInt(summary.dailyTrend?.length || 0)}</small></span>
       <span>{t('当前连续天数')} <strong>{formatInt(overview?.streak)}</strong></span>
-      {/* 上游扣费 Credits：官方概览卡固定四格，这里放进次级读数行，与活跃天数同一档 */}
-      <span>{t('总 Credits')} <strong>{formatCredits(overview?.credits)}</strong><small>{t('上游扣费')}</small></span>
       <span className='report-top-model'>{t('Top 模型')} <strong title={overview?.topModel?.model}>{overview?.topModel?.model || '—'}</strong>
         {overview?.topModel ? <small>{formatTokens(overview.topModel.tokens)} · {formatPercent(overview.topModel.percentage)}</small> : null}</span>
     </div> : null}
