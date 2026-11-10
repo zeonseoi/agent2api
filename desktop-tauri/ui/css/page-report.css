@@ -80,6 +80,16 @@
 .report-top-model strong { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .report-rank-grid, .report-donut-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 16px; min-width: 0; }
 .report-rank-grid > :only-child, .report-donut-grid > :only-child { grid-column: 1 / -1; }
+/* 三维（模型 / 提供商 / 账号）在官方两列网格里会剩一张落在左半边的空半行：
+   第三张跨满整行再按半宽居中，两侧留白对称，仍看得出「这一行归它」。
+   只在恰好三张时套用（少一维时两张均分整行，用上面的 :only-child）。 */
+@media (min-width: 768px) {
+  .report-donut-grid > .report-donut-card:last-child:nth-child(3) {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: calc(50% - 8px);
+  }
+}
 .report-rank-grid:empty { display: none; }
 .report-rank-select { width: 100px; height: 26px; font-size: 11px; }
 .report-rank-card .report-card-content { padding-bottom: 10px; }
