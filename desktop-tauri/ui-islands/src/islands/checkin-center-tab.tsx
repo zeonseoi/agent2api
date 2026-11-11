@@ -327,8 +327,8 @@ function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
           size="sm"
           variant="outline"
           disabled={cache.status !== 'loaded' || running}
-          title="接单 + 点亮 + 领奖（只处理已实测沉淀的任务）"
-          onClick={() => void runGrowth(row.id, 'full')}
+          title="接单 + 点亮（不领奖）；领奖用「领取」（只处理已实测沉淀的任务）"
+          onClick={() => void runGrowth(row.id, 'light')}
         >
           {cache.running ? '执行中…' : '一键完成'}
         </Button>
@@ -351,12 +351,12 @@ function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
         const result = cache.results.find(item => item.code === task.code)
         // 单任务在途（按钮去重闸 + 文案）
         const busy = store.growthTaskRunning.has(`${row.id}:${task.code}`)
-        // 这一条能不能点亮 / 能不能领奖：与后端 process_task 的判定同口径
-        // （支持 + 非不可伪造 + 未锁定才有意义）。点亮只在「未领取」时可用，
-        // 领奖只在「已完成」时可用 —— 两个动作各自独立，用户看得懂每一步。
-        const actionable = task.supported && !task.unforgeable && !task.locked
-        const canLight = actionable && task.status !== 'claimed' && task.status !== 'completed'
-        const canClaim = actionable && task.status === 'completed'
+        // 这一条能不能点亮 / 能不能领奖：与徽章、后端 process_task 同一套判据
+        // （`growthTaskRunnable`；支持 + 非不可伪造 + 未锁定才有意义）。
+        // 点亮只在「未完成」时可用，领奖只在「已完成 / 进度达标」时可用 ——
+        // 两个动作各自独立，用户看得懂每一步。
+        const canLight = growthTaskRunnable(task, 'light')
+        const canClaim = growthTaskRunnable(task, 'claim')
         // 有效期 / 解锁时间（都是「有才显示」：绝大多数任务没有期限）
         const dueDay = formatDay(task.validEnd)
         const unlockDay = task.locked ? formatDay(task.unlockAt) : ''
@@ -695,9 +695,9 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
                 </> : null}
                 {section === 'growth' ? <>
                   <Button size="sm" variant="outline" disabled={growthBusy || growthRows.length === 0}
-                    title={t('接单 + 点亮 + 领奖（只处理已实测沉淀的任务）')}
-                    onClick={() => void runGrowthBatch(growthRows.map(row => row.id), 'full')}>
-                    {store.growthBatch?.mode === 'full' ? t('执行中…') : t('一键完成')}
+                    title={t('接单 + 点亮（不领奖）；领奖用「领取」（只处理已实测沉淀的任务）')}
+                    onClick={() => void runGrowthBatch(growthRows.map(row => row.id), 'light')}>
+                    {store.growthBatch?.mode === 'light' ? t('执行中…') : t('一键完成')}
                   </Button>
                   <Button size="sm" variant="outline" disabled={growthBusy || growthRows.length === 0}
                     title={t('只领取已完成任务的奖励（幂等，重复点不会重复入账）')}

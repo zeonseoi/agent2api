@@ -257,7 +257,7 @@ export type Store = {
   growth: Map<string, GrowthCache>
   /** 成长任务**单任务**在途（键 `${id}:${code}`，任务行按钮的去重闸） */
   growthTaskRunning: Set<string>
-  growthBatch: { mode: 'full' | 'claim'; accountIds: string[] } | null
+  growthBatch: { mode: 'light' | 'claim'; accountIds: string[] } | null
 }
 
 const recordsPageSize = readPageSize('checkin-records', SERVER_PAGE_SIZES)
@@ -697,7 +697,7 @@ export async function queryGrowth(id: string): Promise<void> {
  * （点亮是写操作，不属于「领取」的语义）；`light` 模式跳过已领与已完成的
  * （已完成的该去「领取」，再点亮没有意义）。
  */
-export async function runGrowth(id: string, mode: 'full' | 'light' | 'claim'): Promise<void> {
+export async function runGrowth(id: string, mode: 'light' | 'claim'): Promise<void> {
   const current = growthOf(id)
   if (current.status !== 'loaded' || current.running || current.runningSchool) return
   const targets = current.tasks.filter(task => growthTaskRunnable(task, mode))
@@ -726,8 +726,6 @@ export async function runGrowth(id: string, mode: 'full' | 'light' | 'claim'): P
   patchGrowth(id, { running: false })
   if (mode === 'claim') {
     toast(failed > 0 ? `领取完成，${failed} 项失败` : '✅ 领取完成', failed > 0 ? 'err' : 'ok')
-  } else if (mode === 'full') {
-    toast(failed > 0 ? `执行完成，${failed} 项失败` : '✅ 执行完成', failed > 0 ? 'err' : 'ok')
   } else {
     toast(failed > 0 ? `点亮完成，${failed} 项失败` : '✅ 已点亮，到「可领取」后手点「领取」', failed > 0 ? 'err' : 'ok')
   }
@@ -789,7 +787,7 @@ export async function setClaimAuto(enabled: boolean): Promise<void> {
   )
 }
 
-export async function runGrowthBatch(accountIds: string[], mode: 'full' | 'claim'): Promise<void> {
+export async function runGrowthBatch(accountIds: string[], mode: 'light' | 'claim'): Promise<void> {
   if (store.growthBatch) return
   const ids = [...new Set(accountIds)].filter(id => {
     const cache = growthOf(id)
