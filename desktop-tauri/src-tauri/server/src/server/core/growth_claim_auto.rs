@@ -50,6 +50,10 @@ pub const TICK_MS: u64 = 2 * 60 * 60 * 1000;
 /// config.json 里承载本功能开关的键（独立于官方旅行排程 `growthSchedule`）。
 const CONFIG_KEY: &str = "growthClaimAuto";
 
+/// 补跑前等插件宿主把 WorkBuddy 注册进来的上限。宿主本身有加载超时，
+/// 这里只是兜底，正常几百毫秒内就到位。
+const PLUGIN_WAIT_MS: u64 = 120 * 1000;
+
 // ─── 开关 ────────────────────────────────────────────────────
 
 /// 读自动领取开关（缺失 → 关；默认关闭，理由见模块头）。
@@ -79,6 +83,54 @@ fn reason_source(reason: &str) -> &'static str {
 }
 
 // ─── 领取扫描 ────────────────────────────────────────────────
+
+/// 等 WorkBuddy 家注册进插件注册表再放行（启动补跑 / 打开开关时用）。
+///
+/// ── 为什么需要等 ────────────────────────────────────────────
+/// 插件宿主在 `ServerState::bootstrap` 的**最后一步**才异步拉起
+/// （`plugin_host::spawn_bootstrap`），而本调度装得更早 —— 补跑会赶在
+/// 子进程握手完成之前，`lookup()` 只能拿到 `None`，日志里留一条「未装入
+/// WorkBuddy 提供商插件」后本次作废，下一次要等满 2 小时。
+///
+/// ── 什么时候不等满 ──────────────────────────────────────────
+/// 宿主这一轮启动已结束（`startup` 快照 `pending = false`）而这一家仍没注册：
+/// 未安装 / 被禁用 / 加载失败，再等也不会出现，直接放行（由调用方按
+/// 「没有插件」处理）。
+async fn wait_provider_ready(id: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(PLUGIN_WAIT_MS);
+    let mut logged = false;
+    loop {
+        if crate::server::core::plugin_host::serves_provider(id) {
+            if logged {
+                logging::verbose("[Growth]", "提供商插件已就绪，开始补跑到期领取");
+            }
+            return true;
+        }
+        let settled = crate::server::core::plugin_host::startup::snapshot()
+            .get("pending")
+            .and_then(Value::as_bool)
+            == Some(false);
+        if settled {
+            return false;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            logging::log_with_level(
+                "[Growth]",
+                &format!(
+                    "等待提供商插件就绪超时（{} 秒），本次到期领取跳过",
+                    PLUGIN_WAIT_MS / 1000
+                ),
+                "warn",
+            );
+            return false;
+        }
+        if !logged {
+            logged = true;
+            logging::verbose("[Growth]", "提供商插件尚未就绪，等它注册后再补跑到期领取");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
 
 /// 让插件扫一遍本家账号、领掉「快到期」的任务。
 ///
@@ -224,7 +276,8 @@ impl ClaimAuto {
     /// ── 启动补跑一轮（重要）────────────────────────────────────
     /// 循环体是「先睡 2 小时再跑」，若只是排上循环，刚开软件时要干等 2 小时才
     /// 处理一次。这里**立即补跑一轮**再接循环（与旅行的启动补跑同一意图）。
-    /// 补跑不阻塞启动：`fire` 内部有防重入闸，且它自己在一个 spawn 里跑。
+    /// 补跑前先等插件注册（见 `wait_provider_ready`）—— 本调度比插件宿主装得
+    /// 早，不等就会撞空。补跑不阻塞启动：等待与 `fire` 都在 spawn 里跑。
     pub fn start(&self) {
         if !claim_auto_enabled() {
             return;
@@ -232,6 +285,7 @@ impl ClaimAuto {
         self.schedule();
         let service = self.clone();
         crate::spawn_task(async move {
+            wait_provider_ready(WorkBuddyRegion::Cn.provider_id()).await;
             service.fire("启动补跑").await;
         });
     }
@@ -283,12 +337,14 @@ impl ClaimAuto {
     /// 开/关到期领取（写配置 + 起停调度）。
     ///
     /// 打开时**立即跑一轮**再排循环：用户按下开关的预期是「现在就管起来」。
+    /// 与启动补跑同样先等插件注册（开关可能在插件还在握手时就被点开）。
     pub fn set_enabled(&self, enabled: bool) {
         set_claim_auto(enabled);
         if enabled {
             self.schedule();
             let service = self.clone();
             crate::spawn_task(async move {
+                wait_provider_ready(WorkBuddyRegion::Cn.provider_id()).await;
                 service.fire("开启自动").await;
             });
         } else {
