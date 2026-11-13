@@ -3,6 +3,19 @@ export type AccountSortRule =
   | { key: 'balance'; on: boolean; dir: 'high' | 'low' }
   | { key: 'added'; on: boolean; dir: 'new' | 'old' }
 
+/**
+ * 统一排序组：一份账号 id 的引用列表。
+ *
+ * 只影响**全局默认路由**的排列顺序 —— 组内的各家账号进同一块、共用一套规则，
+ * 「积分到期近→远 / 余额大优先」因此能跨家生效。账号本身不搬家：`provider`、
+ * 凭证、签到、余额查询、旅行、成长任务全都不变，后台任务从头到尾读不到这里。
+ */
+export type AccountGroupRecord = {
+  id: string
+  name: string
+  accounts: string[]
+}
+
 export type AccountSortBalance = {
   remaining: number | null
   unit: string

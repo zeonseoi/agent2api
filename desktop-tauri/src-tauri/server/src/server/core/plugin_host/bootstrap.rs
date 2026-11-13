@@ -152,7 +152,10 @@ impl GatewayCallbacks for StoreCallbacks {
             self.check_provider(&provider)?;
             let store = self.store.clone();
             let list = crate::server::core::blocking::run(move || {
-                store.route_account_ids_for_provider(&provider).into_iter()
+                // 契约是「这一家的全部账号」：禁用与否交给插件按场景自己判
+                // （模型目录自己滤 enabled，后台任务按设计不看它）。理由见
+                // `provider_account_ids` 的说明。
+                store.provider_account_ids(&provider, false).into_iter()
                     .filter_map(|id| store.plugin_account(&id))
                     .filter(|record| record.get("provider").and_then(serde_json::Value::as_str) == Some(provider.as_str()))
                     .collect::<Vec<_>>()

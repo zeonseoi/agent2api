@@ -27,8 +27,7 @@ impl RequestRouting {
         let ordered = if let Some(profile) = profiles.model_profile(model) {
             crate::server::core::routing_scope::project_accounts(&accounts, profile)
         } else {
-            let sorting = account_order::sorting(&accounts, crate::server::logging::now_ms());
-            account_order::ordered_accounts(&accounts, &sorting).into_iter().filter(|account| profiles.global.as_ref().map_or(true, |profile|
+            account_order::routing_ordered_accounts(&accounts, crate::server::logging::now_ms()).into_iter().filter(|account| profiles.global.as_ref().map_or(true, |profile|
                 profile.includes_provider(routing::provider_of(account)) && !routing::account_id(account).is_some_and(|id| profile.excluded_accounts.iter().any(|excluded| excluded == id))))
                 .collect()
         };

@@ -1676,6 +1676,9 @@ pub fn shim_js() -> &'static str {
     getAccounts: function () { return call('GET', '/api/accounts'); },
     getAccountSorting: function () { return call('GET', '/api/accounts/sorting'); },
     saveAccountSorting: function (payload) { return call('PUT', '/api/accounts/sorting', payload || {}); },
+    // 统一排序组（跨家交错，只影响全局默认路由的顺序）
+    getAccountGroups: function () { return call('GET', '/api/accounts/groups'); },
+    saveAccountGroups: function (payload) { return call('PUT', '/api/accounts/groups', payload || {}); },
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
     refreshAccountToken: function (id) { return call('POST', '/api/accounts/refresh', id ? { id: id } : {}); },
     removeAccount: function (id) { return call('DELETE', '/api/accounts/' + encodeURIComponent(id)); },

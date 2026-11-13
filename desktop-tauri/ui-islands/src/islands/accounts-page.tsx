@@ -24,6 +24,7 @@ import {
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
+import { AccountGroupsDialog } from './accounts-groups-dialog'
 import { HiddenAccountsDrawer, HiddenAccountsEmptyNote, HiddenAccountsEntry } from './accounts-hidden-notice'
 import { getPluginStartup, hiddenWithStartup, subscribePluginStartup } from '../../../ui-shared/plugin-startup'
 import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
@@ -101,6 +102,8 @@ function AccountsPage() {
   const hidden = hiddenWithStartup(hiddenAccounts())
   /** 「未显示的账号」明细抽屉：平时关着，工具栏那枚入口打开它 */
   const [hiddenOpen, setHiddenOpen] = React.useState(false)
+  /** 统一排序组弹窗（跨家交错；只影响全局默认路由的顺序） */
+  const [groupsOpen, setGroupsOpen] = React.useState(false)
   // groups = 要渲染的（当前筛选下一条都看不见的组不留空壳）；allGroups = 全部组，
   // 拼队列与「折叠 / 展开全部」都用它
   const { groups, allGroups } = groupView(usageEntryOf, tokenUsageOf)
@@ -468,6 +471,9 @@ function AccountsPage() {
               title={t('查询全部账号的余额（含已禁用账号 —— 禁用只表示不参与转发）')}
               onClick={() => void queryAllUsage()}>{store.usageStarting.has('*') ? t('启动中…') : store.usageBusy ? t('重新查询') : t('查询余额')}</Button>
             {store.usageBusy ? <Button variant='outline' onClick={() => void cancelAllUsage()}>{t('取消查询')}</Button> : null}
+            <Button id='btn-account-groups' variant='outline' disabled={!loaded}
+              title={t('把多家的账号放进同一组，按同一套消耗规则跨家排序（只影响全局默认路由）')}
+              onClick={() => setGroupsOpen(true)}>{t('统一排序')}</Button>
           </div>
         </div>
 
@@ -613,6 +619,7 @@ function AccountsPage() {
         />
       </Card>
       <AccountsDialogs />
+      {groupsOpen ? <AccountGroupsDialog accounts={all} onClose={() => setGroupsOpen(false)} /> : null}
       <HiddenAccountsDrawer hidden={hidden} open={hiddenOpen} onOpenChange={setHiddenOpen} />
     </>
   )

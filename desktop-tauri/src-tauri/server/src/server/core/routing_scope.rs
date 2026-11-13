@@ -52,8 +52,9 @@ pub fn apply_accounts(accounts: &[Value], model: &str) -> Vec<Value> {
     let mut ordered = if let Some(profile) = profiles.model_profile(model) {
         project_accounts(accounts, profile)
     } else {
-        let sorting = account_order::sorting(accounts, crate::server::logging::now_ms());
-        let mut ordered = account_order::ordered_accounts(accounts, &sorting);
+        // 全局默认走统一排序组（跨家交错）；没配组时与 `sorting` + `ordered_accounts`
+        // 逐字等价，见 `routing_ordered_accounts` 的说明。
+        let mut ordered = account_order::routing_ordered_accounts(accounts, crate::server::logging::now_ms());
         if let Some(profile) = &profiles.global {
             ordered.retain(|account| profile.includes_provider(routing::provider_of(account))
                 && !routing::account_id(account).is_some_and(|id| profile.excluded_accounts.iter().any(|excluded| excluded == id)));

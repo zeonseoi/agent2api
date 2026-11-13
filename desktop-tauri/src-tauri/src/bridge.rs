@@ -351,6 +351,11 @@ const BRIDGE_JS: &str = r#"
     getAccounts: () => call('GET', '/api/accounts'),
     getAccountSorting: () => call('GET', '/api/accounts/sorting'),
     saveAccountSorting: payload => call('PUT', '/api/accounts/sorting', payload || {}),
+    // 统一排序组（账号页「统一排序」弹窗）。与 `server/src/web_shim.rs` 的同名
+    // 方法**必须成对存在** —— 只加一边时另一形态的界面会静默失效：弹窗读不到组
+    // 列表、点保存也当成功，实际什么都没落库。
+    getAccountGroups: () => call('GET', '/api/accounts/groups'),
+    saveAccountGroups: payload => call('PUT', '/api/accounts/groups', payload || {}),
     // switchAccount 仅把账号移到全局队列第一位，不改变启用状态
     switchAccount: id => call('POST', '/api/accounts/current', { id }),
     refreshAccountToken: id => call('POST', '/api/accounts/refresh', id ? { id } : {}),

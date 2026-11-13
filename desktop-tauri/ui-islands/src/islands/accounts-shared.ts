@@ -5,8 +5,8 @@ import type { BalanceQueryPublic } from './balance-query'
 import type { HiddenAccountProvider } from '../../../ui-shared/plugins'
 import type { UsageQuerySettings } from '../../../ui-shared/usage-query-settings'
 import type { LimiterGroup, LimiterSnapshot } from './accounts-limiter-types'
-import type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
-export type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
+import type { AccountSorting, AccountSortRule as GroupSortRule, AccountGroupRecord } from '../../../ui-shared/account-sorting'
+export type { AccountSorting, AccountSortRule as GroupSortRule, AccountGroupRecord } from '../../../ui-shared/account-sorting'
 export type { LimiterGroup } from './accounts-limiter-types'
 
 /**
@@ -322,6 +322,9 @@ export type AccountsBridge = {
   reorderAccounts(queue: string[]): Promise<unknown>
   getAccountSorting(): Promise<AccountSorting>
   saveAccountSorting(payload: { provider: string; rules: GroupSortRule[] | null; onlyIfUnset?: boolean }): Promise<AccountSorting>
+  /** 统一排序组：把多家的账号放进同一块，让「到期近→远 / 余额大优先」跨家生效 */
+  getAccountGroups?(): Promise<{ groups?: AccountGroupRecord[] } | null | undefined>
+  saveAccountGroups?(payload: { groups: AccountGroupRecord[] }): Promise<{ groups?: AccountGroupRecord[] } | null | undefined>
   moveAccount(id: string, direction: 'up' | 'down'): Promise<unknown>
   clearRateLimits(id: string, model?: string | null): Promise<unknown>
   /**

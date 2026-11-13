@@ -410,6 +410,9 @@ pub async fn dispatch(
     match (method.as_str(), rest) {
         ("GET", "sorting") => return super::accounts_sort::get_sorting(&state),
         ("PUT", "sorting") => return super::accounts_sort::save_sorting(&state, body),
+        // 统一排序组：跨家交错，只影响全局默认路由的顺序
+        ("GET", "groups") => return super::accounts_sort::get_groups(),
+        ("PUT", "groups") => return super::accounts_sort::save_groups(&state, body),
         ("GET", "export") => return export_accounts(&state),
         ("POST", "export-files") => return super::accounts_export::account_files(&state, body).await,
         ("POST", "import") => return import_accounts(&state, body).await,

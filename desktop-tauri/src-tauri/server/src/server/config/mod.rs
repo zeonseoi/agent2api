@@ -65,6 +65,7 @@ use serde_json::{Map, Value};
 
 use crate::server::db::Db;
 
+pub(crate) mod account_groups;
 mod account_sort;
 mod assistant_config;
 pub(crate) mod captcha;
@@ -175,6 +176,9 @@ pub struct RuntimeConfig {
     client_identification: std::sync::Arc<client_identification::ClientIdentificationSnapshot>,
     vision_compat: std::sync::Arc<vision_compat::VisionSnapshot>,
     account_sort: std::sync::Arc<AccountSortSettings>,
+    /// 账号统一排序组（账号页「统一排序组」区域）。只被路由读取时使用，
+    /// 不参与任何后台任务的账号枚举 —— 见 `account_groups` 模块头。
+    account_groups: std::sync::Arc<account_groups::AccountGroups>,
     model_rules: std::sync::Arc<crate::server::core::model_rules::ModelRules>,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
     /// 低频字段（启动 + 设置页读写），不值得为它发明解析层，存原始值即可。
@@ -605,6 +609,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         client_identification: client_identification::from_raw(&raw),
         vision_compat: vision_compat::from_raw(&raw),
         account_sort: account_sort::from_raw(&raw),
+        account_groups: account_groups::from_raw(&raw),
         model_rules: std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&raw)),
         log_dir: string_field(&raw, KEY_LOG_DIR),
         request_stats_dir: string_field(&raw, KEY_REQUEST_STATS_DIR),
@@ -1520,6 +1525,9 @@ pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) 
         }
         if key == account_sort::KEY_ACCOUNT_SORT {
             config.account_sort = account_sort::from_raw(&config.raw);
+        }
+        if key == account_groups::KEY_ACCOUNT_GROUPS {
+            config.account_groups = account_groups::from_raw(&config.raw);
         }
     })
 }

@@ -113,7 +113,7 @@ export function groupSortSummary(rules: GroupSortRule[]): string {
 }
 
 // 无读数时仍允许预设规则，之后查询成功会自动生效。
-type RuleState = 'ready' | 'no-data' | 'mixed-units' | 'unsupported' | 'upgrade'
+export type RuleState = 'ready' | 'no-data' | 'mixed-units' | 'unsupported' | 'upgrade'
 
 function ruleHint(rule: GroupSortRule, state: RuleState): string {
   if (state === 'upgrade') return t('当前网关不支持余额排序，请先更新网关')
@@ -129,7 +129,7 @@ function ruleHint(rule: GroupSortRule, state: RuleState): string {
   return ruleMeta(rule.key).hint
 }
 
-function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
+export function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
   rule: GroupSortRule
   priority: number
   isLast: boolean
