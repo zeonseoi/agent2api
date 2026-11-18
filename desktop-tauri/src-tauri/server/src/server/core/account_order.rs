@@ -26,6 +26,25 @@ fn number(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+/// 积分包的**可用截止时刻**：`expireAt` 与 `refreshAt` 取早者。
+///
+/// ── 为什么不能只看 `expireAt` ──────────────────────────────
+/// WorkBuddy 的订阅基础包（「CodeBuddy个人体验版」）`expireAt` 是账号寿命
+/// （领取后 8 年多），`refreshAt` 才是本计费周期结束（下月 1 号零点）。按
+/// `expireAt` 排序会让所有这类账号被判成「八年后才到期」，到期近→远这条规则
+/// 在它们之间完全失效。
+///
+/// ── 为什么取 min 而不是直接换字段 ───────────────────────────
+/// 同一个账号下其余包（裂变包 / 拉新权益包）的 `refreshAt` 是 `CycleEndTime + 1s`，
+/// 比 `expireAt` **晚** 1 秒 —— 直接换成 `refreshAt` 会给这 264 个包平白推后 1 秒。
+/// 取 min 后它们仍取 `expireAt`，只有基础包那种「周期明显早于有效期」的才变。
+/// 没有 `refreshAt` 的提供商（Trae / Qoder）走原路径，行为不变。
+fn pack_expiry(pack: &Value) -> Option<f64> {
+    let expiry = pack.get("expireAt").and_then(number)?;
+    let cycle = pack.get("refreshAt").and_then(number).filter(|cycle| *cycle > 0.0);
+    Some(cycle.map_or(expiry, |cycle| expiry.min(cycle)))
+}
+
 fn credit_expiries(usage: &Value) -> Vec<i64> {
     let mut expiries: Vec<i64> = usage.get("credits").and_then(Value::as_array)
         .into_iter().flatten().filter_map(|pack| {
@@ -33,7 +52,7 @@ fn credit_expiries(usage: &Value) -> Vec<i64> {
                 return None;
             }
             if pack.get("remain").and_then(number).is_some_and(|remain| remain <= 0.0) { return None; }
-            let expiry = pack.get("expireAt").and_then(number)?;
+            let expiry = pack_expiry(pack)?;
             (expiry > 0.0).then_some(expiry as i64)
         }).collect();
     expiries.sort_unstable();
@@ -382,6 +401,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// 订阅基础包以「本计费周期结束」为到期时刻，而不是账号寿命（8 年后）。
+    ///
+    /// 实测数据：体验版 `expireAt` 是领取 + 8 年多、`refreshAt` 是下月 1 号；
+    /// 其余包（裂变包 / 拉新权益包）的 `refreshAt` 恰好比 `expireAt` 晚 1 秒。
+    /// 取 min 后只有前者变化，后者仍取 `expireAt`。
+    #[test]
+    fn a_subscription_base_pack_expires_at_its_billing_cycle() {
+        let now = 1_700_000_000_000;
+        let base = json!({ "remain": 500, "expireAt": now + 300_000_000_000i64, "refreshAt": now + 1_000_000 });
+        assert_eq!(pack_expiry(&base), Some((now + 1_000_000) as f64));
+
+        // 裂变包：refreshAt 比 expireAt 晚 1 秒（CycleEndTime + 1s），必须仍取 expireAt。
+        let bonus = json!({ "remain": 100, "expireAt": now + 5_000, "refreshAt": now + 6_000 });
+        assert_eq!(pack_expiry(&bonus), Some((now + 5_000) as f64));
+
+        // 没有 refreshAt 的提供商（Trae / Qoder）行为不变。
+        let trae = json!({ "remain": 500, "expireAt": now + 7_000 });
+        assert_eq!(pack_expiry(&trae), Some((now + 7_000) as f64));
+
+        // refreshAt 为 0 / 缺失 / 非数字都按「没有周期」处理。
+        assert_eq!(pack_expiry(&json!({ "expireAt": now + 8_000, "refreshAt": 0 })), Some((now + 8_000) as f64));
+        assert_eq!(pack_expiry(&json!({ "expireAt": now + 8_000, "refreshAt": "" })), Some((now + 8_000) as f64));
+        assert_eq!(pack_expiry(&json!({ "refreshAt": now + 8_000 })), None);
+    }
+
+    /// 路由排序要真的用上「周期结束」：两个基础包同一天发放时，按周期结束先后排。
+    #[test]
+    fn routing_orders_base_packs_by_cycle_end() {
+        let now = 1_700_000_000_000;
+        let accounts = vec![
+            json!({ "id": "wb1", "provider": "workbuddy", "priority": 0, "addedAt": 1 }),
+            json!({ "id": "wb2", "provider": "workbuddy", "priority": 1, "addedAt": 2 }),
+        ];
+        let mut facts: AccountFacts = HashMap::new();
+        // 两个包的 expireAt 都是八年后，只有 refreshAt 能分出先后。
+        facts.insert("wb1".into(), usage_facts(&json!({ "credits": [
+            { "remain": 500, "expireAt": now + 300_000_000_000i64, "refreshAt": now + 9_000 },
+        ] }), ""));
+        facts.insert("wb2".into(), usage_facts(&json!({ "credits": [
+            { "remain": 500, "expireAt": now + 300_000_000_000i64, "refreshAt": now + 3_000 },
+        ] }), ""));
+        // 空组表 = 全部账号走单家块，正好覆盖路由的常规路径（不碰全局读数槽）。
+        let groups = crate::server::config::account_groups::AccountGroups::new();
+        let order: Vec<String> = ordered_with_groups(&accounts, &groups, &AccountSortSettings::new(), &facts, now)
+            .into_iter().filter_map(|account| routing::account_id(&account).map(str::to_string)).collect();
+        assert_eq!(order, vec!["wb2", "wb1"]);
+    }
 
     /// 统一排序组的核心行为：同一组内的各家账号进同一块，规则跨家生效。
     ///
