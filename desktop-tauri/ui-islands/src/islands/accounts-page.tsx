@@ -98,10 +98,12 @@ function AccountsPage() {
   const loaded = Boolean(snapshotData)
   const usageRevision = accountUsageRevision()
   const all = allAccounts()
-  React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
+  // 订阅插件启动态：`hiddenWithStartup` 要把「未加载 / 停用 / 加载失败」的
+  // 插件账号并进隐藏清单，启动态变化单独触发（账号快照可能一直不变）
+  const pluginStartup = React.useSyncExternalStore(subscribePluginStartup, getPluginStartup)
   const listRevision = `${accountDetailsRevision()}:${accountListSignature(all)}`
   const balanceRevision = accountBalanceRevision() + accountBalanceEventsRevision()
-  const hidden = React.useMemo(() => hiddenWithStartup(hiddenAccounts()), [snapshotData])
+  const hidden = React.useMemo(() => hiddenWithStartup(hiddenAccounts()), [snapshotData, pluginStartup])
   const hiddenDrawerRef = React.useRef<HiddenAccountsDrawerHandle>(null)
   const openHiddenAccounts = React.useCallback(() => hiddenDrawerRef.current?.open(), [])
   /** 统一排序组弹窗（跨家交错；只影响全局默认路由的顺序） */
