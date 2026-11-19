@@ -8,7 +8,9 @@ use super::types::{self, Entry};
 
 pub(super) const TOPIC: &str = "magpie-plugin";
 const LIMIT: usize = 1000;
-const MANIFEST_TTL: i64 = 6 * 3_600_000;
+/// 搜索里已经带了 pushed_at：仓库没推新提交时内容不会变，没必要按固定周期重扫。
+/// 这里只作为「一次都没推送过、但内容可能被改写」的兜底回看周期。
+const MANIFEST_TTL: i64 = 7 * 24 * 3_600_000;
 
 pub(super) struct Repositories {
     pub items: Vec<Value>,
@@ -67,17 +69,6 @@ pub(super) fn raw_url(repository: &str, reference: &str, path: &str) -> Result<S
     Ok(url.to_string())
 }
 
-fn pick_entry(value: &Value) -> Option<String> {
-    if let Some(path) = value.as_str().filter(|path| !path.trim().is_empty()) { return Some(path.to_string()); }
-    [".", "import", "default", "node", "require", "bun"].into_iter()
-        .find_map(|key| value.get(key).and_then(pick_entry))
-}
-
-fn has_entry(manifest: &Value) -> bool {
-    manifest["main"].as_str().is_some_and(|value| !value.trim().is_empty())
-        || pick_entry(&manifest["exports"]).is_some() || pick_entry(&manifest["exports"]["./server"]).is_some()
-}
-
 async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Option<Entry>, Failure> {
     let repository = types::repository(&row["full_name"]).ok_or_else(|| Failure::from("GitHub 仓库标识无效".to_string()))?;
     let now = crate::server::logging::now_ms();
@@ -93,8 +84,13 @@ async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Opti
     let name = manifest["name"].as_str().unwrap_or("");
     if !super::super::packages::package_name(name) { return Ok(None); }
     if provider::excluded(&manifest) { return Ok(None); }
-    let evidence = provider::inspect(&repository, reference, &manifest).await?;
+    // 清单自己声明了提供商就不再读源码；没有声明才回退到入口文件扫描。
+    let evidence = match provider::declared_providers(&manifest) {
+        Some(providers) => provider::Evidence { entry_present: true, provider: true, providers },
+        None => provider::inspect(&repository, reference, &manifest).await?,
+    };
     if !evidence.provider { return Ok(None); }
+    let entry_present = evidence.entry_present;
     let mut entry = Entry {
         name: name.to_string(), label: name.to_string(), publisher: "third-party".to_string(),
         source: format!("github:{repository}"), selector: reference.to_string(),
@@ -105,24 +101,16 @@ async fn read(row: &Value, previous: Option<&Entry>, force: bool) -> Result<Opti
     let description = types::text(&row["description"], 8000);
     if entry.summary.is_empty() && !description.is_empty() { entry.summary.insert("en".to_string(), description); }
     apply_repository(&mut entry, row);
-    let npm = network::npm(name).await?.filter(|npm| npm["name"].as_str() == Some(name)
-        && npm["version"].as_str().is_some_and(|version| !version.is_empty() && super::super::source::valid_version(version))
-        && types::repository(&npm["repository"]).is_some_and(|repo| repo.eq_ignore_ascii_case(&repository)));
-    if let Some(npm) = &npm {
-        if !provider::excluded(npm) && (has_entry(npm) || evidence.entry_present) {
-            entry.source = name.to_string();
-            entry.selector = npm["version"].as_str().unwrap_or("latest").to_string();
-            market::apply_manifest(&mut entry, npm, true);
-            apply_repository(&mut entry, row);
-            return Ok(Some(entry));
-        }
-    }
+    // 版本以仓库清单为准，安装时直接按 GitHub 仓库下载；
+    // 不再为每个仓库额外查一次 npm（列表阶段这样只会放大请求量）。
     if entry.version.is_empty() {
         entry.installable = false;
         entry.unavailable_reason = Some("插件尚未声明有效版本，暂时无法安装".to_string());
-    } else if !evidence.entry_present {
-        entry.installable = false;
-        entry.unavailable_reason = Some("仓库没有已提交的可加载入口，请等待作者发布构建产物".to_string());
+    } else if !entry_present {
+        // 仓库里没有可加载的入口（常见于 main 指向构建后的 dist），改为从 npm 安装。
+        // 这里不查 npm，安装时按清单里的版本直接下载。
+        entry.source = name.to_string();
+        entry.selector = entry.version.clone();
     }
     Ok(Some(entry))
 }
