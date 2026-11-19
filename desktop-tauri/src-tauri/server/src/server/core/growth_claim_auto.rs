@@ -13,15 +13,16 @@
 //! `claimed` 的跳过。已完成 → 直接 claim；未完成 → 先点亮（accept + 上报）
 //! 再 claim。无期限的任务不碰。
 //!
-//! ── 分工：定时器在网关，判据与动作在插件 ────────────────────
-//! 与官方的签到同一形状（`core::auto_checkin` 定时、`checkin.claim` 执行）：
-//! 本模块只剩「每 2 小时触发一次 + 开关 + 防重入 + 记台账」，扫哪些账号、
-//! 哪些任务算到期、怎么领全在插件的一条批量动作 `growth.claim.due` 里
-//! （`ProvidersPlugin/Agent2Providers` 的 `workbuddy::admin`）。
+//! ── 分工：定时器与账号循环在网关，单账号执行在插件 ──────────
+//! WASM 插件拿不到「这一家的全部账号」的枚举能力（宿主不向包暴露整库），
+//! 所以账号循环只能留在网关：`store.list`（全部账号，含禁用的）→ 逐账号
+//! `growth.status` 拿任务清单 → 按 `validEnd` 判到期 → `growth.task`
+//! （`mode=full` 的一体流程）。这与官方 `tasks.v1`「批量由宿主逐账号分发」
+//! 的架构一致，也不再依赖 fork 私有的批量动作。
 //!
-//! 为什么这样切：到期判据要用插件自己归一的 `validEnd`，账号枚举也要按归属
-//! 过滤（国内版、排除企业号）—— 两件都是 provider 知识。留在网关等于把 provider
-//! 的判据抄一份到宿主，改一次判据要动两边。
+//! 到期判据依赖插件在任务行里透传 `validEnd`（上游的 `valid_end`）；装的
+//! 插件版本没有该字段时本模块不会命中任何任务（判据保守返回 false，
+//! 不报错、也不误领），每轮只记一条 warning —— 升级插件即可，无需改本文件。
 //!
 //! ── 台账 ────────────────────────────────────────────────────
 //! 每领回一条落一行 `travel_records`（`outcome = task_claimed`，见
@@ -132,15 +133,70 @@ async fn wait_provider_ready(id: &str) -> bool {
     }
 }
 
-/// 让插件扫一遍本家账号、领掉「快到期」的任务。
+/// 国内版账号（成长任务只对这些账号有意义）。
 ///
-/// ── 判据与动作都在插件 ──────────────────────────────────────
-/// 「扫哪些账号、哪些任务算到期、怎么领」是 provider 知识，跟签到一样归插件
-/// （`admin.action = growth.claim.due`）。网关只保留定时器、开关、防重入，
-/// 以及把插件回的摘要记进台账。
+/// 与签到 / 旅行同一口径：**不看启用状态**（禁用只影响转发、不影响后台任务），
+/// 凭证必须齐（`provider_account_ids` 已过滤）。企业号没有个人成长中心，跳过
+/// —— 判据与插件原来的批量实现一致。
+fn cn_accounts(store: &AccountStore) -> Vec<Value> {
+    store
+        .provider_account_ids(WorkBuddyRegion::Cn.provider_id(), false)
+        .into_iter()
+        .filter_map(|id| store.plugin_account(&id))
+        .filter(|account| {
+            !account
+                .get("enterpriseId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+        .collect()
+}
+
+/// 任务是否「快到期」：`validEnd` 非空、且北京时间的今天 ≥ 到期日 − 1 天。
 ///
-/// 插件版本过旧（没有这条动作）时 `admin.action` 报「不认识管理动作」，这里
-/// 记一条 warning 后跳过 —— 不能静默失效，否则界面上开了开关却什么都不发生。
+/// `validEnd` 是 ISO 8601 带时区串（如 `2026-11-02T23:59:00+08:00`），由插件
+/// 从上游 `valid_end` 归一后透传。取它的北京日期键往前推一天得到「该领的那天」；
+/// 今天到了或过了就返回 true（到期当天/之后仍会尝试，直到上游判成已领或任务下线）。
+///
+/// 无期限（`validEnd` 为 null / 缺失）的任务**不碰** —— 用户要的是「有结束时间的
+/// 任务」。解析不出日期按「不快到」保守处理：不报错，也不误领。
+fn due_for_claim(task: &Value) -> bool {
+    let end = task
+        .get("validEnd")
+        .or_else(|| task.get("valid_end"))
+        .and_then(Value::as_str);
+    let Some(end) = end else {
+        return false;
+    };
+    let Some(threshold) = claim_threshold_day(end) else {
+        return false;
+    };
+    // 日期键定长，字典序即时间序（见 beijing 模块的说明）
+    crate::server::core::beijing::today_key() >= threshold
+}
+
+/// `valid_end`（ISO 串）→「该领的那天」= 到期日 − 1 天的北京日期键。
+///
+/// 拆成纯函数便于单测：判据里只有它涉及日期运算，`due_for_claim` 只做一次
+/// 字符串比较。先换到 +08:00 再取日：晚上 23:59 的时刻不能被时区差推到次日。
+fn claim_threshold_day(end: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    let end_day = at
+        .with_timezone(&crate::server::core::beijing::offset())
+        .date_naive();
+    Some((end_day - chrono::Days::new(1)).format("%Y-%m-%d").to_string())
+}
+
+/// 「插件没透传 validEnd」的告警只记一次，避免每轮刷同一条。
+static VALID_END_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// 对所有国内版账号扫一遍成长任务，领掉「快到期」的。
+///
+/// ── 判据与动作 ──────────────────────────────────────────────
+/// 只看 `validEnd` 非空、且今天 ≥ 到期日 − 1 天的任务；已 `claimed` 的跳过。
+/// 领取一律走插件的 `growth.task` + `mode=full`（它内部是「accept → 上报 →
+/// 回读 → claim」的一体流程，含 accept 回读验证）；未映射 / 不可伪造 / 未解锁
+/// 的任务由插件自己保守跳过，这里不重复判。
 ///
 /// 返回 `(领取成功数, 失败数)`，供轮次汇总日志用。
 pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usize) {
@@ -150,74 +206,111 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
         logging::verbose("[Growth]", "未装入 WorkBuddy 提供商插件，到期领取跳过");
         return (0, 0);
     };
-    let summary = match adapter
-        .admin_action(store, "", "growth.claim.due", &Value::Null)
-        .await
-    {
-        Ok(summary) => summary,
-        Err(error) => {
-            logging::log_with_level(
-                "[Growth]",
-                &format!("到期领取未执行：{}", error.message),
-                "warn",
-            );
-            return (0, 0);
-        }
-    };
-    record_summary(reason, &summary);
-    let claimed = summary.get("claimed").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let failed = summary.get("failed").and_then(Value::as_u64).unwrap_or(0) as usize;
-    (claimed, failed)
-}
-
-/// 把插件回包里的 `actions[]` 记进台账（`travel_records`）。
-///
-/// 只认两种结论：`claimed`（真领到）/ `failed`（真失败）。跳过类（已领 /
-/// 未到期 / 未解锁 / 不可伪造）插件不会回，这里也不兜底 —— 台账只记事件。
-fn record_summary(reason: &str, summary: &Value) {
-    let Some(actions) = summary.get("actions").and_then(Value::as_array) else {
-        return;
-    };
-    let source = reason_source(reason);
-    let provider = WorkBuddyRegion::Cn.provider_id();
-    for action in actions {
-        let id = action.get("accountId").and_then(Value::as_str).unwrap_or("");
+    let mut claimed = 0usize;
+    let mut failed = 0usize;
+    let mut scanned = 0usize;
+    let mut with_expiry = 0usize;
+    for account in cn_accounts(store) {
+        let id = account.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
             continue;
         }
-        let name = action.get("name").and_then(Value::as_str).unwrap_or("");
-        let code = action.get("code").and_then(Value::as_str).unwrap_or("");
-        match action.get("outcome").and_then(Value::as_str).unwrap_or("") {
-            "claimed" => {
-                let message = action.get("message").and_then(Value::as_str).unwrap_or("");
-                let credit = action.get("credit").and_then(Value::as_i64).unwrap_or(0);
-                travel_records::record(
-                    source,
-                    reason,
-                    id,
-                    name,
-                    provider,
-                    travel_records::OUTCOME_TASK_CLAIMED,
-                    Some(format!("{message}（+{credit} 积分）")),
-                    None,
-                );
+        let name = account
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(id);
+        let Ok(status) = adapter
+            .admin_action(store, id, "growth.status", &Value::Null)
+            .await
+        else {
+            continue;
+        };
+        // 插件已把默认口径与小程序口径合并去重（见插件 growth/status.rs）
+        let tasks = status
+            .get("tasks")
+            .and_then(|block| block.get("tasks"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        scanned += 1;
+        for task in &tasks {
+            let code = task.get("code").and_then(Value::as_str).unwrap_or("");
+            if code.is_empty() {
+                continue;
             }
-            "failed" => {
-                let error = action.get("error").and_then(Value::as_str).unwrap_or("");
-                travel_records::record(
-                    source,
-                    reason,
-                    id,
-                    name,
-                    provider,
-                    travel_records::OUTCOME_TASK_FAILED,
-                    None,
-                    Some(format!("{code}：{error}")),
-                );
+            if task.get("status").and_then(Value::as_str) == Some("claimed") {
+                continue;
             }
-            _ => {}
+            if task.get("validEnd").and_then(Value::as_str).is_some() {
+                with_expiry += 1;
+            }
+            if !due_for_claim(task) {
+                continue;
+            }
+            let payload = json!({ "code": code, "mode": "full" });
+            let report = match adapter
+                .admin_action(store, id, "growth.task", &payload)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    failed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_FAILED,
+                        None,
+                        Some(format!("{code}：{}", error.message)),
+                    );
+                    continue;
+                }
+            };
+            let message = report.get("message").and_then(Value::as_str).unwrap_or("");
+            let credit = report.get("credit").and_then(Value::as_i64).unwrap_or(0);
+            match report.get("outcome").and_then(Value::as_str).unwrap_or("") {
+                "done" => {
+                    claimed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_CLAIMED,
+                        Some(format!("{message}（+{credit} 积分）")),
+                        None,
+                    );
+                }
+                "failed" => {
+                    failed += 1;
+                    travel_records::record(
+                        reason_source(reason),
+                        reason,
+                        id,
+                        name,
+                        WorkBuddyRegion::Cn.provider_id(),
+                        travel_records::OUTCOME_TASK_FAILED,
+                        None,
+                        Some(format!("{code}：{message}")),
+                    );
+                }
+                // already / skipped：不是事件（已领 / 未映射 / 不可伪造 / 未解锁）
+                _ => {}
+            }
         }
     }
+    if scanned > 0 && with_expiry == 0 && !VALID_END_WARNED.swap(true, Ordering::Relaxed) {
+        logging::log_with_level(
+            "[Growth]",
+            "插件未上报任务有效期（validEnd），到期领取不会命中任何任务；请安装支持该字段的插件版本",
+            "warn",
+        );
+    }
+    (claimed, failed)
 }
 
 // ─── 调度句柄 ────────────────────────────────────────────────
@@ -453,5 +546,42 @@ mod tests {
         assert_eq!(reason_source("手动触发"), "manual");
         assert_eq!(reason_source("后台巡检"), "auto");
         assert_eq!(reason_source("开启自动"), "auto");
+    }
+
+    /// 「该领的那天」= 到期日 − 1 天的北京日期键。
+    ///
+    /// 上游 `valid_end` 是带时区的 ISO 串，取**北京日期**再减一天：晚 23:59 的
+    /// 时刻不能被时区差推到次日（那会让「前一天」算错），所以先换到 +08:00 再取日。
+    #[test]
+    fn claim_threshold_is_one_day_before_expiry() {
+        assert_eq!(
+            claim_threshold_day("2026-11-02T23:59:00+08:00").as_deref(),
+            Some("2026-11-01")
+        );
+        // 跨月边界：11-01 的前一天是 10-31
+        assert_eq!(
+            claim_threshold_day("2026-11-01T00:00:00+08:00").as_deref(),
+            Some("2026-10-31")
+        );
+        // 非 +08:00 的来源：按北京日期换算后再减一天
+        assert_eq!(
+            claim_threshold_day("2026-11-02T16:30:00Z").as_deref(),
+            Some("2026-11-02")
+        );
+    }
+
+    /// 非法 / 无时区的串给 None（调用方据此保守不领）。
+    #[test]
+    fn claim_threshold_rejects_unparseable() {
+        assert_eq!(claim_threshold_day("").as_deref(), None);
+        assert_eq!(claim_threshold_day("2026-11-02").as_deref(), None);
+        assert_eq!(claim_threshold_day("not-a-date").as_deref(), None);
+    }
+
+    /// 无 `validEnd` 的任务不参与到期领取（用户要的是「有结束时间的任务」）。
+    #[test]
+    fn due_for_claim_ignores_tasks_without_valid_end() {
+        assert!(!due_for_claim(&json!({ "code": "x" })));
+        assert!(!due_for_claim(&json!({ "validEnd": Value::Null })));
     }
 }
