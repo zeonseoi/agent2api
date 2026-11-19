@@ -26,6 +26,7 @@ import { DEFAULT_PAGE_SIZE, SERVER_PAGE_SIZES, readPageSize } from './table-shel
 import type { CheckinResultRow } from '../../../ui-shared/checkin'
 import { growthTaskRunnable } from '../../../ui-shared/checkin'
 import { rowCompleted, rowPending, rowMessage as resultMessage } from '../../../ui-shared/checkin-result'
+import { createRefreshRequest } from '../../../ui-shared/refresh-request'
 import { onboardingFromCenter } from './checkin-onboarding-cache'
 
 /** 新手福利的按账号缓存（明细要打上游，查一次存一次） */
@@ -149,6 +150,9 @@ export type UmidState = {
   available?: boolean
   installing?: boolean
   installSupported?: boolean
+  authorized?: boolean
+  componentAvailable?: boolean
+  message?: string
 }
 
 /** 批量签到返回汇总与 results，活动分档接口直接返回账号行。 */
@@ -308,14 +312,10 @@ export function patch(next: Partial<Store>): void {
 
 /* ─── 读 ───────────────────────────────────── */
 
-let centerRequest = 0
-
-/** 拉聚合快照（页面打开 / 任何写动作之后） */
-export async function loadCenter(): Promise<void> {
-  const request = ++centerRequest
+const refreshCenter = createRefreshRequest(async isCurrent => {
   try {
     const data = await bridge().getCheckinCenter?.()
-    if (request !== centerRequest) return
+    if (!isCurrent()) return
     if (!data) {
       patch({ loaded: true, loadError: '后端未返回签到中心数据' })
       return
@@ -325,13 +325,16 @@ export async function loadCenter(): Promise<void> {
       onboarding: onboardingFromCenter(data, store.onboarding),
       loaded: true,
       loadError: '',
-      // 快照到手 = 草稿该跟着它走（写动作成功后也会清，两处不冲突）
       keepaliveDraft: null,
       travelTimesDraft: null,
     })
   } catch (error) {
-    if (request === centerRequest) patch({ loaded: true, loadError: errorMessage(error) })
+    if (isCurrent()) patch({ loaded: true, loadError: errorMessage(error) })
   }
+})
+
+export function loadCenter(afterChange = false): Promise<void> {
+  return refreshCenter(afterChange)
 }
 
 let recordsRequest = 0
@@ -394,7 +397,7 @@ async function run<T>(
   patch({ saving: true })
   try {
     const result = await action()
-    if (options.reload !== false) await loadCenter()
+    if (options.reload !== false) await loadCenter(true)
     if (options.success) toast(options.success)
     return result
   } catch (error) {
@@ -416,7 +419,7 @@ export async function runAllCheckin(accountId?: string): Promise<void> {
     toast(`签到失败：${errorMessage(error)}`, 'err')
   } finally {
     patch({ runningAll: false })
-    await loadCenter()
+    await loadCenter(true)
   }
 }
 
@@ -438,7 +441,7 @@ export async function signSingle(accountId: string, mode: string): Promise<void>
     const after = new Set(store.signing)
     after.delete(key)
     patch({ signing: after })
-    await loadCenter()
+    await loadCenter(true)
   }
 }
 
@@ -487,7 +490,7 @@ export async function toggleMaster(enabled: boolean): Promise<void> {
     },
     { success: enabled ? '✅ 定时签到已开启' : '定时签到已关闭', reload: false, failure: '保存失败' },
   )
-  void loadCenter()
+  void loadCenter(true)
 }
 
 /** 保存一条定时条目（`closeEditor: false` = 行上的快捷开关，不收表单不弹提示） */
@@ -507,7 +510,7 @@ export async function saveScheduleEntry(
     },
     { success: options.silent ? undefined : '✅ 已保存', reload: false, failure: '保存失败' },
   )
-  if (saved) void loadCenter()
+  if (saved) void loadCenter(true)
   return saved === true
 }
 
@@ -532,7 +535,7 @@ export async function runScheduleEntry(id: string): Promise<void> {
     toast(`执行失败：${errorMessage(error)}`, 'err')
   } finally {
     patch({ runningScheduleId: null })
-    await loadCenter()
+    await loadCenter(true)
   }
 }
 

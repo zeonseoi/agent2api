@@ -1,4 +1,5 @@
 import type { CampaignEntry } from './checkin-campaign-types'
+import type { PluginTaskRow } from './plugin-task-types'
 
 export type DailyCheckinStatus = 'claimed' | 'done' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
 
@@ -229,6 +230,7 @@ export type KeepaliveState = {
 }
 
 export type TravelState = {
+  engine?: 'wasm_tasks'
   enabled: boolean
   available?: boolean
   pausedReason?: string | null
@@ -299,6 +301,7 @@ export type CheckinCenter = {
   /** 成长任务「到期前自动领取」开关（官方成长中心没有这一档，本 fork 的独立
    *  循环；无国内版账号时后端不给这个键） */
   claimAuto?: { enabled: boolean }
+  pluginTasks?: PluginTaskRow[]
   history: HistoryRow[]
   adminPanels: string[]
   checkinFeatures: Record<string, {
