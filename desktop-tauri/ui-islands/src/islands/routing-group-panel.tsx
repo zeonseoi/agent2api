@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, confirmDialog } from '@ui'
+import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, Input, InputGroup, InputGroupAddon, InputGroupInput, Label, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { displayNameOf } from './accounts-domain'
@@ -131,7 +131,28 @@ export function RoutingGroupPanel({ editor, accounts, lastUsed, reserved, baseUr
               options={[[ 'order', t('顺序优先') ], ['rotate', t('负载均衡')], ['provider', t('成员内轮询')]]} onChange={value => update(next => { next.strategy = value })} /></div>
             <div className='routing-rule-field'><Label>{t('会话粘滞')}</Label><RoutingSelect label={t('会话粘滞')} value={group.sticky} disabled={locked}
               options={[[ 'auto', t('自动') ], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]} onChange={value => update(next => { next.sticky = value })} /></div>
+            <div className='routing-rule-field routing-rule-wide'><Label>{t('自动档粘滞时长（分钟）')}</Label>
+              <Input type='number' inputMode='numeric' min={1} max={1440} step={1} disabled={locked}
+                aria-label={t('自动档粘滞时长（分钟）')}
+                value={group.stickyTtlMinutes ?? ''}
+                placeholder={t('留空继承全局：{minutes} 分钟', { minutes: live.workspace?.settings.routingStickyTtlMinutes ?? 5 })}
+                onChange={event => {
+                  const raw = event.currentTarget.value.trim()
+                  const minutes = raw === '' ? undefined : Number(raw)
+                  update(next => { next.stickyTtlMinutes = minutes !== undefined && Number.isFinite(minutes) ? minutes : undefined })
+                }} /></div>
+            <div className='routing-rule-field routing-rule-wide'><Label>{t('会话内档粘滞时长（分钟）')}</Label>
+              <Input type='number' inputMode='numeric' min={1} max={10080} step={1} disabled={locked}
+                aria-label={t('会话内档粘滞时长（分钟）')}
+                value={group.stickySessionTtlMinutes ?? ''}
+                placeholder={t('留空继承全局：{minutes} 分钟', { minutes: live.workspace?.settings.routingStickySessionTtlMinutes ?? 360 })}
+                onChange={event => {
+                  const raw = event.currentTarget.value.trim()
+                  const minutes = raw === '' ? undefined : Number(raw)
+                  update(next => { next.stickySessionTtlMinutes = minutes !== undefined && Number.isFinite(minutes) ? minutes : undefined })
+                }} /></div>
           </div>
+          <p className='routing-config-note'>{t('自动档与会话内档分别按设置的时长生效；每轮与关闭不粘。')}</p>
           <p className='routing-config-note'>{group.sticky === 'auto' || group.sticky === 'session' ? t('同一会话优先保持模型与账号，不可用时才顺延。') : t('每轮重新选路，不保留跨请求的账号绑定。')}</p>
           <Button variant='link' size='sm' className='routing-group-example' onClick={() => setDialog('example')}>{t('调用示例')}</Button>
         </div>

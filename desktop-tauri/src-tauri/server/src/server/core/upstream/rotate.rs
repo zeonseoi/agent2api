@@ -229,7 +229,7 @@ fn select_target_account_sync(
     // 粘性查找在这里顺手续了最近使用时刻 —— 「auto 档 5 分钟没往来就放手」
     // 的计时由它维持。
     let settings = request_routing.settings;
-    let ttl = routing::sticky_ttl_ms(settings.sticky);
+    let ttl = settings.sticky_ttl_ms().unwrap_or(0);
     let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
     // 起点往后走，否则一条请求会连跳好几位。

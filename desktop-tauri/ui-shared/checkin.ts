@@ -298,9 +298,9 @@ export type CheckinCenter = {
   auto: AutoState
   keepalive: KeepaliveState
   travel: TravelState
-  /** 成长任务「到期前自动领取」开关（官方成长中心没有这一档，本 fork 的独立
+  /** 成长任务「到期前自动领取」开关与执行时刻（官方成长中心没有这一档，本 fork 的独立
    *  循环；无国内版账号时后端不给这个键） */
-  claimAuto?: { enabled: boolean }
+  claimAuto?: { enabled: boolean; times: string[] }
   pluginTasks?: PluginTaskRow[]
   history: HistoryRow[]
   adminPanels: string[]

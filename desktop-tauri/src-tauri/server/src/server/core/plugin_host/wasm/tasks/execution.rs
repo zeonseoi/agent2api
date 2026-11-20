@@ -109,6 +109,15 @@ async fn finish(store: &AccountStore, prepared: Prepared) -> Result<Value, Strin
     } else if prepared.manual {
         settings::remember_legacy(&prepared.task, None, &summary);
     }
+    // fork：旅行已由插件任务执行（engine = wasm_tasks），官方 run_once 的台账钩子
+    // 不再经过；这里按同一份 actions 摘要补记「签到记录」，让派出/领回/失败可见。
+    if prepared.provider == "workbuddy" && prepared.task.id == "travel" {
+        let plan_time = if prepared.manual { None } else {
+            chrono::DateTime::from_timestamp_millis(prepared.planned_at)
+                .map(|at| at.with_timezone(&crate::server::core::beijing::offset()).format("%H:%M").to_string())
+        };
+        crate::server::core::travel_ledger::record_schedule_from_summary(plan_time.as_deref(), &summary);
+    }
     prepared.guard.finish(success, message, Some(summary.clone()), 0, 60_000)?;
     result.map(|_| summary)
 }
@@ -146,17 +155,19 @@ async fn execute(store: &AccountStore, prepared: &Prepared) -> Result<Value, Str
         if !prepared.manual && current(provider, &prepared.task) != task { drop(guard); break; }
         let result = prepared.adapter.host().call_coded("tasks.run", json!({ "provider": provider, "account": account_id,
             "task": id, "manual": prepared.manual, "scheduled_at": planned_at }), Duration::from_secs(600)).await;
-        let (success, message, credit) = match result {
+        let (success, message, credit, outcome) = match result {
             Ok(value) if value["success"].is_boolean() => (value["success"] == true,
                 value["message"].as_str().unwrap_or("任务已结束").chars().take(1000).collect::<String>(),
-                value["report"]["credit"].as_f64().or_else(|| value["credit"].as_f64())),
-            Ok(_) => (false, "插件未返回有效的任务结果".into(), None),
-            Err(error) => (false, super::super::super::process::redact(&error.message), None),
+                value["report"]["credit"].as_f64().or_else(|| value["credit"].as_f64()),
+                value["report"]["outcome"].as_str().map(str::to_string)),
+            Ok(_) => (false, "插件未返回有效的任务结果".into(), None, Some("failed".to_string())),
+            Err(error) => (false, super::super::super::process::redact(&error.message), None, Some("failed".to_string())),
         };
+        let outcome = outcome.or_else(|| (!success).then(|| "failed".to_string()));
         let name = account["displayName"].as_str().filter(|name| !name.is_empty())
             .or_else(|| account["name"].as_str()).unwrap_or(account_id);
         let row = json!({ "account": account_id, "accountId": account_id, "name": name,
-            "success": success, "message": message, "credit": credit, "at": logging::now_ms() });
+            "success": success, "message": message, "credit": credit, "outcome": outcome, "at": logging::now_ms() });
         guard.finish(success, message, Some(row.clone()), 0, next)?;
         results.push(row);
         tokio::time::sleep(Duration::from_millis(200)).await;

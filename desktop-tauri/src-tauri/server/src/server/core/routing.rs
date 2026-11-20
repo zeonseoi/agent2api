@@ -460,7 +460,7 @@ fn js_number(value: &Value) -> Option<f64> {
 // （api::routing）把整张清单原样画给用户。两条路调的是同一个函数，
 // 「界面标的顺序」与「转发实际走的顺序」因此不可能分叉。
 
-use crate::server::config::{RouteStrategy, StickyMode};
+use crate::server::config::RouteStrategy;
 
 /// 一条候选在计划里的样子（转发用 `account`，界面用其余字段）。
 #[derive(Clone, Debug)]
@@ -837,10 +837,8 @@ pub fn plan_route(
     }
 }
 
-/// 粘性 TTL（毫秒）：转发选路与队列端点共用的换算（StickyMode → 时长）。
-pub fn sticky_ttl_ms(mode: StickyMode) -> i64 {
-    mode.ttl_ms().unwrap_or(0)
-}
+/// 粘性 TTL 由 `RoutingSettings::sticky_ttl_ms` 统一解析
+/// （自动档读用户分钟数，会话内固定 6 小时）；这里不再另留按档位的换算。
 
 #[cfg(test)]
 mod tests {

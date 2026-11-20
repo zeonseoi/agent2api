@@ -813,5 +813,7 @@
   "（已跑）": "",
   "（插件未就绪，保留原配置）": "",
   "（能量 / 连登读数本次未取到）": "(Energy / streak readings unavailable this time)",
-  "，日活保活 {n} 个": ", {n} kept alive"
+  "，日活保活 {n} 个": ", {n} kept alive",
+  "按设置的时刻（北京时间）检查：把快过期（今天 ≥ 到期日 − 1 天）的成长任务领回来（已完成直接领；未完成先点亮再领）。仅 WorkBuddy 国内版；会真发起写请求，请确认后再开。": "Checks at the configured times (Beijing time): claims growth tasks that are about to expire (today is at least one day before the expiry date); finished ones are claimed directly, unfinished ones are lit up first and then claimed. WorkBuddy (China) only; this sends real write requests, so enable it only once you are sure.",
+  "✅ 执行时刻已保存": "✅ Execution times saved"
 }

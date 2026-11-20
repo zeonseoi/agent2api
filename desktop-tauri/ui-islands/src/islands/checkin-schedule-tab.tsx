@@ -10,7 +10,6 @@ import { ProviderLogo } from './checkin-row'
 import { CheckinScheduleEditor } from './checkin-schedule-editor'
 import { CheckinScheduleExtras } from './checkin-schedule-extras'
 import { CheckinScheduleHeading, CheckinScheduleMaster, CheckinScheduleRules } from './checkin-schedule-common'
-import { ClaimAutoCard } from './checkin-claim-auto-card'
 import {
   beijingScheduleTime, checkinEnd, checkinRangeText, goCheckinTab, groupScheduleRows, scheduleGroupLabel,
   scheduleName, scheduleOptions, schedulePayload, scheduleRows, type ScheduleOption, type ScheduleTimeGroup,
@@ -148,10 +147,6 @@ export function ScheduleTab({ center }: { center: CheckinCenter }): React.ReactE
     </Empty> : null}
     <CheckinScheduleRules />
     <CheckinScheduleExtras center={center} />
-    {/* WorkBuddy 成长的「到期前自动领取」：官方没有这一档，由本 fork 的独立
-        2 小时循环负责（`core::growth_claim_auto`）。没有国内版账号时后端不给
-        `claimAuto` 这段，整卡不渲染。 */}
-    {center.claimAuto ? <ClaimAutoCard /> : null}
     <CheckinScheduleEditor entries={entries} options={options} defaultRetryTime={auto.defaultRetryTime || '00:10'} />
   </div>
 }

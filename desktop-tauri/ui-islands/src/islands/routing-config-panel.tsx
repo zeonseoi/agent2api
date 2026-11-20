@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Badge, Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, Spinner, confirmDialog } from '@ui'
+import { Badge, Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Empty, Input, InputGroup, InputGroupAddon, InputGroupInput, Label, Spinner, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } from './routing-drag'
@@ -196,11 +196,36 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, refresh
               options={[...(scope ? [['__inherit', t('继承全局：{value}', { value: stickyLabel(workspace.globalSettings?.routingSticky) })] as [string, string]] : []),
                 ['auto', t('自动')], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]}
               onChange={value => mutate(next => { next.sticky = value === '__inherit' ? undefined : value })} /></div>
+            <div className='routing-rule-field routing-rule-wide'><Label>{t('自动档粘滞时长（分钟）')}</Label>
+              <Input type='number' inputMode='numeric' min={1} max={1440} step={1} disabled={locked}
+                aria-label={t('自动档粘滞时长（分钟）')}
+                value={profile.stickyTtlMinutes ?? (scope ? '' : workspace.settings.routingStickyTtlMinutes)}
+                placeholder={scope
+                  ? t('留空继承全局：{minutes} 分钟', { minutes: workspace.globalSettings?.routingStickyTtlMinutes ?? workspace.settings.routingStickyTtlMinutes ?? 5 })
+                  : t('默认 {minutes} 分钟', { minutes: workspace.settings.routingStickyTtlMinutes ?? 5 })}
+                onChange={event => {
+                  const raw = event.currentTarget.value.trim()
+                  const minutes = raw === '' ? undefined : Number(raw)
+                  mutate(next => { next.stickyTtlMinutes = minutes !== undefined && Number.isFinite(minutes) ? minutes : undefined })
+                }} /></div>
+            <div className='routing-rule-field routing-rule-wide'><Label>{t('会话内档粘滞时长（分钟）')}</Label>
+              <Input type='number' inputMode='numeric' min={1} max={10080} step={1} disabled={locked}
+                aria-label={t('会话内档粘滞时长（分钟）')}
+                value={profile.stickySessionTtlMinutes ?? (scope ? '' : workspace.settings.routingStickySessionTtlMinutes)}
+                placeholder={scope
+                  ? t('留空继承全局：{minutes} 分钟', { minutes: workspace.globalSettings?.routingStickySessionTtlMinutes ?? workspace.settings.routingStickySessionTtlMinutes ?? 360 })
+                  : t('默认 {minutes} 分钟', { minutes: workspace.settings.routingStickySessionTtlMinutes ?? 360 })}
+                onChange={event => {
+                  const raw = event.currentTarget.value.trim()
+                  const minutes = raw === '' ? undefined : Number(raw)
+                  mutate(next => { next.stickySessionTtlMinutes = minutes !== undefined && Number.isFinite(minutes) ? minutes : undefined })
+                }} /></div>
             {!globalAccounts ? <div className='routing-rule-field routing-rule-wide'><Label>{t('参与方式')}</Label><RoutingSelect label={t('参与方式')} value={profile.providerScope || 'all'} disabled={locked}
               options={[['all', t('全部自动参与')], ['selected', t('仅加入的参与')]]} onChange={value => mutate(next => {
                 next.providerScope = value === 'all' ? 'all' : 'selected'; next.providers = allProviders; next.disabledProviders = excluded
               })} /></div> : null}
           </div>
+          <p className='routing-config-note'>{t('自动档与会话内档分别按设置的时长生效；每轮与关闭不粘。')}</p>
           {!globalAccounts ? <p className='routing-config-note'>{profile.providerScope === 'all' ? t('新增提供商自动参与；移出本路由的不会自动加回。') : t('只有加入的提供商参与，新增提供商需要手动加入。')}</p> : null}
           {!scope ? <RoutingModelFilter value={modelFilter.model} models={workspace.models} lastUsed={workspace.modelLastUsed} disabled={disabled} onChange={modelFilter.setModel} /> : null}
           <div className='routing-protection-summary'><RouteIcon name='shield' size={14} /><span>{t('全局保护设置')}</span>

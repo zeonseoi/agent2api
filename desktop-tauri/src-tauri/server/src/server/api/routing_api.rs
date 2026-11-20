@@ -125,6 +125,22 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
         Ok(value) => value,
         Err(response) => return response,
     };
+    patch.sticky_ttl_minutes = match int_field(
+        config::KEY_ROUTING_STICKY_TTL_MINUTES,
+        config::ROUTING_STICKY_TTL_MIN_MINUTES,
+        config::ROUTING_STICKY_TTL_MAX_MINUTES,
+    ) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    patch.sticky_session_ttl_minutes = match int_field(
+        config::KEY_ROUTING_STICKY_SESSION_TTL_MINUTES,
+        config::ROUTING_STICKY_SESSION_TTL_MIN_MINUTES,
+        config::ROUTING_STICKY_SESSION_TTL_MAX_MINUTES,
+    ) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     patch.breaker_timeout_seconds = match int_field(
         config::KEY_ROUTING_BREAKER_TIMEOUT,
         config::ROUTING_BREAKER_MIN_TIMEOUT,
@@ -141,20 +157,28 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
         Ok(value) => value,
         Err(response) => return response,
     };
-    let previous_sticky = config::routing_settings().sticky;
+    let previous_routing = config::routing_settings();
     if !config::set_routing(patch) {
         return errors::management_error(500, "路由设置落盘失败");
     }
-    if previous_sticky != config::routing_settings().sticky {
+    let current_routing = config::routing_settings();
+    // 粘滞档位或自动档时长变化后，旧绑定按旧 TTL 到期会让用户觉得“没生效”；
+    // 直接清空进程内绑定，下一次请求按新设置重新建立。
+    if previous_routing.sticky != current_routing.sticky
+        || previous_routing.sticky_ttl_minutes != current_routing.sticky_ttl_minutes
+        || previous_routing.sticky_session_ttl_minutes != current_routing.sticky_session_ttl_minutes
+    {
         _state.upstream().clear_route_sticky(None, None);
     }
-    ok_json(routing_json(config::routing_settings()))
+    ok_json(routing_json(current_routing))
 }
 
 pub(crate) fn routing_json(settings: RoutingSettings) -> Value {
     json!({
         config::KEY_ROUTING_STRATEGY: settings.strategy.as_str(),
         config::KEY_ROUTING_STICKY: settings.sticky.as_str(),
+        config::KEY_ROUTING_STICKY_TTL_MINUTES: settings.sticky_ttl_minutes,
+        config::KEY_ROUTING_STICKY_SESSION_TTL_MINUTES: settings.sticky_session_ttl_minutes,
         config::KEY_ROUTING_FAILOVER_BACKOFF: settings.failover_backoff,
         config::KEY_ROUTING_SINK: settings.sink,
         config::KEY_ROUTING_BREAKER_ENABLED: settings.breaker_enabled,

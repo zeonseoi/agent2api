@@ -118,8 +118,8 @@ type CheckinBridge = {
   runGrowthTravel?: (id: string) => Promise<{ message?: string } | null | undefined>
   /** 成长任务「到期前自动领取」的开关读写（GET/POST /api/claim-auto，
    *  起停后端独立轮询）。旅行排程走上面的 getTravelSchedule 三条。 */
-  getClaimAuto?: () => Promise<{ enabled?: boolean } | null | undefined>
-  setClaimAuto?: (patch: { enabled?: boolean }) => Promise<{ enabled?: boolean } | null | undefined>
+  getClaimAuto?: () => Promise<{ enabled?: boolean; times?: string[] } | null | undefined>
+  setClaimAuto?: (patch: { enabled?: boolean; times?: string[] }) => Promise<{ enabled?: boolean; times?: string[] } | null | undefined>
 }
 
 /** `/api/accounts/{id}/growth` 的返回（任务 / 能量 / 连登 / 旅行 / 开学季五块） */
@@ -783,11 +783,15 @@ export async function runGrowthOne(id: string, code: string, mode: 'light' | 'cl
  * 后端据此起停 `core::growth_claim_auto` 那条独立轮询。开关读数取快照的
  * `claimAuto.enabled`，写成功后重拉一次快照让读数落地。
  */
-export async function setClaimAuto(enabled: boolean): Promise<void> {
-  await run(
-    async () => { await bridge().setClaimAuto?.({ enabled }) },
-    { success: enabled ? '✅ 已开启到期自动领取' : '已关闭到期自动领取', failure: '保存失败' },
+export async function setClaimAuto(patch: { enabled?: boolean; times?: string[] }): Promise<boolean> {
+  const success = patch.enabled === true ? '✅ 已开启到期自动领取'
+    : patch.enabled === false ? '已关闭到期自动领取'
+      : '✅ 执行时刻已保存'
+  const result = await run(
+    async () => bridge().setClaimAuto?.(patch),
+    { success, failure: '保存失败' },
   )
+  return result !== undefined
 }
 
 export async function runGrowthBatch(accountIds: string[], mode: 'light' | 'claim'): Promise<void> {

@@ -33,6 +33,12 @@ pub struct RoutingProfile {
     pub strategy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticky: Option<String>,
+    /// 自动档粘滞时长（分钟）；缺失 = 继承上一级 / 全局默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_ttl_minutes: Option<i64>,
+    /// 会话内档粘滞时长（分钟）；缺失 = 继承上一级 / 全局默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_session_ttl_minutes: Option<i64>,
 }
 
 impl RoutingProfile {
@@ -74,6 +80,8 @@ impl RoutingProfiles {
         for profile in [self.global.as_ref(), self.model_profile(model)].into_iter().flatten() {
             if let Some(strategy) = &profile.strategy { settings.strategy = super::RouteStrategy::from_id(strategy); }
             if let Some(sticky) = &profile.sticky { settings.sticky = super::StickyMode::from_id(sticky); }
+            if let Some(minutes) = profile.sticky_ttl_minutes { settings.sticky_ttl_minutes = minutes; }
+            if let Some(minutes) = profile.sticky_session_ttl_minutes { settings.sticky_session_ttl_minutes = minutes; }
         }
         if let Some(group) = self.group_for_model(model) { return group.settings(settings); }
         settings
@@ -137,6 +145,16 @@ pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
     }
     if profile.sticky.as_deref().is_some_and(|value| !["auto", "session", "turn", "off"].contains(&value)) {
         return Err("会话粘滞必须为 auto、session、turn 或 off".to_string());
+    }
+    if profile.sticky_ttl_minutes.is_some_and(|minutes| {
+        !(super::ROUTING_STICKY_TTL_MIN_MINUTES..=super::ROUTING_STICKY_TTL_MAX_MINUTES).contains(&minutes)
+    }) {
+        return Err("自动档粘滞时长必须为 1~1440 分钟".to_string());
+    }
+    if profile.sticky_session_ttl_minutes.is_some_and(|minutes| {
+        !(super::ROUTING_STICKY_SESSION_TTL_MIN_MINUTES..=super::ROUTING_STICKY_SESSION_TTL_MAX_MINUTES).contains(&minutes)
+    }) {
+        return Err("会话内档粘滞时长必须为 1~10080 分钟".to_string());
     }
     fn unique(values: &[String], max: usize, label: &str) -> Result<(), String> {
         if values.len() > max {

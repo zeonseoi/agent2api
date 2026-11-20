@@ -29,6 +29,12 @@ pub struct RoutingGroup {
     pub description: String,
     pub strategy: String,
     pub sticky: String,
+    /// 自动档粘滞时长（分钟）；缺失 = 继承全局默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_ttl_minutes: Option<i64>,
+    /// 会话内档粘滞时长（分钟）；缺失 = 继承全局默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_session_ttl_minutes: Option<i64>,
     pub members: Vec<RoutingMember>,
 }
 
@@ -36,6 +42,12 @@ impl RoutingGroup {
     pub fn settings(&self, mut base: RoutingSettings) -> RoutingSettings {
         base.strategy = super::RouteStrategy::from_id(&self.strategy);
         base.sticky = super::StickyMode::from_id(&self.sticky);
+        if let Some(minutes) = self.sticky_ttl_minutes {
+            base.sticky_ttl_minutes = minutes;
+        }
+        if let Some(minutes) = self.sticky_session_ttl_minutes {
+            base.sticky_session_ttl_minutes = minutes;
+        }
         base
     }
 
@@ -45,7 +57,9 @@ impl RoutingGroup {
             if !providers.contains(&member.provider) { providers.push(member.provider.clone()); }
         }
         RoutingProfile { provider_scope: Some(super::RoutingProviderScope::Selected), providers,
-            strategy: Some(self.strategy.clone()), sticky: Some(self.sticky.clone()), ..Default::default() }
+            strategy: Some(self.strategy.clone()), sticky: Some(self.sticky.clone()),
+            sticky_ttl_minutes: self.sticky_ttl_minutes,
+            sticky_session_ttl_minutes: self.sticky_session_ttl_minutes, ..Default::default() }
     }
 }
 
@@ -66,6 +80,16 @@ pub fn validate(group: &RoutingGroup) -> Result<(), String> {
     }
     if group.model.is_empty() || super::normalize_routing_model(&group.model)? != group.model {
         return Err("对外模型 ID 不能为空，请去掉首尾空格并使用小写英文字母".into());
+    }
+    if group.sticky_ttl_minutes.is_some_and(|minutes| {
+        !(super::ROUTING_STICKY_TTL_MIN_MINUTES..=super::ROUTING_STICKY_TTL_MAX_MINUTES).contains(&minutes)
+    }) {
+        return Err("自动档粘滞时长必须为 1~1440 分钟".into());
+    }
+    if group.sticky_session_ttl_minutes.is_some_and(|minutes| {
+        !(super::ROUTING_STICKY_SESSION_TTL_MIN_MINUTES..=super::ROUTING_STICKY_SESSION_TTL_MAX_MINUTES).contains(&minutes)
+    }) {
+        return Err("会话内档粘滞时长必须为 1~10080 分钟".into());
     }
     super::validate_routing_profile(&group.profile())?;
     if group.members.len() > MAX_MEMBERS { return Err(format!("一个路由组最多允许 {MAX_MEMBERS} 个成员")); }

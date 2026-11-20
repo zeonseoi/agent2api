@@ -28,34 +28,45 @@
 //! 每领回一条落一行 `travel_records`（`outcome = task_claimed`，见
 //! `core::travel_records`）—— 与旅行共用同一张「成长记录」表，界面一处看全。
 //!
+//! ── 执行时刻 ────────────────────────────────────────────────
+//! 与插件任务同一口径：北京时间每天多个 `HH:MM`，由用户在设置里配置；
+//! 30 秒扫一拍，走到某个时刻后按「最近已过时段」执行一次；跨重启用
+//! `task_state` 的 `last_attempt_at` 去重，停机期间错过的那一拍在启动后补一次，
+//! 不补跑期间每一个时段。未配置时默认 09:00、21:00 两拍。
+//!
 //! ── 硬约束：release 是 `panic=abort`，本文件零 unwrap/expect/panic ──
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Timelike;
 use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::plugin_host::schedules::normalize_time;
 use crate::server::core::providers::workbuddy::Region as WorkBuddyRegion;
+use crate::server::core::task_state;
 use crate::server::core::travel_records;
 use crate::server::logging;
 
-/// 轮询间隔：2 小时（领取判据按天，这个间隔足够早地撞上「到期前一天」，
-/// 且大幅减少对上游的请求次数）。
-///
-/// 软件刚启动时不等这一轮 —— `start()` 会先补跑一轮（见那里）。
-pub const TICK_MS: u64 = 2 * 60 * 60 * 1000;
+/// 扫描间隔：30 秒（与插件任务的宿主扫描同一节奏）。
+pub const TICK_MS: u64 = 30 * 1000;
+
+/// 未配置时刻时的默认档：每天两次。
+const DEFAULT_TIMES: [&str; 2] = ["09:00", "21:00"];
+
+/// 与签到 / 插件任务表单一致的北京时间。
+const UTC_OFFSET_MINUTES: i32 = 480;
+
+/// 跨重启的时段去重键（与插件任务的 `pluginTask:*` 命名空间分开）。
+const STATE_KEY: &str = "growthClaimAuto:workbuddy";
 
 /// config.json 里承载本功能开关的键（独立于官方旅行排程 `growthSchedule`）。
 const CONFIG_KEY: &str = "growthClaimAuto";
 
-/// 补跑前等插件宿主把 WorkBuddy 注册进来的上限。宿主本身有加载超时，
-/// 这里只是兜底，正常几百毫秒内就到位。
-const PLUGIN_WAIT_MS: u64 = 120 * 1000;
-
-// ─── 开关 ────────────────────────────────────────────────────
+// ─── 开关与时刻 ──────────────────────────────────────────────
 
 /// 读自动领取开关（缺失 → 关；默认关闭，理由见模块头）。
 pub fn claim_auto_enabled() -> bool {
@@ -67,9 +78,86 @@ pub fn claim_auto_enabled() -> bool {
         == Some(true)
 }
 
-/// 写自动领取开关。
+/// 读执行时刻（缺失 / 全部非法 → 默认 09:00、21:00）。
+pub fn claim_auto_times() -> Vec<String> {
+    let mut times: Vec<String> = config::current()
+        .raw()
+        .get(CONFIG_KEY)
+        .and_then(|value| value.get("times"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(normalize_time)
+        .collect();
+    if times.is_empty() {
+        times = DEFAULT_TIMES.iter().map(|time| (*time).to_string()).collect();
+    }
+    times.sort();
+    times.dedup();
+    times
+}
+
+/// 写自动领取开关（保留已存的执行时刻）。
 pub fn set_claim_auto(enabled: bool) {
-    config::update_raw_field(CONFIG_KEY, json!({ "enabled": enabled }));
+    let _ = config::try_update_raw_field(
+        CONFIG_KEY,
+        |value| {
+            if !value.is_object() {
+                *value = json!({});
+            }
+            value["enabled"] = json!(enabled);
+            Ok::<(), String>(())
+        },
+        || "自动领取配置保存失败".to_string(),
+    );
+}
+
+/// 存开关 / 执行时刻并起停调度；时段先规范化再落盘。
+pub fn save_settings(enabled: Option<bool>, times: Option<Vec<String>>) -> Result<Value, String> {
+    let times = match times {
+        Some(items) => {
+            if items.is_empty() || items.len() > 24 {
+                return Err("执行时刻需要 1 到 24 个".into());
+            }
+            let mut normalized = Vec::with_capacity(items.len());
+            for item in &items {
+                normalized.push(
+                    normalize_time(item)
+                        .ok_or_else(|| format!("执行时刻「{item}」无效，格式为 HH:MM"))?,
+                );
+            }
+            normalized.sort();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    };
+    config::try_update_raw_field(
+        CONFIG_KEY,
+        |value| {
+            if !value.is_object() {
+                *value = json!({});
+            }
+            if let Some(enabled) = enabled {
+                value["enabled"] = json!(enabled);
+            }
+            if let Some(times) = &times {
+                value["times"] = json!(times);
+            }
+            Ok::<(), String>(())
+        },
+        || "自动领取配置保存失败".to_string(),
+    )?;
+    if let Some(enabled) = enabled {
+        set_enabled_global(enabled);
+    }
+    Ok(snapshot())
+}
+
+/// 界面读数（`/api/claim-auto` 与签到中心快照共用）。
+pub fn snapshot() -> Value {
+    json!({ "enabled": claim_auto_enabled(), "times": claim_auto_times() })
 }
 
 // ─── 台账来源档位 ────────────────────────────────────────────
@@ -84,54 +172,6 @@ fn reason_source(reason: &str) -> &'static str {
 }
 
 // ─── 领取扫描 ────────────────────────────────────────────────
-
-/// 等 WorkBuddy 家注册进插件注册表再放行（启动补跑 / 打开开关时用）。
-///
-/// ── 为什么需要等 ────────────────────────────────────────────
-/// 插件宿主在 `ServerState::bootstrap` 的**最后一步**才异步拉起
-/// （`plugin_host::spawn_bootstrap`），而本调度装得更早 —— 补跑会赶在
-/// 子进程握手完成之前，`lookup()` 只能拿到 `None`，日志里留一条「未装入
-/// WorkBuddy 提供商插件」后本次作废，下一次要等满 2 小时。
-///
-/// ── 什么时候不等满 ──────────────────────────────────────────
-/// 宿主这一轮启动已结束（`startup` 快照 `pending = false`）而这一家仍没注册：
-/// 未安装 / 被禁用 / 加载失败，再等也不会出现，直接放行（由调用方按
-/// 「没有插件」处理）。
-async fn wait_provider_ready(id: &str) -> bool {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(PLUGIN_WAIT_MS);
-    let mut logged = false;
-    loop {
-        if crate::server::core::plugin_host::serves_provider(id) {
-            if logged {
-                logging::verbose("[Growth]", "提供商插件已就绪，开始补跑到期领取");
-            }
-            return true;
-        }
-        let settled = crate::server::core::plugin_host::startup::snapshot()
-            .get("pending")
-            .and_then(Value::as_bool)
-            == Some(false);
-        if settled {
-            return false;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            logging::log_with_level(
-                "[Growth]",
-                &format!(
-                    "等待提供商插件就绪超时（{} 秒），本次到期领取跳过",
-                    PLUGIN_WAIT_MS / 1000
-                ),
-                "warn",
-            );
-            return false;
-        }
-        if !logged {
-            logged = true;
-            logging::verbose("[Growth]", "提供商插件尚未就绪，等它注册后再补跑到期领取");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
 
 /// 国内版账号（成长任务只对这些账号有意义）。
 ///
@@ -210,6 +250,8 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
     let mut failed = 0usize;
     let mut scanned = 0usize;
     let mut with_expiry = 0usize;
+    // 插件是否上报了这个字段（值为 null 也算上报；全空只是今天没有临期任务）。
+    let mut valid_end_field = false;
     for account in cn_accounts(store) {
         let id = account.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty() {
@@ -241,6 +283,9 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
             }
             if task.get("status").and_then(Value::as_str) == Some("claimed") {
                 continue;
+            }
+            if task.get("validEnd").is_some() {
+                valid_end_field = true;
             }
             if task.get("validEnd").and_then(Value::as_str).is_some() {
                 with_expiry += 1;
@@ -303,7 +348,7 @@ pub async fn claim_due_tasks(store: &AccountStore, reason: &str) -> (usize, usiz
             }
         }
     }
-    if scanned > 0 && with_expiry == 0 && !VALID_END_WARNED.swap(true, Ordering::Relaxed) {
+    if scanned > 0 && with_expiry == 0 && !valid_end_field && !VALID_END_WARNED.swap(true, Ordering::Relaxed) {
         logging::log_with_level(
             "[Growth]",
             "插件未上报任务有效期（validEnd），到期领取不会命中任何任务；请安装支持该字段的插件版本",
@@ -345,6 +390,32 @@ impl Drop for RunningGuard {
     }
 }
 
+/// 计算「今天最近一个已过时段」与下一个时段（与插件任务同一套语义）：
+/// 返回 `(是否到点, 距下一拍的毫秒, 本拍的计划时刻)`。多个时段按北京时间逐拍触发；
+/// 停机/睡眠错过的一拍在下一拍补一次（只补最近一拍，不补期间每个时段）。
+fn interval(times: &[String], now: i64) -> (bool, i64, i64) {
+    let offset = i64::from(UTC_OFFSET_MINUTES) * 60_000;
+    let local = now + offset;
+    let day = local.div_euclid(86_400_000) * 86_400_000 - offset;
+    let mut due = 0_i64;
+    let mut next = i64::MAX;
+    for time in times {
+        let Ok(parsed) = chrono::NaiveTime::parse_from_str(time, "%H:%M") else {
+            continue;
+        };
+        let at = day + i64::from(parsed.num_seconds_from_midnight()) * 1000;
+        if at <= now {
+            due = due.max(at);
+        } else {
+            next = next.min(at);
+        }
+    }
+    if next == i64::MAX {
+        next = due + 86_400_000;
+    }
+    (due > 0, (next - now).max(1000), due)
+}
+
 impl ClaimAuto {
     pub fn new(store: AccountStore) -> Self {
         Self {
@@ -366,21 +437,14 @@ impl ClaimAuto {
 
     /// 起调度循环（幂等：已有存活任务就不重复起）。开关关闭时不排定时器。
     ///
-    /// ── 启动补跑一轮（重要）────────────────────────────────────
-    /// 循环体是「先睡 2 小时再跑」，若只是排上循环，刚开软件时要干等 2 小时才
-    /// 处理一次。这里**立即补跑一轮**再接循环（与旅行的启动补跑同一意图）。
-    /// 补跑前先等插件注册（见 `wait_provider_ready`）—— 本调度比插件宿主装得
-    /// 早，不等就会撞空。补跑不阻塞启动：等待与 `fire` 都在 spawn 里跑。
+    /// ── 启动补跑 ────────────────────────────────────────────────
+    /// 循环第一拍**不睡**，立刻按执行时刻判定一次：今天最近一个时刻已过且尚未
+    /// 尝试过，就补跑一轮（跨重启由 `task_state` 去重）；还没到第一个时刻就等到点。
     pub fn start(&self) {
         if !claim_auto_enabled() {
             return;
         }
         self.schedule();
-        let service = self.clone();
-        crate::spawn_task(async move {
-            wait_provider_ready(WorkBuddyRegion::Cn.provider_id()).await;
-            service.fire("启动补跑").await;
-        });
     }
 
     fn schedule(&self) {
@@ -396,20 +460,79 @@ impl ClaimAuto {
             let service = self.clone();
             inner.task = Some(crate::spawn_task(async move {
                 loop {
-                    // 先睡再跑：与 setInterval 的「间隔后首次触发」一致
-                    tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
                     if stopped.load(Ordering::SeqCst) {
                         break;
                     }
-                    // 每拍现读开关：用户中途关掉就不跑（不必重启进程）
-                    if !claim_auto_enabled() {
-                        continue;
+                    // 每拍现读开关与时刻：用户中途改动不必重启进程
+                    if claim_auto_enabled() {
+                        service.tick().await;
                     }
-                    service.fire("后台巡检").await;
+                    tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
                 }
             }));
         }
-        logging::log("[Growth]", "🎁 成长任务到期领取调度已启动（每 2 小时一轮）");
+        logging::log(
+            "[Growth]",
+            &format!(
+                "🎁 成长任务到期领取调度已启动（每天 {}）",
+                claim_auto_times().join(", ")
+            ),
+        );
+    }
+
+    /// 一拍：到点且本时段未尝试过才跑。插件未就绪时**不消耗时段**，下一拍重试。
+    async fn tick(&self) {
+        let provider = WorkBuddyRegion::Cn.provider_id();
+        if !crate::server::core::plugin_host::serves_provider(provider) {
+            return;
+        }
+        let (due, _next, planned) = interval(&claim_auto_times(), logging::now_ms());
+        if !due || planned <= 0 {
+            return;
+        }
+        match task_state::read(STATE_KEY) {
+            Ok(state) if state.last_attempt_at >= planned => return,
+            Ok(_) => {}
+            Err(error) => {
+                logging::verbose("[Growth]", &format!("到期领取排期读取失败，本拍跳过：{error}"));
+                return;
+            }
+        }
+        // 用「手动」口径占用：时段判定与去重已在上面的 due/planned 检查里做完，
+        // 这里不能再让上一次时刻配置留下的 nextRunAt 挡住新增时段。
+        let guard = match task_state::claim(
+            STATE_KEY,
+            0,
+            true,
+            task_state::ManualBackoff::Respect,
+            1000,
+        ) {
+            Ok(task_state::Claim::Acquired(guard)) => guard,
+            Ok(task_state::Claim::Deferred(_)) => return,
+            Err(error) => {
+                logging::verbose("[Growth]", &format!("到期领取排期占用失败，本拍跳过：{error}"));
+                return;
+            }
+        };
+        // task_state 的 claim 已先记一笔尝试（防止重启/双实例重发），与官方插件任务一致。
+        let Some((claimed, failed)) = self.run_round("后台巡检").await else {
+            drop(guard);
+            return;
+        };
+        let summary = if failed > 0 {
+            format!("领回 {claimed} 项，失败 {failed} 项")
+        } else {
+            format!("领回 {claimed} 项")
+        };
+        if let Err(error) = guard.finish(
+            failed == 0,
+            summary,
+            Some(json!({ "claimed": claimed, "failed": failed })),
+            0,
+            0,
+        ) {
+            logging::verbose("[Growth]", &format!("到期领取排期收尾失败：{error}"));
+        }
     }
 
     /// 停调度（改开关 / 进程退出时用）。**只停本调度**，与旅行互不影响。
@@ -429,33 +552,25 @@ impl ClaimAuto {
 
     /// 开/关到期领取（写配置 + 起停调度）。
     ///
-    /// 打开时**立即跑一轮**再排循环：用户按下开关的预期是「现在就管起来」。
-    /// 与启动补跑同样先等插件注册（开关可能在插件还在握手时就被点开）。
+    /// 打开后由循环第一拍按执行时刻判定：今天最近一个时段已过且没跑过就补跑，
+    /// 否则等到下一个设置时刻；不再「一开就跑」，与官方插件任务同口径。
     pub fn set_enabled(&self, enabled: bool) {
         set_claim_auto(enabled);
         if enabled {
             self.schedule();
-            let service = self.clone();
-            crate::spawn_task(async move {
-                wait_provider_ready(WorkBuddyRegion::Cn.provider_id()).await;
-                service.fire("开启自动").await;
-            });
         } else {
             self.stop();
             logging::log("[Growth]", "🎁 成长任务到期领取调度已停止");
         }
     }
 
-    /// 跑一轮（自动循环与「立即执行」共用）。防重入：已在跑就跳过。
-    ///
-    /// 只做一件事 —— 领取到期任务。旅行是官方的定点排程（`core::growth_scheduler`），
-    /// 两者不共享闸、不互相触发。
-    pub async fn fire(&self, reason: &str) {
+    /// 跑一轮（防重入）。返回 `None` 表示已有一轮在跑。
+    async fn run_round(&self, reason: &str) -> Option<(usize, usize)> {
         let _guard = {
             let mut inner = self.lock();
             if inner.running {
                 logging::verbose("[Growth]", "上一轮到期领取仍在执行，本次跳过");
-                return;
+                return None;
             }
             inner.running = true;
             RunningGuard { inner: self.inner.clone() }
@@ -470,6 +585,15 @@ impl ClaimAuto {
                 ),
             );
         }
+        Some((claimed, failed))
+    }
+
+    /// 跑一轮（供启动之外的手动入口使用），防重入。
+    ///
+    /// 只做一件事 —— 领取到期任务。旅行是官方的定点排程（`core::growth_scheduler`），
+    /// 两者不共享闸、不互相触发。
+    pub async fn fire(&self, reason: &str) {
+        self.run_round(reason).await;
     }
 
     /// 手动「立即执行一轮」（受开关控制：关着时不跑，与后台循环同口径 —— 用户
@@ -508,7 +632,13 @@ pub fn install(store: AccountStore) {
     if !claim_auto_enabled() {
         return;
     }
-    logging::log("[Growth]", "🎁 成长任务到期领取已启用（每 2 小时一轮）");
+    logging::log(
+        "[Growth]",
+        &format!(
+            "🎁 成长任务到期领取已启用（每天 {}）",
+            claim_auto_times().join(", ")
+        ),
+    );
     service.start();
 }
 
@@ -525,7 +655,7 @@ pub fn center_entry(has_cn_account: bool) -> Value {
     if !has_cn_account {
         return Value::Null;
     }
-    json!({ "enabled": claim_auto_enabled() })
+    snapshot()
 }
 
 /// 进程退出时停调度（`backend::shutdown` 调用）。

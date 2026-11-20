@@ -73,6 +73,14 @@ pub fn save_workspace(
         if let Some(profile) = &mut global {
             if let Some(strategy) = profile.strategy.take() { next.routing.strategy = super::RouteStrategy::from_id(&strategy); next.raw.insert(super::KEY_ROUTING_STRATEGY.into(), strategy.into()); }
             if let Some(sticky) = profile.sticky.take() { next.routing.sticky = super::StickyMode::from_id(&sticky); next.raw.insert(super::KEY_ROUTING_STICKY.into(), sticky.into()); }
+            if let Some(minutes) = profile.sticky_ttl_minutes.take() {
+                next.routing.sticky_ttl_minutes = minutes;
+                next.raw.insert(super::KEY_ROUTING_STICKY_TTL_MINUTES.into(), minutes.into());
+            }
+            if let Some(minutes) = profile.sticky_session_ttl_minutes.take() {
+                next.routing.sticky_session_ttl_minutes = minutes;
+                next.raw.insert(super::KEY_ROUTING_STICKY_SESSION_TTL_MINUTES.into(), minutes.into());
+            }
             profile.account_order.clear();
         }
         profiles.global = global;
@@ -84,7 +92,7 @@ pub fn save_workspace(
         let tx = conn.transaction()?;
         tx.execute("INSERT INTO kv(key,value) VALUES('routingProfiles',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![serialized.to_string()])?;
         if model.is_empty() {
-            for key in [super::KEY_ROUTING_STRATEGY, super::KEY_ROUTING_STICKY] {
+            for key in [super::KEY_ROUTING_STRATEGY, super::KEY_ROUTING_STICKY, super::KEY_ROUTING_STICKY_TTL_MINUTES, super::KEY_ROUTING_STICKY_SESSION_TTL_MINUTES] {
                 if let Some(value) = next.raw.get(key) { tx.execute("INSERT INTO kv(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![key, value.to_string()])?; }
             }
             crate::server::core::account_store::sql::apply_priorities(&tx, &priorities)?;

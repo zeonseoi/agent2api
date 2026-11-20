@@ -1039,5 +1039,11 @@
   "验证、风控与明确拒绝": "Verification, security checks, and explicit rejection",
   "默认自动参与；新增可用提供商无需再添加路由，明确停用项保持不变。": "Participation is automatic by default. New available providers need no extra routing setup; explicitly disabled providers remain disabled.",
   "默认规则": "Default rules",
-  "默认路由": "Default route"
+  "默认路由": "Default route",
+  "自动档粘滞时长（分钟）": "Auto sticky duration (minutes)",
+  "留空继承全局：{minutes} 分钟": "Leave empty to inherit the global value: {minutes} min",
+  "默认 {minutes} 分钟": "Default: {minutes} min",
+  "自动档粘滞时长仅对「自动」生效；会话内固定 6 小时，每轮与关闭不粘。": "The auto sticky duration only applies to \"Auto\"; \"Session\" is fixed at 6 hours, and \"Per turn\"/\"Off\" never stick.",
+  "会话内档粘滞时长（分钟）": "Session sticky duration (minutes)",
+  "自动档与会话内档分别按设置的时长生效；每轮与关闭不粘。": "The auto and session durations apply to their own modes; \"Per turn\"/\"Off\" never stick."
 }

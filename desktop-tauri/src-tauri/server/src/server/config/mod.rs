@@ -1922,6 +1922,19 @@ pub fn set_routing(patch: RoutingPatch) -> bool {
                 .insert(KEY_ROUTING_STICKY.to_string(), Value::from(sticky.as_str()));
             next.sticky = sticky;
         }
+        if let Some(minutes) = patch.sticky_ttl_minutes {
+            config
+                .raw
+                .insert(KEY_ROUTING_STICKY_TTL_MINUTES.to_string(), Value::from(minutes));
+            next.sticky_ttl_minutes = minutes;
+        }
+        if let Some(minutes) = patch.sticky_session_ttl_minutes {
+            config.raw.insert(
+                KEY_ROUTING_STICKY_SESSION_TTL_MINUTES.to_string(),
+                Value::from(minutes),
+            );
+            next.sticky_session_ttl_minutes = minutes;
+        }
         let mut write_bool = |key: &str, value: bool, slot: &mut bool| {
             config.raw.insert(key.to_string(), Value::Bool(value));
             *slot = value;

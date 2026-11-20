@@ -541,6 +541,20 @@ pub(super) fn routing_from(map: &Map<String, Value>) -> RoutingSettings {
     RoutingSettings {
         strategy,
         sticky,
+        sticky_ttl_minutes: bounded_int_field(
+            map,
+            KEY_ROUTING_STICKY_TTL_MINUTES,
+            defaults.sticky_ttl_minutes,
+            ROUTING_STICKY_TTL_MIN_MINUTES,
+            ROUTING_STICKY_TTL_MAX_MINUTES,
+        ),
+        sticky_session_ttl_minutes: bounded_int_field(
+            map,
+            KEY_ROUTING_STICKY_SESSION_TTL_MINUTES,
+            defaults.sticky_session_ttl_minutes,
+            ROUTING_STICKY_SESSION_TTL_MIN_MINUTES,
+            ROUTING_STICKY_SESSION_TTL_MAX_MINUTES,
+        ),
         failover_backoff: bool_field(KEY_ROUTING_FAILOVER_BACKOFF, defaults.failover_backoff),
         sink: bool_field(KEY_ROUTING_SINK, defaults.sink),
         breaker_enabled: bool_field(KEY_ROUTING_BREAKER_ENABLED, defaults.breaker_enabled),

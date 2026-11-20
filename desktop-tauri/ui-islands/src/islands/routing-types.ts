@@ -13,9 +13,13 @@ export type RouteProfile = {
   excludedAccounts: string[]
   strategy?: string
   sticky?: string
+  /** 自动档粘滞时长（分钟）；缺失 = 继承上一级 / 全局默认 */
+  stickyTtlMinutes?: number
+  /** 会话内档粘滞时长（分钟）；缺失 = 继承上一级 / 全局默认 */
+  stickySessionTtlMinutes?: number
 }
 export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[] }
-export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[] }
+export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; stickyTtlMinutes?: number; stickySessionTtlMinutes?: number; members: RouteMember[] }
 export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; accountCount: number;
   capabilities: { supportsToolCall?: boolean | null; supportsImages?: boolean | null; supportsVideo?: boolean | null; supportsReasoning?: boolean | null; maxInputTokens?: number | null; maxOutputTokens?: number | null } }
 export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string }>; newRevision: string; catalog: RouteModelChoice[] }
@@ -54,6 +58,8 @@ export type RouteDecision = {
 export type RouteSettings = {
   routingStrategy: string
   routingSticky: string
+  routingStickyTtlMinutes: number
+  routingStickySessionTtlMinutes: number
   routingFailoverBackoff: boolean
   routingSink: boolean
   routingBreakerEnabled: boolean

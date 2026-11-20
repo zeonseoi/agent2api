@@ -94,8 +94,8 @@ pub mod checkin_ledger;
 // 定时签到的**条目**（GET/POST /api/checkin-schedules + {id}/delete|run）：
 // 总开关仍在 /api/auto-checkin，条目 CRUD 在这里，见该文件模块头
 pub mod checkin_schedules;
-// 成长任务「到期前自动领取」的开关（GET/POST /api/claim-auto）：官方旅行排程
-// 没有这一档，见该文件模块头
+// 成长任务「到期前自动领取」的开关与执行时刻（GET/POST /api/claim-auto）：
+// 官方旅行排程没有这一档，见该文件模块头
 pub mod claim_auto;
 pub mod cline_headers;
 pub mod codearts_welfare;

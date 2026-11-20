@@ -1089,6 +1089,16 @@ pub const KEY_ROUTING_STRATEGY: &str = "routingStrategy";
 ///   - `Turn`：只在单条请求内不换号（与转发既有行为一致，跨请求不粘）；
 ///   - `Off`：每条请求独立选。
 pub const KEY_ROUTING_STICKY: &str = "routingSticky";
+/// 「自动」/「会话内」两档的空闲粘滞时长（分钟）。每轮 / 关闭不粘。
+/// 自动档默认 5（1~1440）；会话内档默认 360（6 小时，1~10080）。
+pub const KEY_ROUTING_STICKY_TTL_MINUTES: &str = "routingStickyTtlMinutes";
+pub const KEY_ROUTING_STICKY_SESSION_TTL_MINUTES: &str = "routingStickySessionTtlMinutes";
+pub const ROUTING_STICKY_TTL_DEFAULT_MINUTES: i64 = 5;
+pub const ROUTING_STICKY_TTL_MIN_MINUTES: i64 = 1;
+pub const ROUTING_STICKY_TTL_MAX_MINUTES: i64 = 1440;
+pub const ROUTING_STICKY_SESSION_TTL_DEFAULT_MINUTES: i64 = 360;
+pub const ROUTING_STICKY_SESSION_TTL_MIN_MINUTES: i64 = 1;
+pub const ROUTING_STICKY_SESSION_TTL_MAX_MINUTES: i64 = 10080;
 /// 失败退避：转发失败的账号休息一会儿再回来（`routingFailoverBackoff`，默认开）
 pub const KEY_ROUTING_FAILOVER_BACKOFF: &str = "routingFailoverBackoff";
 /// 限流垫底（Sink）：还有额度时被 429 的账号排到队尾，**30 分钟后自动回到队列**，
@@ -1210,6 +1220,10 @@ impl StickyMode {
 pub struct RoutingSettings {
     pub strategy: RouteStrategy,
     pub sticky: StickyMode,
+    /// 自动档粘滞时长（分钟）。
+    pub sticky_ttl_minutes: i64,
+    /// 会话内档粘滞时长（分钟）。
+    pub sticky_session_ttl_minutes: i64,
     pub failover_backoff: bool,
     pub sink: bool,
     pub breaker_enabled: bool,
@@ -1223,6 +1237,8 @@ impl Default for RoutingSettings {
         Self {
             strategy: RouteStrategy::Order,
             sticky: StickyMode::Auto,
+            sticky_ttl_minutes: ROUTING_STICKY_TTL_DEFAULT_MINUTES,
+            sticky_session_ttl_minutes: ROUTING_STICKY_SESSION_TTL_DEFAULT_MINUTES,
             failover_backoff: true,
             sink: true,
             breaker_enabled: false,
@@ -1233,11 +1249,38 @@ impl Default for RoutingSettings {
     }
 }
 
+impl RoutingSettings {
+    /// 当前档位的粘滞时长（毫秒）；`None` = 不粘（每轮 / 关闭）。
+    ///
+    /// 自动档与会话内档各自读用户配置的分钟数；两档的会话识别口径相同，
+    /// 只是空闲过期时长不同。
+    pub fn sticky_ttl_ms(&self) -> Option<i64> {
+        match self.sticky {
+            StickyMode::Auto => Some(
+                self.sticky_ttl_minutes
+                    .clamp(ROUTING_STICKY_TTL_MIN_MINUTES, ROUTING_STICKY_TTL_MAX_MINUTES)
+                    * 60_000,
+            ),
+            StickyMode::Session => Some(
+                self.sticky_session_ttl_minutes
+                    .clamp(
+                        ROUTING_STICKY_SESSION_TTL_MIN_MINUTES,
+                        ROUTING_STICKY_SESSION_TTL_MAX_MINUTES,
+                    )
+                    * 60_000,
+            ),
+            StickyMode::Off | StickyMode::Turn => None,
+        }
+    }
+}
+
 /// 路由设置的**部分**更新入参（`None` = 该项不动）
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RoutingPatch {
     pub strategy: Option<RouteStrategy>,
     pub sticky: Option<StickyMode>,
+    pub sticky_ttl_minutes: Option<i64>,
+    pub sticky_session_ttl_minutes: Option<i64>,
     pub failover_backoff: Option<bool>,
     pub sink: Option<bool>,
     pub breaker_enabled: Option<bool>,
@@ -1320,4 +1363,40 @@ pub struct AutoContinuePatch {
     /// 轮数上限（`None` = 该项不动）。调用方须先按
     /// `AUTO_CONTINUE_MIN_ROUNDS..=AUTO_CONTINUE_MAX_ROUNDS` 校验过。
     pub max_rounds: Option<i64>,
+}
+
+#[cfg(test)]
+mod routing_sticky_ttl_tests {
+    use super::{RoutingSettings, StickyMode};
+
+    /// 自动档读用户配置的分钟数，越界按最小/最大值兜底。
+    #[test]
+    fn auto_ttl_uses_configured_minutes_with_bounds() {
+        let mut settings = RoutingSettings::default();
+        assert_eq!(settings.sticky_ttl_ms(), Some(5 * 60_000));
+        settings.sticky_ttl_minutes = 30;
+        assert_eq!(settings.sticky_ttl_ms(), Some(30 * 60_000));
+        settings.sticky_ttl_minutes = 0;
+        assert_eq!(settings.sticky_ttl_ms(), Some(60_000));
+        settings.sticky_ttl_minutes = 9999;
+        assert_eq!(settings.sticky_ttl_ms(), Some(1440 * 60_000));
+    }
+
+    /// 会话内档同样读用户配置（默认 360 分钟），每轮/关闭不粘。
+    #[test]
+    fn session_ttl_uses_configured_minutes_with_bounds() {
+        let mut settings = RoutingSettings::default();
+        settings.sticky = StickyMode::Session;
+        assert_eq!(settings.sticky_ttl_ms(), Some(360 * 60_000));
+        settings.sticky_session_ttl_minutes = 120;
+        assert_eq!(settings.sticky_ttl_ms(), Some(120 * 60_000));
+        settings.sticky_session_ttl_minutes = 0;
+        assert_eq!(settings.sticky_ttl_ms(), Some(60_000));
+        settings.sticky_session_ttl_minutes = 99_999;
+        assert_eq!(settings.sticky_ttl_ms(), Some(10080 * 60_000));
+        settings.sticky = StickyMode::Turn;
+        assert_eq!(settings.sticky_ttl_ms(), None);
+        settings.sticky = StickyMode::Off;
+        assert_eq!(settings.sticky_ttl_ms(), None);
+    }
 }

@@ -1,43 +1,60 @@
 import * as React from 'react'
-import { Card, CardHeader, Switch } from '@ui'
+import { Button, Card, Input, Label, Switch } from '@ui'
 import { setClaimAuto, store } from './checkin-store'
 import { t } from '../i18n'
 
 /**
- * WorkBuddy 成长中心的「到期前自动领取」开关卡（挂在「定时签到」页）。
+ * WorkBuddy 成长中心的「到期前自动领取」设置行。
  *
- * 「自动派猫猫旅行」由官方的「猫猫旅行定时排程」卡接管（`autoCheckin` 与
- * `growthSchedule` 是两个独立排程，见 `core::growth_scheduler`）—— 这里不再
- * 重复给开关。「到期前自动领取」是官方没有的一档（按任务的 `valid_end` 提前
- * 一天领），仍由本 fork 的独立循环负责（见 `core::growth_claim_auto`）。
- *
- * 开关读数取签到中心快照的 `claimAuto.enabled`，写走 `setClaimAuto`
- * （POST /api/claim-auto，起停后端轮询）。没有国内版账号时后端不给这段，
- * 整卡不渲染。
+ * 挂在「签到与成长自动任务」卡片内，与插件任务同一套交互：开关 + 北京时间
+ * 多个 HH:MM（逗号/空格分隔）+ 保存。后端按设置的时刻逐拍执行；跨重启只在
+ * 启动后补跑最近一个已过时段一次（见 `core::growth_claim_auto`）。
  */
-export function ClaimAutoCard(): React.ReactElement {
-  const claimEnabled = store.center?.claimAuto?.enabled === true
+export function ClaimAutoSettings(): React.ReactElement | null {
+  const claim = store.center?.claimAuto
+  const [draft, setDraft] = React.useState<string | undefined>(undefined)
+  if (!claim) return null
+  const enabled = claim.enabled === true
+  const current = claim.times?.length ? claim.times.join(', ') : ''
+  const value = draft ?? current
   return (
-    <Card render={<section />} className='panel ck-growth-card'>
-      <CardHeader className='panel-head'>
-        <h2>{t('WorkBuddy 成长任务')}</h2>
-        <span className='tip-q' data-tip={t('后台每 2 小时检查一次：把快过期（今天 ≥ 到期日 − 1 天）的成长任务领回来（已完成直接领；未完成先点亮再领）。仅 WorkBuddy 国内版；会真发起写请求，请确认后再开。')}></span>
-      </CardHeader>
-      <div className='p-4'>
-        <div className='ck-set-line'>
-          <span className='ck-set-k'>{t('到期自动领取')}</span>
-          <span className='ck-set-v'>
-            <Switch
-              checked={claimEnabled}
-              disabled={store.saving}
-              onCheckedChange={next => void setClaimAuto(next)}
-            />
-          </span>
-        </div>
-        <div className='ck-note'>
-          {t('对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「签到记录」。也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。')}
-        </div>
+    <Card className='min-w-0 p-3'>
+      <div className='flex flex-wrap items-center gap-3'>
+        <Label className='flex min-w-0 flex-1 items-center gap-2 text-[13px]'>
+          <Switch
+            checked={enabled}
+            disabled={store.saving}
+            onCheckedChange={next => void setClaimAuto({ enabled: next })}
+          />
+          <span className='break-words'>{t('到期自动领取')}</span>
+        </Label>
       </div>
+      <div className='mt-3 flex flex-wrap items-center gap-2'>
+        <Input
+          className='min-w-40 flex-1'
+          aria-label={t('执行时刻')}
+          disabled={store.saving}
+          value={value}
+          onChange={event => setDraft(event.currentTarget.value)}
+        />
+        <span className='text-xs text-muted-foreground'>UTC +8</span>
+        <Button
+          size='sm'
+          disabled={store.saving || draft === undefined}
+          onClick={() => {
+            const times = value.split(/[,，\s]+/).map(item => item.trim()).filter(Boolean)
+            void setClaimAuto({ times }).then(saved => { if (saved) setDraft(undefined) })
+          }}
+        >
+          {t('保存')}
+        </Button>
+      </div>
+      <p className='mb-0 mt-3 text-xs leading-relaxed text-muted-foreground'>
+        {t('按设置的时刻（北京时间）检查：把快过期（今天 ≥ 到期日 − 1 天）的成长任务领回来（已完成直接领；未完成先点亮再领）。仅 WorkBuddy 国内版；会真发起写请求，请确认后再开。')}
+      </p>
+      <p className='mb-0 mt-1 text-xs leading-relaxed text-muted-foreground'>
+        {t('对「有结束时间」的任务生效：在前一天起把已完成的、可完成的领回来，动作记入「签到记录」。也可在「签到中心」页成长任务行点「巡检一次」当场跑一轮。')}
+      </p>
     </Card>
   )
 }

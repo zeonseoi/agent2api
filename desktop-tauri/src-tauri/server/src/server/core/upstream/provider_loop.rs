@@ -649,7 +649,7 @@ async fn attempt_queue(
             "strategy": ctx.routing.settings.strategy.as_str(), "sticky": ctx.routing.settings.sticky.as_str(),
             "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
         });
-        if ctx.routing.settings.sticky.ttl_ms().is_some() { decision["stickyId"] = decision["sessionId"].clone(); }
+        if ctx.routing.settings.sticky_ttl_ms().is_some() { decision["stickyId"] = decision["sessionId"].clone(); }
         if let Some(group) = &ctx.routing.group {
             decision["blocked"] = json!(ctx.routing.group_projection.blocked.iter().take(12).collect::<Vec<_>>());
             decision["blockedTotal"] = ctx.routing.group_projection.blocked.len().into();
@@ -777,7 +777,7 @@ async fn attempt_queue(
                     if let Some(account_id) = custom_account_id.as_deref() {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source, logging::now_ms(),
-                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.settings.sticky_ttl_ms().unwrap_or(0), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -863,7 +863,7 @@ async fn attempt_queue(
                     if let Some(account_id) = stateful_account_id.as_deref() {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source, logging::now_ms(),
-                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.settings.sticky_ttl_ms().unwrap_or(0), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -1367,13 +1367,13 @@ async fn attempt_queue(
                         }
                     }
                     if let (Some(_ttl), true, Some(_)) = (
-                        route_settings.sticky.ttl_ms(),
+                        route_settings.sticky_ttl_ms(),
                         !conv_key.is_empty(),
                         target.account_id.as_deref(),
                     ) {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source,
-                            logging::now_ms(), route_settings.sticky.ttl_ms().unwrap_or(0),
+                            logging::now_ms(), route_settings.sticky_ttl_ms().unwrap_or(0),
                             sticky_generation,
                         );
                     }

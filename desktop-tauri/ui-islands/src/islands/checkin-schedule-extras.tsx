@@ -7,6 +7,7 @@ import { callJson } from './assistant-state'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 import { CheckinPluginTasks } from './checkin-plugin-tasks'
+import { ClaimAutoSettings } from './checkin-claim-auto-card'
 
 /* ─── 保活模型链（国际版）──────────────────── */
 
@@ -320,6 +321,7 @@ export function CheckinScheduleExtras({ center }: { center: CheckinCenter }): Re
   return <section className='ck-schedule-extras'>
     <div className='ck-schedule-heading'><div><h2>{t('其他自动任务')}</h2><p>{t('保活模型链为全局配置，猫猫旅行有独立的开关与时刻。')}</p></div></div>
     {keepalive || travel ? <div className='ck-region-row'>{keepalive}{travel}</div> : null}
-    <CheckinPluginTasks center={center} expanded />
+    <CheckinPluginTasks center={center} expanded
+      footer={center.claimAuto ? <ClaimAutoSettings /> : null} />
   </section>
 }

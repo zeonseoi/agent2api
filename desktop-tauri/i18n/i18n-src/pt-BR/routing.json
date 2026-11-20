@@ -1039,5 +1039,11 @@
   "验证、风控与明确拒绝": "Verificação, segurança e rejeição explícita",
   "默认自动参与；新增可用提供商无需再添加路由，明确停用项保持不变。": "A participação é automática por padrão. Novos provedores disponíveis não precisam de configuração extra de rotas; os desativados explicitamente permanecem desativados.",
   "默认规则": "Regras padrão",
-  "默认路由": "Roteamento padrão"
+  "默认路由": "Roteamento padrão",
+  "自动档粘滞时长（分钟）": "Duração do modo automático (minutos)",
+  "留空继承全局：{minutes} 分钟": "Deixe vazio para herdar o global: {minutes} min",
+  "默认 {minutes} 分钟": "Padrão: {minutes} min",
+  "自动档粘滞时长仅对「自动」生效；会话内固定 6 小时，每轮与关闭不粘。": "A duração automática só se aplica ao modo \"Automático\"; \"Sessão\" é fixa em 6 horas, e \"A cada turno\"/\"Desligado\" não fixam.",
+  "会话内档粘滞时长（分钟）": "Duração do modo sessão (minutos)",
+  "自动档与会话内档分别按设置的时长生效；每轮与关闭不粘。": "As durações automática e de sessão valem para seus próprios modos; \"A cada turno\"/\"Desligado\" não fixam."
 }

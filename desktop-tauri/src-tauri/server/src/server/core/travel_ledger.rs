@@ -70,6 +70,14 @@ fn record_outcome(
     );
 }
 
+/// 插件给的 `credit` 可能是整数，也可能在宿主的任务摘要里被转成浮点
+/// （WASM 任务路径用 `as_f64` 汇总）；两种都按整数积分记账。
+fn credit_of(value: Option<&Value>) -> i64 {
+    value
+        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|credit| credit as i64)))
+        .unwrap_or(0)
+}
+
 /// 官方定时 /「立即巡检全部」一轮的记账入口（`core::growth_scheduler` 调用）。
 ///
 /// `plan_time` 有值 = 到点触发的计划时刻；无值 = 用户在界面上手动点的那一轮。
@@ -97,7 +105,7 @@ pub fn record_schedule_from_summary(plan_time: Option<&str>, summary: &Value) {
             action.get("name").and_then(Value::as_str).unwrap_or(""),
             action.get("outcome").and_then(Value::as_str).unwrap_or(""),
             action.get("message").and_then(Value::as_str).unwrap_or(""),
-            action.get("credit").and_then(Value::as_i64).unwrap_or(0),
+            credit_of(action.get("credit")),
         );
     }
 }
@@ -115,7 +123,7 @@ pub fn record_manual(account_id: &str, account_name: &str, report: &Value) {
         account_name,
         report.get("outcome").and_then(Value::as_str).unwrap_or(""),
         report.get("message").and_then(Value::as_str).unwrap_or(""),
-        report.get("credit").and_then(Value::as_i64).unwrap_or(0),
+        credit_of(report.get("credit")),
     );
 }
 

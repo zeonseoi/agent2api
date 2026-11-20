@@ -4,7 +4,7 @@ import { pluginTaskRunning, type PluginTaskRequest, type PluginTaskRow } from '.
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
 
-export function PluginTaskSettings({ rows, request, refresh, t, disabled = false, title, description, expanded = false }: {
+export function PluginTaskSettings({ rows, request, refresh, t, disabled = false, title, description, expanded = false, footer }: {
   rows: PluginTaskRow[]
   request: PluginTaskRequest
   refresh: () => Promise<unknown> | void
@@ -13,6 +13,7 @@ export function PluginTaskSettings({ rows, request, refresh, t, disabled = false
   title: string
   description?: string
   expanded?: boolean
+  footer?: React.ReactNode
 }) {
   const [busy, setBusy] = React.useState('')
   const [error, setError] = React.useState('')
@@ -122,6 +123,7 @@ export function PluginTaskSettings({ rows, request, refresh, t, disabled = false
           </div>
         </section>)}
       </div>
+      {footer ? <div className='mt-3'>{footer}</div> : null}
     </CollapsibleContent>
   </Collapsible>
 }
