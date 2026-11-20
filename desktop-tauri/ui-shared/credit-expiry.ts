@@ -48,6 +48,9 @@ export function expiringCreditOf(pack: Record<string, unknown>, defaultUnit: str
   const total = usageNumberOrNull(pack.total)
   const used = usageNumberOrNull(pack.used)
   const percent = usageNumberOrNull(pack.remainingPercent)
+  // 三额全缺 = 套餐占位行（如 Trae 的「免费」），不是可用的积分包；
+  // 它与真实积分包同带 expireAt，不跳过会把不同账号的最早到期日拉平。
+  if (remain === null && total === null && used === null && percent === null) return null
   if (total === -1 || (remain !== null && remain <= 0)) return null
   if (remain === null && ((used !== null && total !== null && total > 0 && used >= total)
     || (percent !== null && percent <= 0))) return null

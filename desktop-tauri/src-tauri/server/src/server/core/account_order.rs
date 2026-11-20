@@ -51,6 +51,11 @@ fn credit_expiries(usage: &Value) -> Vec<i64> {
             if ["snapshot", "record", "daily", "unlimited"].iter().any(|key| pack.get(key).and_then(Value::as_bool) == Some(true)) {
                 return None;
             }
+            // 无面额 / 无剩余 / 无已用的行是套餐占位（如 Trae 的「免费」行），
+            // 不能参与到期排序：两个账号都有同一行时会把真实到期日拉平。
+            if !["remain", "total", "used"].iter().any(|key| pack.get(*key).and_then(number).is_some()) {
+                return None;
+            }
             if pack.get("remain").and_then(number).is_some_and(|remain| remain <= 0.0) { return None; }
             let expiry = pack_expiry(pack)?;
             (expiry > 0.0).then_some(expiry as i64)

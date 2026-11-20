@@ -134,8 +134,17 @@ function unitLabel(unit: string): string {
  * 的口径分叉。
  */
 export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
-  const packs = creditPacksOf(entry)
   const defaultUnit = creditExpiryUnitOf(entry)
+  // 无面额 / 无剩余 / 无已用 / 无比例，也不是快照、流水或不限额度的行，
+  // 是套餐占位（如 Trae 的「免费」）。套餐信息已在弹层顶部展示，明细里不再
+  // 占一行「—」。
+  const packs = creditPacksOf(entry).filter(pack => {
+    const special = ['snapshot', 'record', 'unlimited', 'daily', 'rolling']
+      .some(key => pack?.[key] === true)
+    if (special) return true
+    return [pack?.total, pack?.used, pack?.remain, pack?.remainingPercent]
+      .some(value => numberOrNull(value) !== null)
+  })
   return packs.map(pack => {
     const snapshot = snapshotReadingOf(pack, t, numberText)
     if (snapshot) {

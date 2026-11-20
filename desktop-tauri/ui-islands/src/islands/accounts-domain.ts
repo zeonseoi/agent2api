@@ -702,6 +702,10 @@ export function creditExpiryOf(entry: UsageEntry, now = Date.now()): number | nu
   for (const pack of packs) {
     if (!pack || typeof pack !== 'object') continue
     if (pack.snapshot === true || pack.record === true || pack.daily === true || pack.unlimited === true) continue
+    // 无面额 / 无剩余 / 无已用的行是套餐占位（如 Trae「免费」），不参与到期排序。
+    const amount = (value: unknown) => value !== null && value !== undefined && value !== ''
+      && Number.isFinite(Number(value))
+    if (!amount(pack.remain) && !amount(pack.total) && !amount(pack.used)) continue
     const expire = Number(pack.expireAt)
     if (!Number.isFinite(expire) || expire <= 0 || expire <= now) continue
     const remain = pack.remain
