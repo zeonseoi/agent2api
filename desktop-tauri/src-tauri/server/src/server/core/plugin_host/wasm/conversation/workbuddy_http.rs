@@ -29,13 +29,10 @@ const PATH: &str = "/v2/chat/completions";
 const ORIGINS: [&str; 3] = [
     "https://www.workbuddy.cn", "https://copilot.tencent.com", "https://wb.tencentbuddy.com",
 ];
-const MAX_BODY: usize = 8 * 1024 * 1024;
+pub(in crate::server::core::plugin_host) const MAX_BODY: usize = 14 * 1024 * 1024;
 const MAX_ENCODED: usize = ((MAX_BODY + 2) / 3) * 4;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_NODES: usize = 65_536;
-// 512 曾把正常的长会话（工具调用累积数百条消息）挡成 bad_params；正文已有 8 MiB 上限，
-// 这里只保留一个宽松的防御上界，避免插件把异常长数组当正常会话发送。
-const MAX_MESSAGES: usize = 4096;
 
 struct Binding {
     signal: Arc<Signal>,
@@ -314,50 +311,49 @@ fn material(context: &Context, params: &Value, url: String) -> Result<Material, 
             .is_some_and(|value| value.strip_prefix("Bearer ").is_some_and(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))) {
         return Err(invalid());
     }
-    // 官方新版插件包的对话正文改走 64 KiB 分片资源通道（`body_resource`），与普通
-    // `http.open` 的 `http::body` 同一语义，和 `body` 互斥。固定投递必须在这里解析：
-    // 白名单不认这个键会直接判 bad_params，插件侧只会看到笼统的「网络请求未完成」。
-    let bytes = match (
-        params.get("body").filter(|value| !value.is_null()),
-        params.get("body_resource").filter(|value| !value.is_null()),
-    ) {
-        (Some(_), Some(_)) => return Err(invalid()),
-        (Some(encoded), None) => {
-            let encoded = encoded.as_str().filter(|body| !body.is_empty() && body.len() <= MAX_ENCODED).ok_or_else(invalid)?;
-            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid())?;
-            if bytes.is_empty() || bytes.len() > MAX_BODY || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
-                return Err(invalid());
-            }
-            Bytes::from(bytes)
-        }
-        (None, Some(resource)) => {
-            context.permission("resources.v1")?;
-            let bytes = context.blobs.raw(resource.as_str().ok_or_else(invalid)?)?;
-            if bytes.is_empty() || bytes.len() > MAX_BODY { return Err(invalid()); }
-            bytes
-        }
-        (None, None) => return Err(invalid()),
-    };
+    let bytes = body_bytes(context, params)?;
     let value: Value = crate::server::core::plugin_host::wasm::managed_task::declaration::parse_object(&bytes, MAX_BODY)
         .map_err(|_| invalid())?;
     let mut nodes = 0;
     shape(&value, 0, &mut nodes)?;
-    if value["stream"] != true {
-        return Err(invalid());
-    }
-    let messages = value["messages"].as_array().filter(|rows| !rows.is_empty()).ok_or_else(invalid)?;
-    if messages.len() > MAX_MESSAGES {
-        return Err(proto::WireError::with_code(
-            format!("WorkBuddy 单次请求包含 {} 条消息，超过 {MAX_MESSAGES} 条上限；请压缩会话或新开会话后重试", messages.len()),
-            "bad_params",
-        ));
-    }
-    if !value["model"].as_str().is_some_and(|model| !model.trim().is_empty() && model.len() <= 1024 && !model.chars().any(char::is_control)) {
+    if value["stream"] != true || !value["messages"].as_array().is_some_and(|rows| !rows.is_empty())
+        || !value["model"].as_str().is_some_and(|model| !model.trim().is_empty() && model.len() <= 1024 && !model.chars().any(char::is_control)) {
         return Err(invalid());
     }
     let params = json!({ "method": "POST", "url": url, "headers": wire_headers, "id": id,
         "provider": PROVIDER, "trace": trace, "max_chunk": 64 * 1024 });
     Ok(Material { params, bytes, headers, url })
+}
+
+fn body_bytes(context: &Context, params: &Value) -> Result<Bytes, proto::WireError> {
+    let raw = params.get("body").filter(|value| !value.is_null());
+    let resource = params.get("body_resource").filter(|value| !value.is_null());
+    match (raw, resource) {
+        (Some(raw), None) => {
+            let encoded = raw.as_str().filter(|body| !body.is_empty() && body.len() <= MAX_ENCODED).ok_or_else(invalid)?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| invalid())?;
+            if bytes.is_empty() || bytes.len() > MAX_BODY || base64::engine::general_purpose::STANDARD.encode(&bytes) != encoded {
+                return Err(invalid());
+            }
+            Ok(Bytes::from(bytes))
+        }
+        (None, Some(resource)) => {
+            context.permission("resources.v1")?;
+            let id = resource.as_str().filter(|id| !id.is_empty()).ok_or_else(invalid)?;
+            let bytes = context.blobs.raw(id).map_err(|_| invalid())?;
+            if bytes.is_empty() {
+                return Err(invalid());
+            }
+            if bytes.len() > MAX_BODY {
+                return Err(proto::WireError::with_code(
+                    format!("请求正文超过 {} MiB 的受控上限，请缩小上下文或图片后重试", MAX_BODY / (1024 * 1024)),
+                    "plugin_request_too_large",
+                ));
+            }
+            Ok(bytes)
+        }
+        _ => Err(invalid()),
+    }
 }
 
 fn shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), proto::WireError> {

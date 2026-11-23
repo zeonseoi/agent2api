@@ -158,62 +158,6 @@ impl Host {
         self.call_wasm_inner(method, params, timeout, None).await
     }
 
-    pub(in crate::server::core::plugin_host) async fn call_wasm_codearts_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let method = proto::methods::gateway::TOKEN_REFRESH;
-        let account = params["account"].as_str().ok_or_else(|| super::error("CodeArts原换证调用缺少目标账号"))?;
-        if params["provider"].as_str() != Some("codearts") || !self.ready() {
-            return Err(super::error("CodeArts原换证运行来源不可用"));
-        }
-        let (_telemetry, egress) = match super::super::account_egress::capture_request("codearts", account) {
-            Ok((telemetry, egress)) => (Some(telemetry), Some(egress)),
-            Err(super::super::account_egress::EgressError::MissingScope
-                | super::super::account_egress::EgressError::NoRequest) => (None, None),
-            Err(_) => return Err(super::error("CodeArts原请求账号出口未确认，未重新选号或回退直连")),
-        };
-        let runtime = self.embedded.runtime.try_read().map_err(|_| super::error("CodeArts原运行实例正忙"))?
-            .clone().ok_or_else(|| super::error("CodeArts原运行实例不可用"))?;
-        let call = super::codearts_refresh::Call::capture(self, &runtime, method, account,
-            tokio::time::Instant::now() + timeout, egress)?;
-        unwrap_reply(runtime.invoke_codearts_refresh(call, params, timeout).await?)
-    }
-
-    pub(in crate::server::core::plugin_host) async fn call_wasm_cline_free_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let account = params["account"].as_str().ok_or_else(|| super::error("Cline Free原续期调用缺少目标账号"))?;
-        if params["provider"].as_str() != Some("cline-free") || !self.ready() {
-            return Err(super::error("Cline Free原续期运行来源不可用"));
-        }
-        let (_telemetry, egress) = match super::super::account_egress::capture_request("cline-free", account) {
-            Ok((telemetry, egress)) => (Some(telemetry), Some(egress)),
-            Err(super::super::account_egress::EgressError::MissingScope
-                | super::super::account_egress::EgressError::NoRequest) => (None, None),
-            Err(_) => return Err(super::error("Cline Free原账号出口未确认，未重新选号或回退直连")),
-        };
-        let runtime = self.embedded.runtime.try_read().map_err(|_| super::error("Cline Free原运行实例正忙"))?
-            .clone().ok_or_else(|| super::error("Cline Free原运行实例不可用"))?;
-        let call = super::cline_free_refresh::Call::capture(self, &runtime, account, timeout, egress)?;
-        unwrap_reply(runtime.invoke_cline_free_refresh(call, params, timeout).await?)
-    }
-
-    pub(in crate::server::core::plugin_host) async fn call_wasm_cline_desktop_refresh(self: &Arc<Self>,
-        params: Value, timeout: Duration,
-    ) -> Result<Value, proto::WireError> {
-        let account = params["account"].as_str().ok_or_else(|| super::error("本机续期缺少原账号"))?;
-        let runtime = self.embedded.runtime.read().await.clone().ok_or_else(|| super::error("插件未加载"))?;
-        if runtime.shared.options.provider != "cline-free" { return Err(super::error("额度池不一致")); }
-        let store = crate::server::core::account_store::plugin_accounts::shared().ok_or_else(|| super::error("账号存储未就绪"))?;
-        if !store.plugin_account(account).is_some_and(|record| record["desktop"] == true && record["provider"] == "cline-free") {
-            return Err(super::error("当前账号不是已保存的本机引用"));
-        }
-        let _lease = self.activity.acquire().ok_or_else(|| super::error("插件正在切换"))?;
-        let mut params = params;
-        params["desktopRefresh"] = json!(true);
-        unwrap_reply(runtime.invoke(proto::methods::gateway::TOKEN_REFRESH, params, timeout, None).await?)
-    }
-
     pub(in crate::server::core::plugin_host) async fn call_wasm_doubao_rewards(self: &Arc<Self>,
         params: Value, timeout: Duration,
     ) -> Result<Value, proto::WireError> {
@@ -311,10 +255,6 @@ impl Host {
         }
         let _lease = self.activity.acquire().ok_or_else(|| super::error("插件正在切换或已关闭"))?;
         let runtime = self.embedded.runtime.read().await.clone().ok_or_else(|| super::error("Wasm 插件尚未加载"))?;
-        if matches!(runtime.shared.options.provider.as_str(), "codearts" | "cline-free")
-            && method == proto::methods::gateway::TOKEN_REFRESH {
-            return Err(proto::WireError::with_code("换证必须来自原账号的固定宿主调用", "forbidden"));
-        }
         if runtime.shared.options.provider == "doubaowork" && matches!(method, proto::methods::gateway::CLAIM | proto::methods::gateway::CLAIM_STATUS) {
             return Err(proto::WireError::with_code("豆包任务领奖必须由原账号固定宿主入口执行", "forbidden"));
         }
@@ -366,6 +306,12 @@ impl Host {
             let mut nonce = [0u8; 32];
             getrandom::getrandom(&mut nonce).map_err(|_| super::error("无法生成安全的登录流程标识"))?;
             params["flow"] = json!(format!("login_{}", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
+            if runtime.shared.options.provider == "raccoon" && params["payload"]["mode"] == "external"
+                && params["payload"].get("callbackOrigin").is_none() {
+                let port = super::super::bootstrap::loopback_port();
+                if port == 0 { return Err(super::error("网关本机回调端口尚未就绪")); }
+                params["payload"]["callbackOrigin"] = json!(format!("http://127.0.0.1:{port}"));
+            }
             if runtime.shared.options.allows("login.callback.v1") {
                 let port = super::super::bootstrap::loopback_port();
                 if port == 0 { return Err(super::error("网关本机回调端口尚未就绪")); }
@@ -462,7 +408,6 @@ impl Host {
                 if result["account"].is_object() {
                     validate_identity(&runtime.shared.options, &result["account"])?;
                     super::public_view::validate(&result["account"]["public"], &result["account"]["secret"])?;
-                    if runtime.shared.options.provider == "codearts" { super::codearts_login::accept(&runtime.shared, &flow, &result)?; }
                 }
             }
             _ => {}

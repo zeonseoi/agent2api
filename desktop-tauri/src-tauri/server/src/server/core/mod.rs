@@ -149,6 +149,7 @@ pub mod travel_ledger;
 pub mod travel_records;
 pub mod update;
 pub mod upstream;
+pub mod upstream_versions;
 pub(crate) mod user_agent;
 pub mod usage_query;
 pub mod usage_records;

@@ -15,7 +15,7 @@ export type ManagedInteraction = {
   expiresAt: number
   remainingMs: number
   captcha: null | { engine: 'aliyun'; protocol: 'v2'; configId: string; prefix: string; sceneId: string; region: string }
-  browser: null | { url: string; browserMode: 'external'; manualCallback: boolean; callbackInput: 'url' }
+  browser: null | { url: string; browserMode: 'external' | 'embedded'; manualCallback: boolean; callbackInput: 'url' }
 }
 export type ManagedLoginScope = {
   provider: string
@@ -70,7 +70,8 @@ export function readManagedLoginWait(raw: unknown, owner?: ManagedLoginWaitOwner
   const envelope = record(raw) ? raw : undefined
   const data = envelope && record(envelope.data) ? envelope.data : undefined
   const payload = envelope && record(envelope.payload) ? envelope.payload : data && record(data.payload) ? data.payload : undefined
-  if ([envelope, data, payload].some(item => item && (item.ok === false || item.success === false))) {
+  const savedOutcome = value?.phase === 'saved' || value?.saved === true
+  if ([envelope, data, payload].some(item => item && (item.success === false || savedOutcome && item.ok === false))) {
     throw new Error('conflicting_managed_login_envelope')
   }
   if (!value || !managedId(value.provider, 128) || !managedId(value.flow)
@@ -152,9 +153,9 @@ export function readManagedInteraction(value: unknown, flow: string, scope: Mana
   }
   if (value.browser !== null) {
     const page = value.browser
-    if (!record(page) || page.browserMode !== 'external' || typeof page.manualCallback !== 'boolean' || page.callbackInput !== 'url'
+    if (!record(page) || !['external', 'embedded'].includes(String(page.browserMode)) || typeof page.manualCallback !== 'boolean' || page.callbackInput !== 'url'
       || !managedBrowserUrl(page.url)) throw new Error('invalid_managed_browser')
-    browser = { url: page.url, browserMode: 'external', manualCallback: page.manualCallback, callbackInput: 'url' }
+    browser = { url: page.url, browserMode: page.browserMode as 'external' | 'embedded', manualCallback: page.manualCallback, callbackInput: 'url' }
   }
   if (captcha && browser || value.status === 'ready' && !captcha && !browser) throw new Error('invalid_managed_step')
   return { type: 'managed', id: value.id, provider: scope.provider, flow, methodIndex: scope.methodIndex,
@@ -219,7 +220,7 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 export function ManagedLoginInteraction({ step, deadline, scope, request, refresh, accept, onSubmitting,
-  attemptedBefore, markAttempted, callbackSubmitted, markCallbackSubmitted, openExternal, t }: {
+  attemptedBefore, markAttempted, browserOpenedBefore = false, markBrowserOpened, callbackSubmitted, markCallbackSubmitted, openExternal, openEmbedded, t }: {
   step: ManagedInteraction
   deadline: number
   scope: ManagedLoginScope
@@ -229,9 +230,12 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   onSubmitting(busy: boolean, owner: symbol): void
   attemptedBefore: boolean
   markAttempted(): void
+  browserOpenedBefore?: boolean
+  markBrowserOpened?: () => void
   callbackSubmitted: boolean
   markCallbackSubmitted(value: boolean): void
   openExternal(url: string): void | Promise<void>
+  openEmbedded?(flow: string, interaction: string): void | Promise<void>
   t: Translate
 }) {
   const [busy, setBusy] = React.useState('')
@@ -239,17 +243,19 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
   const [expired, setExpired] = React.useState(false)
   const [error, setError] = React.useState('')
   const [notice, setNotice] = React.useState('')
+  const [autoOpenNotice, setAutoOpenNotice] = React.useState('')
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackSent, setCallbackSent] = React.useState(callbackSubmitted)
   const callbackLocked = React.useRef(callbackSubmitted)
+  const browserOpened = React.useRef(browserOpenedBefore)
   const input = React.useRef<HTMLInputElement>(null)
   const controller = React.useRef<AbortController | null>(null)
   const owner = React.useRef(Symbol(`${scope.key}:${step.id}`))
   const sourceGeneration = React.useRef(managedLoginSourceGeneration())
   const alive = React.useRef(true)
   const used = React.useRef(attemptedBefore)
-  const latest = React.useRef({ step, deadline, scope, request, refresh, accept, onSubmitting, openExternal })
-  latest.current = { step, deadline, scope, request, refresh, accept, onSubmitting, openExternal }
+  const latest = React.useRef({ step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded })
+  latest.current = { step, deadline, scope, request, refresh, accept, onSubmitting, openExternal, openEmbedded }
   const current = () => alive.current && sourceGeneration.current === managedLoginSourceGeneration()
     && latest.current.scope.current() && performance.now() < latest.current.deadline
   const scopeKey = scope.key
@@ -293,6 +299,13 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       clearInput()
     }
   }, [step.status, scopeAlive])
+  React.useEffect(() => {
+    if (browserOpened.current || !current() || busy || expired || callbackSent || callbackLocked.current
+      || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
+    browserOpened.current = true
+    markBrowserOpened?.()
+    void open(true)
+  }, [scopeKey, stepKey, step.status, scopeAlive, busy, expired, callbackSent])
 
   async function verify() {
     if (controller.current || used.current || !current() || step.status !== 'ready' || !step.captcha) return
@@ -356,7 +369,7 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     if (!callbackUrl.trim()) return
     try {
       const url = new URL(callbackUrl)
-      if (callbackUrl.length > 8192 || /[\u0000-\u0020\u007f\\]/.test(callbackUrl)
+      if (callbackUrl.length > 32768 || /[\u0000-\u0020\u007f]/.test(callbackUrl)
         || !['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error()
     } catch { setError(t('请粘贴本次授权完成后的完整回调地址，不要修改其中的参数。')); return }
     const abort = new AbortController()
@@ -387,11 +400,21 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
     }
   }
 
-  async function open() {
+  async function open(auto = false) {
     if (!current() || busy || callbackSent || step.status !== 'ready' || !step.browser || !managedBrowserUrl(step.browser.url)) return
     setError('')
-    try { await latest.current.openExternal(step.browser.url) }
-    catch { if (current()) setError(t('打开授权页失败，请刷新当前步骤后重试。')) }
+    setAutoOpenNotice('')
+    try {
+      if (step.browser.browserMode === 'embedded') {
+        if (!latest.current.openEmbedded) throw new Error('embedded_login_unavailable')
+        await latest.current.openEmbedded(step.flow, step.id)
+      } else { await latest.current.openExternal(step.browser.url) }
+    }
+    catch {
+      if (!current()) return
+      if (auto) setAutoOpenNotice(t('未能自动打开官方授权页，请点击下方按钮手动打开。'))
+      else setError(t('打开授权页失败，请刷新当前步骤后重试。'))
+    }
   }
 
   const disabled = Boolean(busy) || expired || !scopeAlive || step.status !== 'ready'
@@ -406,12 +429,15 @@ export function ManagedLoginInteraction({ step, deadline, scope, request, refres
       {busy ? <Spinner /> : null}{t('开始登录验证')}
     </Button> : null}
     {step.browser ? <>
-      <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>{t('打开官方授权页')}</Button>
+      {autoOpenNotice ? <p role='status' className='text-xs text-muted-foreground'>{autoOpenNotice}</p> : null}
+      <Button variant='outline' disabled={disabled || callbackSent} onClick={() => void open()}>
+        {autoOpenNotice ? t('打开官方授权页') : t('重新打开官方授权页')}
+      </Button>
       {step.browser.manualCallback ? <>
         <p className='text-xs text-muted-foreground'>{t('授权完成后如未自动返回，请粘贴本次完整回调地址。打开浏览器不代表登录成功。')}</p>
         <Label>{t('完整回调地址（原样提交）')}
           <Input ref={input} type='password' autoComplete='off' autoCapitalize='none' spellCheck={false}
-            disabled={disabled || callbackSent} maxLength={8192} onChange={event => { setHasCallback(Boolean(event.currentTarget.value)); setError(''); setNotice('') }} />
+            disabled={disabled || callbackSent} maxLength={32768} onChange={event => { setHasCallback(Boolean(event.currentTarget.value)); setError(''); setNotice('') }} />
         </Label>
         <Button variant='outline' disabled={disabled || callbackSent || !hasCallback} onClick={() => void submitCallback()}>
           {busy ? <Spinner /> : null}{t('提交授权回调')}

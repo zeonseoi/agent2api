@@ -984,6 +984,17 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// 带最小提前量（毫秒）的临期判定；供凭证维护把窗口放大到覆盖维护间隔，
+    /// 不改变转发按需续期使用的 [`Self::credentials_expiring`]。
+    fn credentials_expiring_within(
+        &self,
+        store: &AccountStore,
+        account_id: &str,
+        _min_lead_ms: i64,
+    ) -> bool {
+        self.credentials_expiring(store, account_id)
+    }
+
     /// [`Self::credentials_expiring`] 的异步形态（插件架构新增，理由同
     /// [`Self::build_chat_request_async`]）。
     ///
@@ -999,6 +1010,30 @@ pub trait ProviderAdapter: Send + Sync {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { self.credentials_expiring(store, account_id) })
+    }
+
+    /// 维护任务保留检查失败的原因；失败不表示未到期，也不允许据此发送续期请求。
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.credentials_expiring_async(store, account_id).await) })
+    }
+
+    /// 带最小提前量（毫秒）的异步临期检查；供凭证维护把窗口放大到覆盖维护间隔。
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        min_lead_ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if min_lead_ms <= 0 {
+                return self.check_credentials_expiring(store, account_id).await;
+            }
+            Ok(self.credentials_expiring_within(store, account_id, min_lead_ms))
+        })
     }
 
     /// 本 provider 是否允许「一个账号都没有时用默认登录态转发」
@@ -1255,6 +1290,21 @@ pub trait ProviderAdapter: Send + Sync {
         >,
     > {
         Box::pin(async move { Ok(self.login_start_async().await) })
+    }
+
+    /// 可取消的参数化登录启动：取消令牌触发时同时中止进行中的跨进程 RPC。
+    fn build_login_flow_with_options_cancellable<'a>(
+        &'a self,
+        options: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<agent2api_provider_protocol::LoginStart>, GatewayError>>
+                + Send + 'a,
+        >,
+    > {
+        let _ = cancel;
+        self.build_login_flow_with_options(options)
     }
 
     /// 轮询一次登录进度（**轮询型流程用**，插件架构新增）。
@@ -1979,12 +2029,38 @@ impl ProviderAdapter for BuiltinAdapter {
         adapter_for(self.0).credentials_expiring(store, account_id)
     }
 
+    fn credentials_expiring_within(
+        &self,
+        store: &AccountStore,
+        account_id: &str,
+        min_lead_ms: i64,
+    ) -> bool {
+        adapter_for(self.0).credentials_expiring_within(store, account_id, min_lead_ms)
+    }
+
     fn credentials_expiring_async<'a>(
         &'a self,
         store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         adapter_for(self.0).credentials_expiring_async(store, account_id)
+    }
+
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        adapter_for(self.0).check_credentials_expiring(store, account_id)
+    }
+
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        min_lead_ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        adapter_for(self.0).check_credentials_expiring_within(store, account_id, min_lead_ms)
     }
 
     fn allows_anonymous_default_session(&self) -> bool {
@@ -2096,6 +2172,19 @@ impl ProviderAdapter for BuiltinAdapter {
         >,
     > {
         adapter_for(self.0).build_login_flow_with_options(options)
+    }
+
+    fn build_login_flow_with_options_cancellable<'a>(
+        &'a self,
+        options: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<agent2api_provider_protocol::LoginStart>, GatewayError>>
+                + Send + 'a,
+        >,
+    > {
+        adapter_for(self.0).build_login_flow_with_options_cancellable(options, cancel)
     }
 
     fn login_callback_poll_async<'a>(

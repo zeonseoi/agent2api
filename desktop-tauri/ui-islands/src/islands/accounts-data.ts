@@ -40,12 +40,12 @@ export {
 
 /* ─── 弹窗 ─────────────────────────────────── */
 
-export function openSettingsDialog(id: string, pane?: 'query' | 'credential' | 'network'): void {
+export function openSettingsDialog(id: string): void {
   if (!findAccount(id)) { toast(t('账号不存在，请刷新后重试'), 'err'); return }
-  const loading = { kind: 'settings-loading' as const, id, pane }
+  const loading = { kind: 'settings-loading' as const, id }
   patch({ dialog: loading })
   void ensureAccountDetails(id).then(() => {
-    if (getStore().dialog === loading) patch({ dialog: { kind: 'settings', id, pane } })
+    if (getStore().dialog === loading) patch({ dialog: { kind: 'settings', id } })
   }).catch(error => {
     if (getStore().dialog === loading) patch({ dialog: null })
     toast(t('读取账号详情失败：{message}', { message: errorMessage(error) }), 'err')
@@ -324,6 +324,7 @@ export function rowContext(
 export type AccountsViewApi = {
   render(): void
   findAccount: typeof findAccount
+  refreshFailureMessage: typeof errorMessage
   ensureAccountDetails: typeof ensureAccountDetails
   refreshList: typeof refreshList
   refreshCaches(validIds: Set<string>): void
@@ -448,6 +449,7 @@ export function installAccountsApi(): void {
   window.wbAccountsView = {
     render: () => { syncAccountSorting(); bump() },
     findAccount,
+    refreshFailureMessage: errorMessage,
     ensureAccountDetails,
     refreshList,
     refreshCaches,

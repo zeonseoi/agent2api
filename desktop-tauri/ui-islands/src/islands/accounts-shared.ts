@@ -1,3 +1,4 @@
+import { credentialRefreshMessage } from '../../../ui-shared/plugin-login-refresh-message'
 import type { UsageQueryTask, UsageQueryStart } from '../../../ui-shared/usage-query-task'
 import type { AccountListQuery, AccountListPage, AccountListSummary } from '../../../ui-shared/accounts-list'
 import { t } from '../i18n'
@@ -590,7 +591,7 @@ export function formatTime(value: unknown): string {
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return credentialRefreshMessage(error instanceof Error ? error.message : String(error), t)
 }
 
 /**

@@ -34,13 +34,15 @@ pub(super) use protocol::{close as close_stream, open as open_stream, push as pu
 pub(super) use runtime::{host, observe_concurrency, package_for_provider, registered_label};
 pub use runtime::{concurrency_default, known_provider, provider_icons, provider_state, snapshot, start};
 pub use updates::check as check_updates;
+pub(crate) use updates::{refresh_outcomes as refresh_update_outcomes, snapshot as updates_snapshot};
+pub(crate) use catalog::{refresh_now as refresh_catalog_now, status as catalog_status};
 pub fn refresh_catalog() -> serde_json::Value {
     catalog::wake(true);
     catalog::status()
 }
 pub(super) use trace::{find as capture_for_trace, register as register_trace};
 pub(super) use transport::{
-    clear as clear_transport, close as close_http, convert as convert_request, open, open_body_with_policy, open_frozen_once, open_pinned, RequestBody,
+    clear as clear_transport, close as close_http, convert as convert_request, open, open_body_with_policy, open_frozen_once, open_pinned, open_pinned_body, RequestBody,
     read as read_http, resolve_proxy, HttpDeadline, HttpHandle,
 };
 

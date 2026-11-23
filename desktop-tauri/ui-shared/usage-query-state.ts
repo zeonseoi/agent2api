@@ -1,3 +1,5 @@
+import { credentialRefreshMessage } from './plugin-login-refresh-message'
+
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
 export const USAGE_NOT_CONFIGURED_CODE = 'usage_not_configured'
@@ -8,15 +10,6 @@ export function usageQueryNoticeOf(code: unknown, t: Translate): string | null {
   if (code === USAGE_UNAVAILABLE_CODE) return t('暂无可查额度')
   if (code === 'account_origin_authorization_required') return t('待授权')
   if (code === 'account_origin_proxy_unsupported') return t('需直连')
-  if (code === 'cline_free_refresh_registration_required' || code === 'cline_free_refresh_requires_host') return t('待更新凭证')
-  if (code === 'cline_free_refresh_unconfirmed') return t('待核对续期状态')
-  return null
-}
-
-export function usageRecoveryPane(code: unknown): 'query' | 'credential' | 'network' | null {
-  if (code === 'account_origin_authorization_required') return 'query'
-  if (code === 'account_origin_proxy_unsupported') return 'network'
-  if (code === 'cline_free_refresh_registration_required' || code === 'cline_free_refresh_requires_host') return 'credential'
   return null
 }
 
@@ -120,7 +113,7 @@ export function usageFailureMessage(row: UsageQueryRow, t: Translate): string {
       case 'request_timeout': return t('余额请求超时（连接或响应未完成），请检查网络或稍后重试')
     }
   }
-  return row.error ? t(row.error) : ''
+  return row.error ? credentialRefreshMessage(row.error, t) : ''
 }
 
 export function usageStopText(diagnostics: UsageQueryDiagnostics | null | undefined, t: Translate): string {

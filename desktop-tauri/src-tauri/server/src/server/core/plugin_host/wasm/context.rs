@@ -98,8 +98,6 @@ pub struct Context {
     pub(super) catpaw_material: Option<Arc<super::conversation::CatPawMaterial>>,
     pub(super) doubao_turn: Option<super::doubao_turn::Turn>,
     pub(super) codearts_session: Option<super::codearts_session::Session>,
-    pub(super) codearts_refresh: Option<Arc<super::codearts_refresh::Call>>,
-    pub(super) cline_free_refresh: Option<Arc<super::cline_free_refresh::Call>>,
     pub(super) doubao_rewards: Option<Arc<super::doubao_rewards::Call>>,
     pub(super) task_service: super::managed_task::service::Owner,
     pub(super) catpaw_service: super::catpaw_turn::service::CallSlot,
@@ -120,6 +118,7 @@ pub struct Context {
     pub(super) progress: super::progress::Progress,
     pub guards: HashMap<String, OwnedMutexGuard<()>>,
     pub calls: u32,
+    pub(super) spin_calls: u32,
 }
 
 impl Context {
@@ -129,7 +128,7 @@ impl Context {
         Self {
             shared, call_deadline, account: params["account"].as_str().unwrap_or("").to_string(),
             identity: String::new(), origin_binding: None, usage_query: false, account_maintenance: false, verification: None, claim_owner: None, checkin_call: None, managed: None, kiro_execution: None,
-            desktop_import: None, desktop_launch: None, desktop_selected: false, supplied_credentials: None, supplied_cookie_file: None, supplied_legacy_credentials: None, legacy_secret: None, conversation: None, catpaw_material: None, doubao_turn: None, codearts_session: None, codearts_refresh: None, cline_free_refresh: None, doubao_rewards: None,
+            desktop_import: None, desktop_launch: None, desktop_selected: false, supplied_credentials: None, supplied_cookie_file: None, supplied_legacy_credentials: None, legacy_secret: None, conversation: None, catpaw_material: None, doubao_turn: None, codearts_session: None, doubao_rewards: None,
             task_service: Default::default(), catpaw_service: Default::default(),
             flow: params["flow"].as_str().unwrap_or("").to_string(),
             session: params["session"].as_str().unwrap_or("").to_string(),
@@ -138,7 +137,7 @@ impl Context {
             proxy_selected: params.get("proxy").is_some(), system_proxy_when_unset, user_agent: None,
             trace: params.get("plugin_trace").cloned().unwrap_or(Value::Null),
             sink, head_sent: false, resources: HashMap::new(), http_handles: HashMap::new(), converters: HashMap::new(),
-            blobs: Default::default(), progress: Default::default(), guards: HashMap::new(), calls: 0,
+            blobs: Default::default(), progress: Default::default(), guards: HashMap::new(), calls: 0, spin_calls: 0,
         }
     }
 }

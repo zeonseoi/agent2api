@@ -136,7 +136,6 @@ pub fn resolve_batch_targets(
 fn no_usage_retry(code: Option<&str>) -> bool {
     recovery::requires_action(code) || code.is_some_and(|code| matches!(code,
         "usage_not_configured" | "account_proxy_unavailable" | "refresh_token_expired" | "credential_refresh_unavailable" | "plugin_busy")
-        || code.starts_with("codearts_refresh_") || code.starts_with("cline_free_refresh_")
         || code.starts_with("cline_refresh_"))
 }
 

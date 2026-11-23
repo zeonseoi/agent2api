@@ -57,6 +57,7 @@ export type LoginOptions = {
   inputs?: Record<string, string>
   locale?: string
   proxy?: unknown
+  requestId?: string
 }
 
 /** 共享登录桥推送的公开进度；设备授权只展示 userCode，不展示 device_code 或凭证。 */
@@ -175,6 +176,7 @@ export type SharedWindow = {
     startLogin(edition: string, mode: string, provider: string, socialRestore?: boolean, options?: LoginOptions): Promise<unknown>
     submitLoginCallback?: (state: string, callbackUrl: string) => Promise<unknown>
     openReleasePage?: (url: string) => Promise<unknown>
+    openManagedLogin?: (flow: string, interaction: string) => Promise<unknown>
     onLoginState?: (callback: (progress: LoginProgress) => void) => (() => void) | void
     onLoginProgress?: (callback: (progress: LoginProgress) => void) => (() => void) | void
     cancelLogin?(state?: string): Promise<unknown>

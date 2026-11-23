@@ -72,9 +72,12 @@ export type ReleaseState = {
   plugins: StorePlugin[]
   reason: string | null
   error: boolean
+  stale?: boolean
   checked?: boolean
   checking?: boolean
   checkedAt?: number
+  lastAttemptAt?: number
+  retryAt?: number
 }
 
 export type PluginUpdate = {
@@ -95,6 +98,7 @@ export type PluginUpdate = {
   asset: ReleasePlatform | null
   reason: string | null
   error: boolean
+  catalogError?: boolean
 }
 
 export type PluginOperation = {
@@ -259,7 +263,7 @@ export type PluginMutation = Pick<PluginsPayload, 'packs' | 'host' | 'adminPanel
   hostError?: string | null
 }
 
-export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout' | 'legacy_unsupported'
+export type HiddenAccountReason = 'not_installed' | 'pack_disabled' | 'provider_disabled' | 'not_loaded' | 'loading' | 'load_failed' | 'load_timeout' | 'legacy_unsupported' | 'replaced_by_template'
 
 export type HiddenAccountProvider = {
   id: string
@@ -268,10 +272,54 @@ export type HiddenAccountProvider = {
   reason: HiddenAccountReason
   packId?: string | null
   startup?: PluginLoadStatus | null
+  templateKey?: string | null
 }
 
 export type HiddenAccountsSummary = {
   total: number
   byProvider: Record<string, number>
   providers: HiddenAccountProvider[]
+}
+
+export type PluginOperationNotice = {
+  message: string
+  kind: 'ok' | 'err'
+}
+
+type PluginTranslate = (key: string, params?: Record<string, string | number>) => string
+
+/** 解析插件包的界面展示名（优先用本地化译文，无名时回落包 id）。 */
+export function pluginPackName(id: string, name: string | null | undefined, t: PluginTranslate): string {
+  if (id === 'agent2api-providers') return t('提供商增强')
+  if (id === 'agent2api-web-providers') return t('网页提供商')
+  const trimmed = name?.trim()
+  return trimmed ? t(trimmed) : id
+}
+
+/** 从最近一次插件操作结果构造顶部提示文案；进行中或无提示时返回 null。 */
+export function pluginOperationNotice(
+  payload: Pick<PluginsPayload, 'packs' | 'catalog'>,
+  operation: PluginOperation,
+  t: PluginTranslate,
+): PluginOperationNotice | null {
+  if (operation.error) return { message: operation.error, kind: 'err' }
+  if (operation.hostError) return { message: operation.hostError, kind: 'err' }
+  if (operation.result?.installNotice) return { message: t(operation.result.installNotice), kind: 'ok' }
+  if (!operation.done) return null
+  const storeName = payload.catalog?.plugins?.find(item => item.id === operation.id)?.name
+  const pack = payload.packs?.find(item => item.id === operation.id)
+  const resultPack = operation.result?.pack
+  // 跳过仅回落为包 id 的占位名，优先使用目录或清单里的可读名称。
+  const preferred = [storeName, pack?.name, resultPack?.name].find(value => {
+    const trimmed = value?.trim()
+    return Boolean(trimmed && trimmed !== operation.id)
+  })
+  const name = pluginPackName(operation.id, preferred ?? storeName ?? pack?.name ?? resultPack?.name, t)
+  const version = operation.version || resultPack?.version || pack?.version || ''
+  return {
+    message: version
+      ? t('插件包「{name}」已安装到 v{version}', { name, version })
+      : t('插件包「{name}」已安装', { name }),
+    kind: 'ok',
+  }
 }

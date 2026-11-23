@@ -82,7 +82,7 @@ impl Step {
             { return Err(GatewayError::bad_request("请完成当前登录步骤的阿里云验证")); }
         } else if self.browser.as_ref().is_some_and(|browser| browser.manual_callback) {
             if !input.captcha.is_null() || fields.len() != 1 || !fields.contains_key("callbackUrl")
-                || fields["callbackUrl"].as_str().is_none_or(|raw| raw.is_empty() || raw.len() > 8192) {
+                || fields["callbackUrl"].as_str().is_none_or(|raw| raw.is_empty() || raw.len() > 32 * 1024) {
                 return Err(GatewayError::bad_request("当前步骤只接受本次授权的完整回调地址"));
             }
         } else { return Err(GatewayError::bad_request("当前登录步骤不接受输入")); }
@@ -155,8 +155,8 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
                 Some(super::catpaw::authorization(lease, &browser.url)?)
             }
             crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::TraeCode => {
-                if browser.manual_callback {
-                    return Err(GatewayError::bad_request("Trae 无state官方回调不允许手工提交"));
+                if !browser.manual_callback {
+                    return Err(GatewayError::bad_request("Trae 授权步骤需要完整回调地址入口"));
                 }
                 super::trae::publication(&mut state.trae, lease, &browser.lease_id, &browser.url, &step.id)?;
                 None
@@ -167,7 +167,7 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
         lease.official_state = official_state;
         step.lease = Some(browser.lease_id.clone());
         state.leases.retain(|id, _| id == &browser.lease_id);
-        step.browser = Some(Browser { url: browser.url, browser_mode: "external",
+        step.browser = Some(Browser { url: browser.url, browser_mode: session.browser_mode,
             manual_callback: browser.manual_callback, callback_input: "url" });
     }
     Ok(step)

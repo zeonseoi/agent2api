@@ -14,15 +14,7 @@ pub struct Declaration {
 pub(crate) enum CallbackKind { GoogleCode, AutoclawCode, CatpawPassport, KiroPortal, KiroAws, TraeCode }
 
 pub(crate) const TRAE_PROFILE: &str = "trae.pkce.v1";
-/// 插件托管登录声明里必须出现的精确来源（官方插件与 fork 插件都声明这个）。
-/// **不能跟着授权页迁移改**：它是插件声明与主程序批准值的比对基准，改了会让
-/// 已装插件整家「加载失败：托管授权页必须使用主程序批准的精确 HTTPS 来源」。
-pub(crate) const TRAE_AUTHORIZATION_ORIGIN: &str = "https://api.trae.cn";
-/// 实际打开的授权页来源。官方 3.4.22 起授权页在 www.trae.cn，api.trae.cn
-/// 的 /authorization 已 404；兑换、身份、用量、签到等 API 仍在 api.trae.cn。
-/// 浏览器步骤按本程序生成的完整 URL 做逐字比对（见 `trae::publication`），
-/// 因此这里换来源不需要插件重新声明。
-pub(crate) const TRAE_AUTHORIZATION_PAGE: &str = "https://www.trae.cn";
+pub(crate) const TRAE_AUTHORIZATION_ORIGIN: &str = "https://www.trae.cn";
 
 pub(crate) const KIRO_PORTAL_PROFILE: &str = "kiro.portal.v1";
 pub(crate) const KIRO_AWS_PROFILE: &str = "kiro.aws.v1";

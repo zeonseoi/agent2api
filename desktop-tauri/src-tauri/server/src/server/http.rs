@@ -260,6 +260,11 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/stats/requests/filters",
             get(api::stats_api::stats_request_filters),
         )
+        // 单条请求的完整详情（列表页走轻量列，点开详情或悬停标签时按需查完整大字段）。
+        .route(
+            "/api/stats/requests/detail",
+            get(api::stats_api::stats_request_detail),
+        )
         // 单条请求的原始正文（预览对话详情弹窗的数据源）。同样要排在通配之前
         .route(
             "/api/stats/requests/raw",
@@ -658,6 +663,7 @@ pub fn panel_router(state: ServerState) -> Router {
             post(api::custom_providers::fetch_custom_models),
         )
         .route("/api/provider-settings", get(api::plugin_provider_settings::list).patch(api::plugin_provider_settings::configure))
+        .route("/api/provider-settings/upstream-sync", post(api::plugin_provider_settings::sync_upstream))
         .route("/api/model-access/models", get(api::model_access::models))
         .route("/api/model-access/keys", get(api::model_access::list_keys))
         .route("/api/keys", get(api::keys_api::list_keys).post(api::keys_api::create_key))
@@ -684,18 +690,11 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins/desktop-import/chatglm/confirm", post(api::plugin_desktop_import::confirm))
         .route("/api/plugins/desktop-import/chatglm/cancel", post(api::plugin_desktop_import::cancel))
         .route("/api/plugins/desktop-import/chatglm/status", get(api::plugin_desktop_import::status))
-        .route("/api/plugins/enrollment/codearts/prepare", post(api::plugin_codearts_enrollment::prepare))
-        .route("/api/plugins/enrollment/codearts/confirm", post(api::plugin_codearts_enrollment::confirm))
-        .route("/api/plugins/enrollment/codearts/cancel", post(api::plugin_codearts_enrollment::cancel))
-        .route("/api/plugins/enrollment/codearts/status", get(api::plugin_codearts_enrollment::status))
-        .route("/api/plugins/enrollment/cline-free/prepare", post(api::plugin_cline_free_enrollment::prepare))
-        .route("/api/plugins/enrollment/cline-free/confirm", post(api::plugin_cline_free_enrollment::confirm))
-        .route("/api/plugins/enrollment/cline-free/cancel", post(api::plugin_cline_free_enrollment::cancel))
-        .route("/api/plugins/enrollment/cline-free/status", get(api::plugin_cline_free_enrollment::status))
         .route("/api/plugins/permissions", get(api::plugin_permissions::list).patch(api::plugin_permissions::configure))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/capacity", get(api::runtime_capacity::get).patch(api::runtime_capacity::save))
         .route("/api/plugins/provider-settings", get(api::plugin_provider_settings::list).patch(api::plugin_provider_settings::configure))
+        .route("/api/plugins/provider-settings/upstream-sync", post(api::plugin_provider_settings::sync_upstream))
         .route("/api/plugins/progress", get(api::plugins::progress))
         .route("/api/plugins/scripts/install", post(api::plugins::install_script))
         .route("/api/plugins/scripts/change", post(api::plugins::change_script))
@@ -944,25 +943,33 @@ pub fn panel_router(state: ServerState) -> Router {
         //      要与 update 的 pickInstaller 规则相符：带 setup 的 .exe 优先）。
         .layer(middleware::from_fn(require_api_key));
 
-    // 静态托管只在 headless 打开（set_ui_dir）：桌面形态的界面由 Tauri 壳出，
-    // 网关的未知路径保持纯 404。ui_dir 是启动即定值，克隆进闭包。
+    // 静态托管：headless 走磁盘 `ui_dir`，桌面形态发布版走随壳内嵌的 `ui_assets`
+    // （避免安装包里额外带第二份 `ui/`）。两者都未设置时网关未知路径保持纯 404。
     let ui_dir = state.ui_dir().cloned();
+    let ui_assets = state.ui_assets().cloned();
     Router::new()
         .merge(public)
         .merge(protected)
         .fallback(move |request: Request| {
             let ui_dir = ui_dir.clone();
+            let ui_assets = ui_assets.clone();
             async move {
-                let Some(dir) = ui_dir else {
+                if ui_dir.is_none() && ui_assets.is_none() {
                     return not_found(request).await;
-                };
+                }
                 // 未登录打开面板首页 → 先去登录页（见 `panel_boot_redirect`）。
                 // 必须排在出 index.html 之前：主界面一加载就会由 app.js 与各页面岛
                 // 并发打出十几条 `/api/*`，未登录时它们全部 401，等于空跑一轮。
                 if let Some(response) = panel_boot_redirect(&request) {
                     return response;
                 }
-                super::static_files::serve(request, dir).await
+                if let Some(dir) = ui_dir {
+                    super::static_files::serve(request, dir).await
+                } else if let Some(assets) = ui_assets {
+                    super::static_files::serve_embedded(request, assets).await
+                } else {
+                    not_found(request).await
+                }
             }
         })
         // 方法不匹配的兜底：Node 版没有 405 概念，一律落到 404 分支，
@@ -1503,6 +1510,7 @@ mod cors_tests {
     }
 
     async fn gateway_cors_cases() {
+        crate::server::config::init(None);
         // ── 关闭（默认）：行为与修复前逐字一致 ──
         crate::server::config::set_cors_enabled(false);
         let router = probe_router();

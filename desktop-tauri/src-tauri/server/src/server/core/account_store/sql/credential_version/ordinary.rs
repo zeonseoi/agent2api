@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use zeroize::Zeroizing;
 
 use super::{
-    bounded, maintained_provider, projection, row_projection, storage, Conflict, Error,
+    bounded, maintained_provider, row_projection, storage, Conflict, Error,
     StorageFailure, Version,
 };
 use crate::server::core::account_store::{
@@ -225,9 +225,7 @@ fn maintain(
 
 #[derive(PartialEq)]
 enum Authorization {
-    CodeArts(projection::Projection),
     ReadOnly(row_projection::Projection),
-    Free(serde_json::Value),
 }
 
 fn authorization(record: &StoredAccount) -> Result<Option<Authorization>, Error> {
@@ -239,14 +237,8 @@ fn authorization(record: &StoredAccount) -> Result<Option<Authorization>, Error>
             bounded::MAX_PLAIN_BYTES,
         )?));
         let provider = record.provider();
-        if provider == projection::PROVIDER {
-            projection::Projection::read(record).map(Authorization::CodeArts)
-        } else if provider == "cline-free" {
-            Ok(Authorization::Free(super::cline_free_enrollment::refresh::authorization(record)))
-        } else {
-            let provider = RowProvider::parse(&provider).ok_or(Error::UnsupportedProvider)?;
-            row_projection::Projection::read(record, provider).map(Authorization::ReadOnly)
-        }
+        let provider = RowProvider::parse(&provider).ok_or(Error::UnsupportedProvider)?;
+        row_projection::Projection::read(record, provider).map(Authorization::ReadOnly)
     })();
     match checked {
         Ok(projection) => Ok(Some(projection)),
@@ -449,8 +441,8 @@ pub(in crate::server::core::account_store::sql) fn encrypt_legacy_rows(
             pending
         };
         for (id, provider, raw) in &pending {
-            // 旧明文的外来私有标记只能剥离，不能加密成Free或其他家的续期资格。
-            let envelope = if maintained_provider(provider) || provider == "cline-free" {
+            // 旧明文的外来私有标记只能剥离，不能加密成受控续期资格。
+            let envelope = if maintained_provider(provider) {
                 storage::ensure_no_triggers(conn).map_err(write_error)?;
                 let mut value = super::super::decode_value(raw).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(

@@ -23,8 +23,20 @@ pub struct Client {
     pub executables: Vec<String>,
     pub locations: Vec<Location>,
     pub identity: Identity,
+    #[serde(default)]
+    pub hot_switch: Option<HotSwitch>,
     pub resources: Vec<Resource>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HotSwitch {
+    pub service_executables: Vec<String>,
+    #[serde(default = "default_respawn_timeout_ms")]
+    pub respawn_timeout_ms: u64,
+}
+
+fn default_respawn_timeout_ms() -> u64 { 15_000 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -60,9 +72,25 @@ pub struct Resource {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseLocation {
+    pub location: Location,
+    pub field: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Storage {
-    JsonFile { location: Location, fields: Vec<String>, #[serde(default)] create: bool },
+    JsonFile {
+        location: Location,
+        #[serde(default)]
+        base_from: Option<BaseLocation>,
+        fields: Vec<String>,
+        #[serde(default)]
+        prefixes: Vec<String>,
+        #[serde(default)]
+        create: bool,
+    },
     Sqlite { location: Location, #[serde(default)] variants: Vec<Location>, table: String, key_column: String, value_column: String, keys: Vec<String> },
     Keyring { target: String, username: String },
 }
@@ -95,6 +123,15 @@ pub fn identifier(value: &str) -> bool {
         && !matches!(value, "__proto__" | "prototype" | "constructor")
 }
 
+pub fn json_field(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value.trim() == value && !value.chars().any(char::is_control)
+        && !matches!(value, "__proto__" | "prototype" | "constructor")
+}
+
+pub fn json_prefix(value: &str) -> bool {
+    json_field(value) && value.len() >= 2 && value.ends_with(':')
+}
+
 pub fn text(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
@@ -117,8 +154,12 @@ fn names(values: &[String], maximum: usize) -> bool {
 
 fn resource_location(location: &Location) -> bool {
     if !relative(&location.path) || matches!(location.root, Root::ProgramFiles | Root::ProgramFilesX86) { return false; }
-    let first = location.path.split('/').next().unwrap_or("").to_ascii_lowercase();
-    !matches!(first.as_str(), "microsoft" | "windows" | "programs" | "temp" | ".ssh" | ".aws" | ".azure" | ".gnupg" | ".agent2api" | ".zcode" | "google" | "mozilla")
+    let mut parts = location.path.split('/');
+    let first = parts.next().unwrap_or("").to_ascii_lowercase();
+    if first == ".zcode" {
+        return parts.next().is_some_and(|second| second.eq_ignore_ascii_case("v2")) && parts.next().is_some();
+    }
+    !matches!(first.as_str(), "microsoft" | "windows" | "programs" | "temp" | ".ssh" | ".aws" | ".azure" | ".gnupg" | ".agent2api" | "google" | "mozilla")
         && location.path.split('/').count() >= 2
 }
 
@@ -138,12 +179,29 @@ impl Declaration {
                 Identity::PeProduct { values, absent, .. } if names(values, 8) && !absent.is_empty() && absent.len() <= 8 && absent.iter().all(|path| relative(path)) => {},
                 _ => return Err("本机客户端身份校验声明无效".into()),
             }
+            if let Some(hot_switch) = &client.hot_switch {
+                if !names(&hot_switch.service_executables, 8)
+                    || hot_switch.service_executables.iter().any(|name| !relative(name) || name.contains('/') || !name.to_ascii_lowercase().ends_with(".exe")
+                        || client.executables.iter().any(|main_name| main_name.eq_ignore_ascii_case(name)))
+                    || !(1_000..=30_000).contains(&hot_switch.respawn_timeout_ms)
+                {
+                    return Err("本机客户端在线切换配置无效".into());
+                }
+            }
             let mut resources = HashSet::new();
             if client.resources.is_empty() || client.resources.len() > 8 { return Err("本机凭证资源数量无效".into()); }
             for resource in &client.resources {
                 if !identifier(&resource.id) || !resources.insert(&resource.id) || !text(&resource.label, 128) { return Err("本机凭证资源标识无效".into()); }
                 match &resource.storage {
-                    Storage::JsonFile { location, fields, .. } if resource_location(location) && names(fields, 32) && fields.iter().all(|field| identifier(field)) => {},
+                    Storage::JsonFile { location, base_from, fields, prefixes, .. }
+                        if resource_location(location)
+                            && base_from.as_ref().is_none_or(|base| resource_location(&base.location) && identifier(&base.field))
+                            && names(fields, 32)
+                            && fields.iter().all(|field| json_field(field))
+                            && prefixes.len() <= 16
+                            && prefixes.iter().all(|prefix| json_prefix(prefix))
+                            && prefixes.iter().collect::<HashSet<_>>().len() == prefixes.len()
+                            && fields.iter().all(|field| !prefixes.iter().any(|prefix| field.starts_with(prefix))) => {},
                     Storage::Sqlite { location, variants, table, key_column, value_column, keys } if resource_location(location)
                         && variants.len() <= 8 && variants.iter().all(resource_location)
                         && [table, key_column, value_column].iter().all(|value| identifier(value)) && names(keys, 32) => {},

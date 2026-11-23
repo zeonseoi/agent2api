@@ -274,14 +274,23 @@ impl RpcAdapter {
     }
 
     /// 调一次要出网的 RPC（超时更宽）。
-    async fn network(&self, method: &str, mut params: Value) -> Result<Value, GatewayError> {
-        if matches!(self.id, "cline-free" | "codearts") && self.metadata().host.options.wasm.is_some()
+    async fn network(&self, method: &str, params: Value) -> Result<Value, GatewayError> {
+        self.network_with_cancel(method, params, None).await
+    }
+
+    async fn network_with_cancel(
+        &self,
+        method: &str,
+        mut params: Value,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Value, GatewayError> {
+        if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
             && method == proto::methods::gateway::MODELS_REFRESH {
             let store = crate::server::core::account_store::plugin_accounts::shared()
                 .ok_or_else(|| GatewayError::with_status(503, "原账号存储尚未就绪"))?;
             let account = params["account"].as_str().unwrap_or("");
             if !account.is_empty() {
-                self.prepare_read_credentials(&store, account).await?;
+                self.ensure_access_token(&store, account).await?;
             }
         }
         super::account_egress::apply(&mut params)?;
@@ -292,7 +301,7 @@ impl RpcAdapter {
             && method == proto::methods::gateway::ADMIN_ACTION && params["action"] == "activity.run" {
             Duration::from_secs(60)
         } else { NETWORK_TIMEOUT };
-        self.call(method, params, timeout).await
+        self.call_with_cancel(method, params, timeout, cancel).await
     }
 
     async fn call(
@@ -300,6 +309,16 @@ impl RpcAdapter {
         method: &str,
         params: Value,
         timeout: Duration,
+    ) -> Result<Value, GatewayError> {
+        self.call_with_cancel(method, params, timeout, None).await
+    }
+
+    async fn call_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Value, GatewayError> {
         // 每次调用都先 ensure：崩溃之后第一次调用会重新拉起子进程。
         let execution = self.execution().await?;
@@ -340,7 +359,7 @@ impl RpcAdapter {
                             super::wasm::desktop_credentials::import_scope(provider, desktop_selected,
                                 crate::server::core::runtime_capacity::caller_scope(capacity_caller,
                                     crate::server::core::runtime_capacity::background_if(capacity_background,
-                                        host.call_coded(&method, params, timeout))),
+                                        host.call_coded_with_cancel(&method, params, timeout, cancel.as_ref()))),
                             ),
                         ),
                     ),
@@ -350,6 +369,50 @@ impl RpcAdapter {
     }
 
     /// 本 provider 的参数前缀（每个方法都要带 provider）。
+    async fn run_login_flow_start(
+        &self,
+        options: Value,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<proto::LoginStart>, GatewayError> {
+        if !options.is_object() {
+            return Err(GatewayError::bad_request("登录参数必须是 JSON 对象"));
+        }
+        // method 保留旧 browser 契约；具体 OAuth / API 方法由 payload 中
+        // 的 methodIndex 决定。旧 SDK 只会将 method 与 payload 交给 provider。
+        let params = serde_json::json!({
+            "provider": self.id,
+            "method": "browser",
+            "proxy": options.get("proxy").cloned().unwrap_or(Value::Null),
+            "proxy_override": options.get("proxy").is_some(),
+            "payload": options,
+        });
+        // 直接授权入口可能先向上游注册 OAuth 客户端，使用网络请求超时。
+        let value = self.network_with_cancel(proto::methods::gateway::LOGIN_START, params, cancel).await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        if self.host.options.script {
+            if let (Some(flow), Some(ui)) = (value.get("flow").and_then(Value::as_str), value.get("script_login")) {
+                super::script::remember_login(self.id, flow, ui)
+                    .map_err(|message| GatewayError::with_status(502, message))?;
+            }
+        }
+        if self.host.options.wasm.is_some() {
+            if let (Some(flow), Some(ui)) = (value.get("flow").and_then(Value::as_str), value.get("login_ui")) {
+                super::script::remember_login(self.id, flow, ui)
+                    .map_err(|message| GatewayError::with_status(502, message))?;
+            }
+        }
+        let start: proto::LoginStart = serde_json::from_value(value).map_err(|_| {
+            GatewayError::with_status(502, "插件返回的登录启动信息无法解析")
+        })?;
+        if start.flow.trim().is_empty() {
+            return Err(GatewayError::with_status(502, "插件没有返回登录流程 id"));
+        }
+        // 空 URL 是本机 / 自动登录，不代表成功；统一由路由登记任务并轮询。
+        Ok(Some(start))
+    }
+
     fn base(&self) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();
         map.insert("provider".into(), Value::String(self.id.to_string()));
@@ -374,8 +437,11 @@ impl RpcAdapter {
 /// 控制面与 head 前的会话错误共用同一解码，不靠文案猜分类。
 pub(super) fn rpc_error(provider: &str, error: proto::WireError, method: &str) -> GatewayError {
     if error.code.as_deref() == Some("plugin_busy") {
-        return GatewayError::with_status(503, "插件正在处理其他操作，等待超时，请稍后重试").with_code("plugin_busy")
-            .with_retry_after_seconds(crate::server::core::runtime_capacity::retry_after_seconds());
+        let (message, reason, retry_after) = crate::server::core::runtime_capacity::classify_busy_message(&error.message);
+        return GatewayError::with_status(503, message)
+            .with_code("plugin_busy")
+            .with_reason(reason)
+            .with_retry_after_seconds(retry_after);
     }
     // 正文/图片超过插件能处理的尺寸：换个账号或重试都不会变好。
     // 413 让编排层直接停下，并把可读的尺寸说明交给调用方。
@@ -730,30 +796,43 @@ impl ProviderAdapter for RpcAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
-            if super::operations::active_for_provider(self.id) { return false; }
-            if self.id == "cline-free" && self.metadata().host.options.wasm.is_some() {
-                let store = store.clone();
-                let account = account_id.to_string();
-                if store.plugin_account(&account).is_some_and(|record| record["desktop"] == true) {
-                    return self.control(proto::methods::gateway::TOKEN_EXPIRING, self.with_account(account_id)).await
-                        .ok().and_then(|value| value.as_bool()).unwrap_or(false);
+            self.check_credentials_expiring(store, account_id).await.unwrap_or(false)
+        })
+    }
+
+    fn check_credentials_expiring<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        self.check_credentials_expiring_within(store, account_id, 0)
+    }
+
+    fn check_credentials_expiring_within<'a>(
+        &'a self,
+        _store: &'a AccountStore,
+        account_id: &'a str,
+        min_lead_ms: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if super::operations::active_for_provider(self.id) {
+                return Err(GatewayError::with_status(503, "插件正在安装或更新，暂时无法检查凭证有效期。")
+                    .with_code("credential_refresh_check_unavailable"));
+            }
+            let execution = self.execution().await?;
+            let mut params = execution.with_account(account_id);
+            if min_lead_ms > 0 {
+                if let Some(object) = params.as_object_mut() {
+                    object.insert("minLeadMs".into(), Value::from(min_lead_ms));
                 }
-                return crate::server::core::blocking::run(move || store.read_free_refresh_origin(&account)
-                    .is_ok_and(|origin| origin.expiring())).await.unwrap_or(false);
             }
-            if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
-                && super::rpc_refresh::readiness(store, self.id, account_id).await.is_err() {
-                return false;
-            }
-            self.control(
+            let value = execution.control(
                 proto::methods::gateway::TOKEN_EXPIRING,
-                self.with_account(account_id),
-            )
-            .await
-            .ok()
-            .and_then(|value| value.as_bool())
-            // 判不出来就 false：宁可漏刷，也不要凭猜测打上游。
-            .unwrap_or(false)
+                params,
+            ).await?;
+            value.as_bool().ok_or_else(|| GatewayError::with_status(
+                502, "无法检查凭证有效期，插件返回的结果无效。",
+            ).with_code("credential_refresh_check_failed"))
         })
     }
 
@@ -1072,20 +1151,12 @@ impl ProviderAdapter for RpcAdapter {
 
     fn ensure_access_token<'a>(
         &'a self,
-        store: &'a AccountStore,
+        _store: &'a AccountStore,
         account_id: &'a str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if matches!(self.id, "codearts" | "cline-free") && self.metadata().host.options.wasm.is_some()
-                && self.supports_refresh() && self.credentials_expiring_async(store, account_id).await {
-                // CodeArts 旧/手工材料没有登记时，尚未到期的访问仍可只读使用；不据临期补建续期资格。
-                // 已登记后的真实换证失败继续报错，不能沿用旧值冒充本次换证成功。
-                if self.id != "codearts" || super::rpc_refresh::readiness(store, self.id, account_id).await.is_ok() {
-                    return self.refresh_access_token(store, account_id).await;
-                }
-            }
             let value = self
                 .network(proto::methods::gateway::TOKEN_ENSURE, self.with_account(account_id))
                 .await?;
@@ -1104,19 +1175,9 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let value = if matches!(self.id, "codearts" | "cline-free") && self.metadata().host.options.wasm.is_some() {
-                let execution = self.execution().await?;
-                super::rpc_refresh::readiness(_store, self.id, account_id).await?;
-                let params = self.with_account(account_id);
-                let result = if self.id == "cline-free" {
-                    if _store.plugin_account(account_id).is_some_and(|record| record["desktop"] == true) {
-                        execution.host.call_wasm_cline_desktop_refresh(params, NETWORK_TIMEOUT).await
-                    } else { execution.host.call_wasm_cline_free_refresh(params, NETWORK_TIMEOUT).await }
-                } else { execution.host.call_wasm_codearts_refresh(params, NETWORK_TIMEOUT).await };
-                result.map_err(|error| rpc_error(self.id, error, proto::methods::gateway::TOKEN_REFRESH))?
-            } else {
-                self.network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id)).await?
-            };
+            let value = self
+                .network(proto::methods::gateway::TOKEN_REFRESH, self.with_account(account_id))
+                .await?;
             value
                 .as_str()
                 .map(str::to_string)
@@ -1607,43 +1668,19 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<Option<proto::LoginStart>, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if !options.is_object() {
-                return Err(GatewayError::bad_request("登录参数必须是 JSON 对象"));
-            }
-            // method 保留旧 browser 契约；具体 OAuth / API 方法由 payload 中
-            // 的 methodIndex 决定。旧 SDK 只会将 method 与 payload 交给 provider。
-            let params = serde_json::json!({
-                "provider": self.id,
-                "method": "browser",
-                "proxy": options.get("proxy").cloned().unwrap_or(Value::Null),
-                "proxy_override": options.get("proxy").is_some(),
-                "payload": options,
-            });
-            // 直接授权入口可能先向上游注册 OAuth 客户端，使用网络请求超时。
-            let value = self.network(proto::methods::gateway::LOGIN_START, params).await?;
-            if value.is_null() {
-                return Ok(None);
-            }
-            if self.host.options.script {
-                if let (Some(flow), Some(ui)) = (value.get("flow").and_then(Value::as_str), value.get("script_login")) {
-                    super::script::remember_login(self.id, flow, ui)
-                        .map_err(|message| GatewayError::with_status(502, message))?;
-                }
-            }
-            if self.host.options.wasm.is_some() {
-                if let (Some(flow), Some(ui)) = (value.get("flow").and_then(Value::as_str), value.get("login_ui")) {
-                    super::script::remember_login(self.id, flow, ui)
-                        .map_err(|message| GatewayError::with_status(502, message))?;
-                }
-            }
-            let start: proto::LoginStart = serde_json::from_value(value).map_err(|_| {
-                GatewayError::with_status(502, "插件返回的登录启动信息无法解析")
-            })?;
-            if start.flow.trim().is_empty() {
-                return Err(GatewayError::with_status(502, "插件没有返回登录流程 id"));
-            }
-            // 空 URL 是本机 / 自动登录，不代表成功；统一由路由登记任务并轮询。
-            Ok(Some(start))
+            self.run_login_flow_start(options, None).await
+        })
+    }
+
+    fn build_login_flow_with_options_cancellable<'a>(
+        &'a self,
+        options: Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<proto::LoginStart>, GatewayError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.run_login_flow_start(options, Some(cancel)).await
         })
     }
 
@@ -2068,17 +2105,6 @@ impl RpcAdapter {
                 "账号库尚未就绪，无法保存登录结果",
             ));
         };
-        if let Some(completed) = super::wasm::codearts_login::take(self.id, account) {
-            let origin = store.prepare_codearts_enrollment_origin().map_err(|_| GatewayError::with_status(503,"CodeArts 新登录的账号存储不可用"))?;
-            return match origin.commit_new_login(completed, proxy) {
-                crate::server::core::account_store::credential_version::EnrollmentCommitOutcome::Committed {receipt,..} => Ok(receipt.account().to_string()),
-                _ => Err(GatewayError::with_status(503,"CodeArts 登录已完成，但保存未确认；不会再次交换授权码")),
-            };
-        }
-        if self.id == "codearts" && self.metadata().host.options.wasm.is_some()
-            && account.secret["refresh_token"].as_str().is_some_and(|token| !token.is_empty()) {
-            return Err(GatewayError::with_status(503, "CodeArts 新授权保存来源未确认，未改用普通导入或再次交换授权码"));
-        }
         let id = account.identity.clone();
         let name = account
             .public

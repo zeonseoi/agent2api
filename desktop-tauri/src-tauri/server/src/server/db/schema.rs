@@ -62,17 +62,6 @@
 
 use rusqlite::Connection;
 
-pub(crate) const CLINE_FREE_REFRESH_SLOT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS main.cline_free_refresh_slots (
-    account_id TEXT NOT NULL PRIMARY KEY
-        CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
-    identity_key TEXT NOT NULL UNIQUE
-        CHECK (typeof(identity_key) = 'text' AND octet_length(identity_key) = 64 AND identity_key NOT GLOB '*[^0-9a-f]*'),
-    payload TEXT NOT NULL
-        CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
-) WITHOUT ROWID;
-";
-
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod tests;
@@ -215,6 +204,9 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 换机时还会被旧凭据覆盖。保留键的身份让 `cloud_sync::snapshot` 的键筛选
     // 天然排除它，不必再维护一份「别同步这个键」的清单。
     "cloudSync",
+    // 上游客户端版本号的持久化缓存、同步排期与手动冷却（core::upstream_versions）。
+    // 属于本机同步状态而非配置项；不进云同步，也不能在修改普通配置时被误删。
+    "upstreamVersionCache",
 ];
 
 /// 这个键是否属于「其它零散状态」（即不归网关配置管）。
@@ -364,18 +356,6 @@ pub fn is_reserved(key: &str) -> bool {
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
 pub const SCHEMA_VERSION: i64 = 30;
-
-/// CodeArts 未开放发送槽的封闭 DDL；只在其原连接耐久事务内按需建立空表。
-/// 尚未登记启动迁移或可信首次纳管，不改 user_version，也不因建表补任何 Ready 行。
-/// 账号、槽代次与状态均绑定在加密 payload 内；不存刷新令牌或 DPoP 私钥。
-pub(crate) const CODEARTS_REFRESH_SLOT_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS main.codearts_refresh_slots (
-  account_id TEXT NOT NULL PRIMARY KEY
-    CHECK (typeof(account_id) = 'text' AND octet_length(account_id) BETWEEN 1 AND 512),
-  payload TEXT NOT NULL
-    CHECK (typeof(payload) = 'text' AND octet_length(payload) BETWEEN 1 AND 8192)
-) WITHOUT ROWID;
-";
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///

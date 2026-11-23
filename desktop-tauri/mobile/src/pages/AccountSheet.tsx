@@ -1,4 +1,5 @@
 import { useAccountUsage } from '../hooks/useAccountUsage'
+import { credentialRefreshMessage } from '../../../ui-shared/plugin-login-refresh-message'
 import { useEffect, useState } from 'react'
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle , Input, Button } from '@ui'
 import { Icon } from '../components/Icon'
@@ -18,7 +19,6 @@ import {
 import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
 import { usageText } from '../lib/usage'
-import { AccountQueryRecovery } from './accounts/AccountQueryRecovery'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
@@ -48,7 +48,6 @@ export function AccountSheet({
   const account: Account | null = details && initialAccount && details.id === initialAccount.id ? { ...initialAccount, ...details } : initialAccount
   const now = useDisplayClock()
   const [busy, setBusy] = useState('')
-  const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const open = Boolean(account)
@@ -77,7 +76,7 @@ export function AccountSheet({
   }, [accountId])
 
   const run = async (kind: string, task: () => Promise<unknown>, success: string): Promise<boolean> => {
-    if (serverIdentity() !== identity || recoveryBusy) return false
+    if (serverIdentity() !== identity) return false
     setBusy(kind)
     try {
       await task()
@@ -86,7 +85,7 @@ export function AccountSheet({
       onChanged()
       return true
     } catch (error) {
-      if (serverIdentity() === identity) store.toast(error instanceof Error ? error.message : String(error), 'err')
+      if (serverIdentity() === identity) store.toast(credentialRefreshMessage(error instanceof Error ? error.message : String(error), t), 'err')
       return false
     } finally {
       if (serverIdentity() === identity) setBusy('')
@@ -156,7 +155,7 @@ export function AccountSheet({
   const canQueryUsage = Boolean(account && supportsUsage(account))
 
   return (
-    <Sheet open={open} onOpenChange={next => { if (!next && !recoveryBusy) onClose() }}>
+    <Sheet open={open} onOpenChange={next => { if (!next) onClose() }}>
       <SheetContent>
         <SheetHeader>
           <SheetTitle>{t('账号详情')}</SheetTitle>
@@ -398,9 +397,6 @@ export function AccountSheet({
                 ) : null}
               </div>
 
-              {['officeace', 'cline-free'].includes(account.provider || '') ? <AccountQueryRecovery account={account}
-                disabled={Boolean(busy)} onBusyChange={setRecoveryBusy} onChanged={onChanged} onQuery={usage.query} /> : null}
-
               {limits.length || cooldown ? (
                 <>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 2px' }}>
@@ -455,7 +451,7 @@ export function AccountSheet({
           {canQueryUsage ? <Button size='touch' variant='outline'
             type='button'
             className='m-btn m-ghost w-full'
-            disabled={usage.starting || Boolean(busy) || recoveryBusy || !account}
+            disabled={usage.starting || Boolean(busy) || !account}
             onClick={() => void usage.query()}
           >
             <Icon name='wallet' />
@@ -467,7 +463,7 @@ export function AccountSheet({
           <Button size='touch' variant='default'
             type='button'
             className='m-btn w-full'
-            disabled={Boolean(busy) || recoveryBusy || !account}
+            disabled={Boolean(busy) || !account}
             onClick={() => account && void run('refresh', () => refreshAccount(account.id), account.canSyncCredentials === true ? t('登录态已刷新') : t('凭证已刷新'))}
           >
             <Icon name='refresh' />
@@ -478,7 +474,7 @@ export function AccountSheet({
               type='button'
               className='m-btn m-ghost w-full'
               style={{ flex: 1 }}
-              disabled={busy === 'toggle' || recoveryBusy || !account}
+              disabled={busy === 'toggle' || !account}
               onClick={() =>
                 account &&
                 void run(
@@ -495,7 +491,7 @@ export function AccountSheet({
               type='button'
               className='m-btn m-danger w-full'
               style={{ flex: 1 }}
-              disabled={busy === 'delete' || recoveryBusy || !account}
+              disabled={busy === 'delete' || !account}
               onClick={() => void remove()}
             >
               <Icon name='trash' />

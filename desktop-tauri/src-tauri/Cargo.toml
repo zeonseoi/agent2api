@@ -3,7 +3,7 @@ name = "workbuddy-proxy-desktop"
 # workspace 里还有 server 的 agent2api-server 二进制；`tauri dev` 的
 # `cargo run` 不带 --bin，缺这一行会报「could not determine which binary」。
 default-run = "workbuddy-proxy-desktop"
-version = "3.5.0-beta.3"
+version = "3.5.0-beta.7"
 description = "Agent2API 桌面端 — AI 路由网关与 Agent 客户端接管"
 authors = ["Agent2API"]
 edition = "2021"
@@ -207,7 +207,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
 panic = "abort"
-codegen-units = 1
-lto = true
+# 保持较优体积优化的同时放开并行编译与 ThinLTO，避免巨型单 crate 把单核和链接时间拖到数十分钟
+codegen-units = 8
+lto = "thin"
 opt-level = "s"
 strip = true

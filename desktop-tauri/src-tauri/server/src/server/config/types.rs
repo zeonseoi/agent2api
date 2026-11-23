@@ -491,8 +491,10 @@ pub const KEY_LOGS_AUTO_REFRESH: &str = "logsAutoRefresh";
 pub const KEY_REQUESTS_AUTO_REFRESH: &str = "requestsAutoRefresh";
 /// 报表页自动刷新在 `scheduledTasks` 下的子键（同上）
 pub const KEY_REPORT_AUTO_REFRESH: &str = "reportAutoRefresh";
-/// 软件版本检查在 `scheduledTasks` 下的子键（后端定时向 GitHub 查最新发布版本）
+/// 软件版本检查在 `scheduledTasks` 下的子键（后端定时向官网查最新发布版本）
 pub const KEY_UPDATE_CHECK: &str = "updateCheck";
+/// Magpie 插件清单与更新检查在 `scheduledTasks` 下的子键
+pub const KEY_MAGPIE_PLUGIN_CHECK: &str = "magpiePluginCheck";
 
 /// 凭证维护默认间隔（分钟）：与改造前的硬编码 600 秒一致
 pub const DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES: i64 = 10;
@@ -502,23 +504,22 @@ pub const DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES: i64 = 10;
 /// 上游（见 `providers::workbuddy` 的 `refresh_models`），间隔太密等于给上游
 /// 添无谓的负载。一小时的粒度对「模型清单变了没」这个问题足够。
 pub const DEFAULT_MODEL_REFRESH_MINUTES: i64 = 60;
-/// 两个前端自动刷新的默认间隔（秒）：每秒一次。
-///
-/// 比改造前的硬编码 10 秒密得多，这是有意的：两条任务都只在**对应页面可见时**
-/// 才请求（`document.hidden` 与当前页都判过），离开页面就完全静默，所以
-/// 「密」的代价只落在用户正盯着那一页的时候 —— 而那正是他想要实时的时刻。
-/// 两条接口都是本地读写（一条读日志库、一条查统计库），不出网。
-pub const DEFAULT_LOGS_AUTO_REFRESH_SECONDS: i64 = 1;
-pub const DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS: i64 = 1;
+/// 两个前端自动刷新的默认间隔（秒）：放缓为 5 秒作为兜底/节流节拍；
+/// 日志与请求日志页优先由增量事件驱动按需刷新，空闲期不再每秒轮询数据库。
+pub const DEFAULT_LOGS_AUTO_REFRESH_SECONDS: i64 = 5;
+pub const DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS: i64 = 5;
 pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
 /// 软件版本检查默认间隔（分钟）：每 20 分钟查一次 GitHub 最新发布。
 ///
-/// 20 分钟 = 3 次/小时，相对匿名限额（60 次/小时，且**按出口 IP 计** —— 同一
-/// 出口下的其它程序共用这份额度）留足余量，又能让新版本的提示在一刻钟量级内
-/// 出现。**这个默认值只影响「没配过间隔」的情形**：已经保存过
+/// 默认软件更新自动检查间隔（分钟）：4 小时。
+///
+/// 更新策略与发布列表改为优先走静态 CDN 后仍保留 4 小时默认轮询（可通过设置界面调整），
+/// 在兼顾版本提示及时性的同时避免频繁后台唤醒与流量消耗。**这个默认值只影响「没配过间隔」的情形**：已经保存过
 /// `scheduledTasks.updateCheck.interval` 的配置按原值跑（`interval_field`
 /// 只在键缺失或越界时才回落到默认），所以调整它不会改写老用户的设置。
-pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 20;
+pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 240;
+/// Magpie 插件清单与更新检查默认间隔（分钟）：6 小时。
+pub const DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES: i64 = 360;
 
 /// 间隔型任务的取值范围。上下限分两套（分钟 / 秒），因为两类任务的合理区间
 /// 差着量级：后端维护任务按分钟（1 分钟～1 天），前端刷新按秒（1 秒～10 分钟）。
@@ -554,6 +555,7 @@ pub struct ScheduledSettings {
     pub requests_auto_refresh: IntervalTask,
     pub report_auto_refresh: IntervalTask,
     pub update_check: IntervalTask,
+    pub magpie_plugin_check: IntervalTask,
 }
 
 impl Default for ScheduledSettings {
@@ -582,6 +584,10 @@ impl Default for ScheduledSettings {
             update_check: IntervalTask {
                 enabled: true,
                 interval: DEFAULT_UPDATE_CHECK_MINUTES,
+            },
+            magpie_plugin_check: IntervalTask {
+                enabled: true,
+                interval: DEFAULT_MAGPIE_PLUGIN_CHECK_MINUTES,
             },
         }
     }

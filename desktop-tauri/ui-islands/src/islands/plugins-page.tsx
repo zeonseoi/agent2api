@@ -10,7 +10,8 @@ import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
 import { api, bridge, errorMessage, pluginDescription, pluginName, toast } from './plugins-shared'
-import { clampMaxPackBytes, LEGACY_MAX_PACK_BYTES, PluginFileInstallDialog, usePluginFileInstall } from './plugins-file-install'
+import { clampMaxPackBytes, LEGACY_MAX_PACK_BYTES, PluginFileInstallDialog, PluginFileInstallProgress, usePluginFileInstall } from './plugins-file-install'
+import { pluginOperationNotice } from '../../../ui-shared/plugins'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
 import { ScriptPluginsPanel } from '../../../ui-shared/plugins-scripts'
@@ -28,6 +29,8 @@ import { applicablePluginItems, missingPluginItems, packSelectionKey, pluginBatc
 import { usePluginBatch } from '../../../ui-shared/plugins-batch-runner'
 import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
+import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
+import { summarizeNetworkError } from '../../../ui-shared/updates'
 import '../styles/plugins-page.css'
 
 type SourceFilter = PluginSourceFilter
@@ -103,10 +106,8 @@ function PluginsPage(): React.ReactElement {
           if (seenOperations.current.has(key)) continue
           seenOperations.current.add(key)
           if (Date.now() - operation.updatedAt > 30_000) continue
-          if (operation.error) toast(operation.error, 'err')
-          else if (operation.hostError) toast(operation.hostError, 'err')
-          else if (operation.result?.installNotice) toast(t(operation.result.installNotice), 'ok')
-          else if (operation.done) toast(t('插件包已安装到 v{version}', { version: operation.version }), 'ok')
+          const notice = pluginOperationNotice(next, operation, t)
+          if (notice) toast(notice.message, notice.kind)
         }
       } catch (cause) {
         if (mounted.current) setError(errorMessage(cause))
@@ -148,7 +149,7 @@ function PluginsPage(): React.ReactElement {
         api('GET', '/api/plugins/scripts/check').catch(() => undefined),
       ])
       await load()
-      if (result.error) toast(result.reason || t('检查更新失败'), 'err')
+      if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
   }
 
@@ -156,7 +157,7 @@ function PluginsPage(): React.ReactElement {
     await run('refresh', async () => {
       const result = await api<ReleaseState>('GET', '/api/plugins/release')
       await load()
-      if (result.error) toast(result.reason || t('检查更新失败'), 'err')
+      if (result.error) toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
     })
   }
 
@@ -208,7 +209,9 @@ function PluginsPage(): React.ReactElement {
   const detailsInstallable = Boolean(detailsItem?.version && !detailsItem.error
     && detailsItem.platforms.some(platform => platform.target === 'wasm32-unknown-unknown'))
   const installedIds = new Set(packs.map(pack => pack.id))
-  const storePlugins = store.filter(item => !installedIds.has(item.id))
+  // 当前通道拿不到可安装版本的插件不进商店列表，避免正式版用户看到满屏「暂未发布」。
+  const unpublishedCount = store.filter(item => !installedIds.has(item.id) && !item.version).length
+  const storePlugins = store.filter(item => !installedIds.has(item.id) && Boolean(item.version))
   const operations = payload?.operations || []
   const active = operations.some(operation => operation.active)
   const target = payload?.target || ''
@@ -312,8 +315,11 @@ function PluginsPage(): React.ReactElement {
         <PluginPageToolbar source={source} status={status} search={search} count={countMatching}
           selecting={selecting} locked={locked} checking={busy === 'check' || catalog?.checking === true}
           scriptsAvailable={Boolean(scripts)} scriptActive={scripts?.operation.active === true}
+          updateCount={pendingUpdates.length} updateDisabled={locked || active || scripts?.operation.active === true}
           onSource={setSource} onStatus={setStatus} onSearch={setSearch}
-          onSelect={() => { setSelecting(value => !value); setSelected(new Set()) }} onFile={fileInstall.show} onMissing={() => setMissingOpen(true)}
+          onSelect={() => { setSelecting(value => !value); setSelected(new Set()) }}
+          onUpdateAll={() => confirmBatch('update', pendingUpdates)}
+          onFile={fileInstall.show} onMissing={() => setMissingOpen(true)}
           onRefresh={() => void refreshStore()} onCheck={() => void check()} onSettings={() => setSettingsOpen(true)}
           onScript={() => setScriptInstallRequest(value => value + 1)} onDiagnostics={() => setDiagnosticsOpen(true)} />
         {error || syncError ? <Alert variant='destructive' className='break-words'>{error || syncError}</Alert> : null}
@@ -321,18 +327,17 @@ function PluginsPage(): React.ReactElement {
           accounts={missingAccounts} onOpen={() => setMissingOpen(true)} t={t} /> : null}
         {selecting ? <PluginBatchToolbar items={batchItems} visibleKeys={shownKeys.filter(key => !batchItems.find(item => item.key === key)?.active)}
           selected={selected} disabled={locked} onSelection={changeSelection} onAction={confirmBatch}
-          onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : pendingUpdates.length ? <div className='plugins-update-summary'>
-          <span>{t('有 {count} 个插件可更新', { count: pendingUpdates.length })}</span>
-          <Button variant='link' size='xs' disabled={locked || active || scripts?.operation.active === true} onClick={() => confirmBatch('update', pendingUpdates)}>{t('全部更新')}</Button>
-        </div> : null}
+          onExit={() => { setSelecting(false); setSelected(new Set()) }} t={t} /> : null}
         {batch.task ? <PluginBatchProgress task={batch.task} t={t} onClose={batch.clear}
           onRetry={items => confirmBatch(batch.task!.action, items)} /> : null}
-        {!fileInstall.open && fileInstall.results.length ? <div className='plugins-update-summary'><span>{fileInstall.running ? t('正在安装本地插件包…') : t('本地安装结果')}</span><Button variant='link' size='xs' onClick={() => fileInstall.setOpen(true)}>{t('查看详情')}</Button></div> : null}
+        {fileInstall.backgroundVisible ? <PluginFileInstallProgress model={fileInstall} t={t} /> : null}
       </div>
       <div ref={listRef} className='plugins-scroll-list'>
       {showNative && (installedRows.length > 0 || storeRows.length > 0) ? <section className='@container/plugin-gallery min-w-0 shrink-0' aria-label={t('Agent2API 社区')}>
         <PluginSectionHeading t={t} title={t('Agent2API 社区')} count={installedRows.length + storeRows.length}
           hint={t('独立插件，来自项目插件仓库')} actions={selecting ? <Button variant='link' size='xs' disabled={locked} onClick={() => selectGroup('pack')}>{t('全选本组')}</Button> : null} />
+        <PluginCatalogStatus catalog={catalog} refreshing={busy === 'refresh' || busy === 'check' || catalog?.checking === true}
+          disabled={locked} onRetry={refreshStore} t={t} />
         <div className={PLUGIN_GRID_CLASS}>
           {installedRows.map(pack => {
             const operation = operations.find(item => item.id === pack.id)
@@ -354,9 +359,13 @@ function PluginsPage(): React.ReactElement {
         <EmptyTitle>{!payload || (!hasAny && catalog?.checking) ? t('正在读取插件列表…')
           : hasAny ? t('没有符合筛选条件的插件') : t('暂无可安装的插件')}</EmptyTitle>
         <EmptyDescription>{hasAny ? t('换一组筛选条件，或把来源和状态都切回「全部」。')
-          : errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</EmptyDescription>
+          : summarizeNetworkError(catalog?.reason, t).summary || (unpublishedCount > 0
+            ? t('插件发布后会显示在这里。')
+            : t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。'))}</EmptyDescription>
         {payload && hasAny && filtersActive ? <Button variant='outline' size='sm' className='mt-2'
-          onClick={clearFilters}>{t('清除筛选')}</Button> : null}
+          onClick={clearFilters}>{t('清除筛选')}</Button>
+          : payload && !hasAny && catalog?.error ? <Button variant='outline' size='sm' className='mt-2' disabled={locked || catalog.checking}
+            onClick={() => void refreshStore()}>{t('刷新重试')}</Button> : null}
       </Empty></Card> : null}
       {scripts ? <div className='shrink-0'><ScriptPluginsPanel state={scripts} t={t} disabled={locked} query={search}
         resolveIcon={resolveIcon} onOpenExternal={openExternal}
@@ -373,7 +382,7 @@ function PluginsPage(): React.ReactElement {
     {batchConfirm ? <PluginBatchConfirm key={`${batchConfirm.action}:${batchConfirm.items.map(item => item.key).join('|')}`}
       action={batchConfirm.action} items={batchConfirm.items} disabled={locked} t={t} onClose={() => setBatchConfirm(null)}
       onConfirm={() => { const { action, items } = batchConfirm; setBatchConfirm(null); void batch.execute(action, items) }} /> : null}
-    {missingOpen ? <PluginMissingDialog required={missing.required} optional={missing.optional} unresolved={missing.unresolved}
+    {missingOpen ? <PluginMissingDialog required={missing.required} unresolved={missing.unresolved}
       disabled={locked} t={t} onClose={() => setMissingOpen(false)} onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }} /> : null}
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
     <PluginDiagnostics open={diagnosticsOpen} payload={payload} onClose={() => setDiagnosticsOpen(false)} />

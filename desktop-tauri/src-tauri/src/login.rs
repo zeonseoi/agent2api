@@ -61,6 +61,7 @@ use crate::state::ActiveLogin;
 
 mod result;
 mod managed_wait;
+pub(crate) mod managed_window;
 
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -685,7 +686,7 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // `providers/qoder/authorize.rs`）—— 那条导航被拦下的症状同样是
         // 「授权成功但永远收不到码」。与 Qoder 同组，必须是 None。
         "catpaw" | "qoder" | "qoder-intl" | "qwenwork" | "qwenwork-intl" | "cline-free"
-        | "cline-pass" | "autoclaw"
+        | "autoclaw"
         | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
         | "kuku" | "antigravity" | "officeace" | "orcaterm" | "atomcode" | "lobsterai" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
@@ -811,7 +812,6 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         "qwenwork-intl" => Ok("qwenwork-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
-        "cline-pass" => Ok("cline-pass"),
         "autoclaw" | "autoclaw-intl" => Ok("autoclaw-intl"),
         // Accio 两个地区：授权地址由后端适配器拼（PKCE），壳侧只负责开窗口与
         // 轮询 —— 与 workbuddy / Qoder 同一条路。地区由 **provider 本身**决定
@@ -1055,21 +1055,63 @@ fn task_gone(message: &str) -> bool {
 }
 
 /// 通知后端中止轮询；用于用户关窗/点取消
-pub async fn cancel(app: &AppHandle) -> Result<(), String> {
+pub async fn cancel(app: &AppHandle, target_state: Option<&str>) -> Result<bool, String> {
+    let target = target_state.map(str::trim).filter(|s| !s.is_empty());
     let active = current_login(app);
+    let control = app
+        .state::<crate::state::AppState>()
+        .login_cancel
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
     if let Some(active) = active {
+        let matched_control = control.as_ref().filter(|item| item.state == active.state);
+        if let Some(expected) = target {
+            let matches_request = matched_control
+                .is_some_and(|item| !item.request_id.is_empty() && item.request_id == expected);
+            if active.state != expected && !matches_request {
+                if !expected.starts_with("starting-") && !expected.starts_with("req-") {
+                    let res = gateway::call(
+                        "POST",
+                        "/api/session/login/cancel",
+                        Some(&json!({ "state": expected })),
+                    )
+                    .await;
+                    return Ok(res
+                        .ok()
+                        .and_then(|v| v.get("canceled").and_then(Value::as_bool))
+                        .unwrap_or(false));
+                }
+                return Ok(false);
+            }
+        }
+        if let Some(item) = matched_control {
+            item.cancel.cancel();
+        }
         if let Some(window) = app.get_webview_window(&login_window_label(&active.state)) {
             let _ = window.destroy();
         }
         clear_active_login(app, &active.state);
-        let _ = gateway::call(
+        let mut body = json!({ "state": active.state });
+        if let Some(item) = matched_control.filter(|item| !item.request_id.is_empty()) {
+            body["requestId"] = json!(item.request_id);
+        }
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&body)).await;
+        return Ok(true);
+    }
+    if let Some(expected) = target {
+        let res = gateway::call(
             "POST",
             "/api/session/login/cancel",
-            Some(&json!({ "state": active.state })),
+            Some(&json!({ "state": expected, "requestId": expected })),
         )
         .await;
+        return Ok(res
+            .ok()
+            .and_then(|v| v.get("canceled").and_then(Value::as_bool))
+            .unwrap_or(false));
     }
-    Ok(())
+    Ok(false)
 }
 
 /// 启动插件声明的登录方式，保留本机窗口捕获与受控托管流程。
@@ -1107,6 +1149,14 @@ pub async fn start_with_options(
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|_| "无法生成登录流程标识")?;
     let reservation = format!("starting-{}", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+    let request_id = options
+        .get("requestId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| reservation.clone());
+    let cancel_signal = crate::state::LoginCancel::new();
     {
         let state = app.state::<crate::state::AppState>();
         let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
@@ -1117,6 +1167,13 @@ pub async fn start_with_options(
             state: reservation.clone(), edition: edition.clone(), mode: mode.clone(),
             provider: provider.into(),
         });
+        if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+            *cancel_guard = Some(crate::state::PendingLoginControl {
+                state: reservation.clone(),
+                request_id: request_id.clone(),
+                cancel: cancel_signal.clone(),
+            });
+        };
     }
     emit_login_state(app, LoginState {
         active: true, provider: Some(provider.into()), edition: Some(edition.clone()), mode: Some(mode.clone()),
@@ -1124,19 +1181,44 @@ pub async fn start_with_options(
     let mut request = json!({
         "provider": provider, "edition": edition, "mode": mode,
         "socialRestore": social_restore, "options": options,
+        "requestId": request_id,
     });
     // HTTP 新契约带完整 options，同时兼容当前 API 的平铺读取。缺省字段不补
     // null（inputs 缺省是 {}，proxy 的显式 null 则必须保留为直连）。
     for key in ["methodIndex", "inputs", "proxy", "locale"] {
         if let Some(value) = options.get(key) { request[key] = value.clone(); }
     }
+    if provider == "raccoon" && mode == "external" {
+        request["callbackOrigin"] = json!(format!("http://127.0.0.1:{}", gateway::proxy_port()));
+    }
     let request_generation = crate::panel_session::revision();
     let request_started = tokio::time::Instant::now();
-    let response = gateway::call("POST", "/api/session/login/start", Some(&request)).await;
+    // 稍微宽于后端插件 RPC 的 120s 超时，确保真实插件/本地 CLI 错误先返回而不是在 60s 被网关调用超时掩盖。
+    let response = tokio::select! {
+        biased;
+        _ = cancel_signal.wait() => {
+            clear_active_login(app, &reservation);
+            return Ok(json!({ "ok": false, "canceled": true }));
+        }
+        res = gateway::call_with_timeout("POST", "/api/session/login/start", Some(&request), 135_000) => res,
+    };
     let mut started = match response {
         Ok(value) => value,
-        Err(error) => { clear_active_login(app, &reservation); return Err(error); }
+        Err(error) => {
+            clear_active_login(app, &reservation);
+            if cancel_signal.is_cancelled() {
+                return Ok(json!({ "ok": false, "canceled": true }));
+            }
+            return Err(error);
+        }
     };
+    if cancel_signal.is_cancelled() {
+        if let Some(flow) = started.get("state").or_else(|| started.get("flow")).and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+            let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow, "requestId": request_id }))).await;
+        }
+        clear_active_login(app, &reservation);
+        return Ok(json!({ "ok": false, "canceled": true }));
+    }
     if started.get("managedLogin").and_then(Value::as_bool) == Some(true) {
         if crate::panel_session::revision() != request_generation {
             clear_active_login(app, &reservation);
@@ -1180,6 +1262,15 @@ pub async fn start_with_options(
                 *guard = Some(ActiveLogin {
                     state: flow.into(), edition: edition.clone(), mode: mode_id.into(), provider: provider.into(),
                 });
+                if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+                    if cancel_guard.as_ref().is_some_and(|item| item.state == reservation) {
+                        *cancel_guard = Some(crate::state::PendingLoginControl {
+                            state: flow.into(),
+                            request_id: request_id.clone(),
+                            cancel: cancel_signal.clone(),
+                        });
+                    }
+                }
                 true
             }
             _ => false,
@@ -1215,14 +1306,18 @@ fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instruction
     let callback_input = if manual_callback && started.get("callbackInput").and_then(Value::as_str) == Some("code") {
         "code"
     } else { "url" };
-    let progress = json!({
+    let managed = started["managedLogin"] == true;
+    let mut progress = json!({
         "active": true, "provider": active.provider, "edition": active.edition, "mode": active.mode,
         "state": flow, "manualCallback": manual_callback, "callbackInput": callback_input,
-        "managedLogin": started["managedLogin"] == true, "methodIndex": started["methodIndex"],
+        "managedLogin": managed, "methodIndex": started["methodIndex"],
         "remainingMs": started["remainingMs"], "timeoutMs": started["timeoutMs"],
-        "phase": started["phase"], "saved": started["saved"],
         "instructions": instructions, "hint": hint,
     });
+    if managed {
+        progress["phase"] = started["phase"].clone();
+        progress["saved"] = started["saved"].clone();
+    }
     let _ = app.emit("login:progress", &progress);
     // 兼容仅订阅 onLoginState 的共享 UI 桥，新增字段不会改变旧状态结构。
     let _ = app.emit("login:state", &progress);
@@ -1336,6 +1431,7 @@ impl DynamicNavigation {
 
     fn allows(&self, url: &url::Url) -> bool {
         if !url.username().is_empty() || url.password().is_some() { return false; }
+        if url.as_str() == "about:blank" { return true; }
         let Some(host) = url.host_str() else { return false; };
         match url.scheme() {
             "https" => self.hosts.is_empty() || self.hosts.iter().any(|item| {
@@ -1344,10 +1440,7 @@ impl DynamicNavigation {
             // HTTP 只用于授权地址实际登记的回环 callback，或插件明确申报的
             // 本机登录页；仅白名单写 localhost 不够。
             "http" => matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-                && (self.matches_callback(url) || self.matches_loopback_page(url))
-                && (self.hosts.is_empty() || self.hosts.iter().any(|item| {
-                    host.eq_ignore_ascii_case(item) || host.to_ascii_lowercase().ends_with(&format!(".{item}"))
-                })),
+                && (self.matches_callback(url) || self.matches_loopback_page(url)),
             _ => false,
         }
     }
@@ -1436,14 +1529,18 @@ async fn run_dynamic_login(
             let popup_state = nav_state.clone();
             let seen = Arc::new(AtomicBool::new(false));
             let nav_seen = seen.clone();
+            let direct_callback = provider == "codearts";
             let capture_doubao = provider == "doubaowork";
-            let built = WebviewWindowBuilder::new(app, login_window_label(flow), WebviewUrl::External(auth))
+            let app_for_popup = app.clone();
+            let window_label = login_window_label(flow);
+            let built = WebviewWindowBuilder::new(app, window_label.clone(), WebviewUrl::External(auth))
                 .data_directory(profile.as_ref().ok_or("登录环境不可用")?.path().to_path_buf())
                 .general_autofill_enabled(false)
                 .title(format!("登录 {} 账号", crate::server::core::providers::label_of(provider)))
                 .inner_size(1100.0, 820.0).min_inner_size(760.0, 560.0).center()
                 .on_navigation(move |url| {
                     if nav_policy.is_callback(url) {
+                        if direct_callback { return true; }
                         if !nav_seen.swap(true, Ordering::SeqCst) {
                             let state = nav_state.clone();
                             let callback = url.as_str().to_string();
@@ -1454,6 +1551,14 @@ async fn run_dynamic_login(
                     nav_policy.allows(url)
                 })
                 .on_new_window(move |url, _| {
+                    if direct_callback && policy.is_callback(&url) {
+                        let handle = app_for_popup.clone();
+                        let label = window_label.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(window) = handle.get_webview_window(&label) { let _ = window.navigate(url); }
+                        });
+                        return tauri::webview::NewWindowResponse::Deny;
+                    }
                     if capture_doubao && crate::doubaowork_login::allowed(&url) && policy.allows(&url) {
                         return tauri::webview::NewWindowResponse::Allow;
                     }
@@ -1926,6 +2031,11 @@ fn clear_active_login(app: &AppHandle, expected_state: &str) {
     if let Ok(mut guard) = state.login.lock() {
         if guard.as_ref().is_some_and(|active| active.state == expected_state) {
             *guard = None;
+            if let Ok(mut cancel_guard) = state.login_cancel.lock() {
+                if cancel_guard.as_ref().is_some_and(|item| item.state == expected_state) {
+                    *cancel_guard = None;
+                }
+            }
             emit_login_state(app, LoginState { active: false, mode: None, edition: None, provider: None });
         }
     };

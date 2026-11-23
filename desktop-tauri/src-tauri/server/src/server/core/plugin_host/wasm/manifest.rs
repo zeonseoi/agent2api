@@ -17,10 +17,10 @@ pub const CAPABILITIES: &[&str] = &[
     "http.account-origin.v1", "runtime.platform.v1", "verification.account.v1", "verification.claim.v1",
     "runtime.architecture.v1", "runtime.client-fingerprint.v1", "request.context.v1",
     "login.managed.v1", "login.loopback.v1", "login.captcha.aliyun.v1",
-    "resources.inbound-images.v1", "login.desktop.chatglm.v1", "credential.codearts-refresh.v1", "http.catpaw-turn.v1",
-    "credential.cline-free-refresh.v1", "claim.doubao-tasks.v1", "http.managed-task.v1",
+    "resources.inbound-images.v1", "login.desktop.chatglm.v1", "http.catpaw-turn.v1",
+    "claim.doubao-tasks.v1", "http.managed-task.v1",
     "http.codearts-session.v1", "login.codearts.v1", "desktop.credentials.v1", "http.doubao-turn.v1",
-    "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
+    "crypto.deepseek-pow.v1", "crypto.monkeycode-cap.v1", "desktop.launch.v1", "resources.cookie-file.v1", "credential.kiro-external-refresh.v1", "credentials.legacy-import.v1",
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -49,7 +49,11 @@ pub struct Manifest {
     pub verified: bool,
 }
 
-fn memory_default() -> usize { 64 }
+pub const MIN_MEMORY_MIB: usize = 8;
+pub const DEFAULT_MEMORY_MIB: usize = 128;
+pub const MAX_MEMORY_MIB: usize = 256;
+
+fn memory_default() -> usize { DEFAULT_MEMORY_MIB }
 fn concurrency_default() -> usize { 8 }
 
 #[derive(Clone, Debug)]
@@ -102,9 +106,10 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("http.doubao-turn.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
         ("http.codearts-session.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1"][..]),
         ("login.codearts.v1", &["login.forms.v1", "sessions.v1"][..]),
-        ("desktop.launch.v1", &["accounts.cas.v1", "accounts.identity.v1"][..]),
+        ("desktop.launch.v1", &["accounts.cas.v1"][..]),
         ("desktop.credentials.v1", &["accounts.cas.v1", "login.forms.v1", "native.helpers.v1"][..]),
         ("http.managed-task.v1", &["http.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
+        ("crypto.deepseek-pow.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "clock.v1"][..]),
         ("crypto.monkeycode-cap.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "clock.v1"][..]),
         ("http.catpaw-turn.v1", &["http.v1", "http.timeout.v1", "accounts.cas.v1", "chat.stream.v1", "request.context.v1"][..]),
         ("http.account-origin.v1", &["http.v1", "accounts.cas.v1"][..]),
@@ -117,8 +122,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         ("login.desktop.chatglm.v1", &["login.forms.v1", "accounts.cas.v1"][..]),
         ("catalog.accounts.v1", &["catalog.v1", "accounts.cas.v1"][..]),
         ("accounts.identity.v1", &["accounts.cas.v1"][..]),
-        ("credential.codearts-refresh.v1", &["accounts.cas.v1", "accounts.identity.v1"][..]),
-        ("credential.cline-free-refresh.v1", &["accounts.cas.v1", "accounts.identity.v1"][..]),
         ("claim.doubao-tasks.v1", &["accounts.cas.v1", "accounts.identity.v1", "http.v1", "http.timeout.v1"][..]),
         ("verification.account.v1", &["accounts.cas.v1", "state.v1"][..]),
         ("verification.claim.v1", &["verification.account.v1"][..]),
@@ -138,6 +141,9 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     if (requires("http.codearts-session.v1") || requires("login.codearts.v1")) && manifest.providers[0].id.as_str() != "codearts" {
         return Err("CodeArts 会话和登录能力不能跨提供商使用".into());
     }
+    if requires("crypto.deepseek-pow.v1") && manifest.providers[0].id.as_str() != "deepseek-web" {
+        return Err("DeepSeek 网页验证计算能力不能跨提供商使用".into());
+    }
     if requires("crypto.monkeycode-cap.v1") && !matches!(manifest.providers[0].id.as_str(), "monkeycode" | "monkeycode-intl") {
         return Err("MonkeyCode 官方计算验证不能跨提供商使用".into());
     }
@@ -149,7 +155,7 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
         && (manifest.providers[0].id.as_str() != "raccoon" || !requires("desktop.credentials.v1")) {
         return Err("小浣熊本机续期只能由对应插件通过固定本机凭据入口使用".into());
     }
-    for provider in ["kiro", "autoclaw", "autoclaw-intl", "cline-free", "cline-pass"] {
+    for provider in ["kiro", "autoclaw", "autoclaw-intl", "cline-free"] {
         if super::desktop_credentials::refresh::helper(provider).is_some_and(|helper| spec.helpers.iter().any(|id| id == helper))
             && (manifest.providers[0].id.as_str() != provider || !requires("desktop.credentials.v1")) {
             return Err("本机续期辅助只能由对应提供商通过固定本机凭据入口使用".into());
@@ -191,12 +197,6 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     if requires("http.catpaw-turn.v1") && manifest.providers[0].id.as_str() != "catpaw" {
         return Err("CatPaw固定轮次能力不能跨提供商使用".into());
     }
-    if requires("credential.codearts-refresh.v1") && manifest.providers[0].id.as_str() != "codearts" {
-        return Err("CodeArts固定换证能力不能跨提供商使用".into());
-    }
-    if requires("credential.cline-free-refresh.v1") && manifest.providers[0].id.as_str() != "cline-free" {
-        return Err("Cline Free固定换证能力不能跨额度池使用".into());
-    }
     if requires("claim.doubao-tasks.v1") && manifest.providers[0].id.as_str() != "doubaowork" {
         return Err("豆包任务领奖能力不能跨提供商使用".into());
     }
@@ -230,9 +230,9 @@ pub(crate) fn read_bytes(dir: &Path, manifest: &proto::PackManifest, text: &[u8]
     if requires("http.managed-task.v1") && spec.managed_task.as_ref().is_some_and(|declaration| !declaration.has_profile()) {
         return Err("Wasm 受控任务能力必须声明一个对应地区的固定 profile".into());
     }
-    if !(8..=128).contains(&spec.memory_mib) || !(1..=4096).contains(&spec.concurrency)
+    if !(MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(&spec.memory_mib) || !(1..=4096).contains(&spec.concurrency)
         || spec.concurrency_hard_limit.is_some_and(|limit| !(1..=4096).contains(&limit)) {
-        return Err("Wasm 资源声明超出允许范围（内存 8–128 MiB，并发 1–4096）".into());
+        return Err(format!("Wasm 资源声明超出允许范围（内存 {MIN_MEMORY_MIB}–{MAX_MEMORY_MIB} MiB，并发 1–4096）"));
     }
     if spec.helpers.len() > 8 || spec.helpers.iter().any(|helper| helper.is_empty() || helper.len() > 80
         || !helper.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
@@ -269,6 +269,12 @@ pub fn checked_entry(dir: &Path, entry: &str) -> Result<PathBuf, String> {
 
 impl Options {
     pub(crate) fn source_digest(&self) -> &[u8; 32] { &self.source_digest }
+
+    /// 宿主兜底抬高单次运行内存上限，避免旧包因签名锁定无法修改而卡在 64 MiB。
+    pub(super) fn effective_memory_mib(&self, is_conversation: bool) -> usize {
+        let floor = if is_conversation { MAX_MEMORY_MIB } else { DEFAULT_MEMORY_MIB };
+        self.manifest.memory_mib.max(floor).min(MAX_MEMORY_MIB)
+    }
 
     pub fn allows(&self, capability: &str) -> bool {
         self.manifest.requires.iter().any(|item| item == capability)

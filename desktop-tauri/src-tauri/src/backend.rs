@@ -24,14 +24,14 @@
 
 pub(crate) mod lifecycle;
 
+use std::collections::HashMap;
 #[cfg(windows)]
-use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 // 端口归属查询与进程树结束改用 Win32 API 的原因见 Cargo.toml 里 windows-sys
 // 依赖处的说明：外部命令（taskkill / powershell）的字符串与进程创建行为会被
@@ -71,116 +71,18 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 const HEALTH_INTERVAL: Duration = Duration::from_millis(100);
 
-/// bootstrap 总超时（分钟级：正常 1–2 秒，慢盘实测出现过 46 秒）。
-///
-/// 超过它仍未完成就判定「卡死」并把当前阶段写进失败文案，而不是让界面
-/// 永远停在「网关启动中」—— 没有这条闸门时，bootstrap 里任何一步阻塞都
-/// 没有任何出口（`ensure_ready` 只 await 结果，没有超时）。
-const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// 看门狗节奏：每 30 秒探一次 /health，连续 3 次失败（约 90 秒）判定无响应。
-const WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
-const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
-const WATCHDOG_FAILURES: u32 = 3;
-
 /// 探测本机网关是否已就绪（只看能否拿到 /health 响应）。
 ///
 /// 同时被 `commands::backend_status` 使用（前端启动阶段显示「服务已就绪」提示），
 /// 因此保持为公开函数、语义不变：能拿到 2xx 就算就绪。
 pub async fn is_ready(port: u16) -> bool {
-    let Ok(client) = local_client(HEALTH_TIMEOUT) else {
+    let Ok(client) = local_client() else {
         return false;
     };
     matches!(
-        client.get(format!("http://127.0.0.1:{port}/health")).send().await,
+        client.get(format!("http://127.0.0.1:{port}/health")).timeout(HEALTH_TIMEOUT).send().await,
         Ok(response) if response.status().is_success()
     )
-}
-
-/// 网关无响应看门狗（就绪后启动）。
-///
-/// ── 为什么用 std::thread + 裸 TCP，而不是 tokio 任务 ────────────
-/// 要监视的正是「卡住」本身：如果进程里的 Tokio 工作线程被阻塞任务占满，
-/// 建在同一个运行时上的看门狗任务也会一起停下 —— 它与工作负载一起沉默。
-/// 独立线程 + 原生 TCP 探活不依赖运行时与 HTTP 客户端，即使运行时卡死也能
-/// 在约 90 秒后给出「无响应」，界面据此提供一键重启（进程内重建不可行，
-/// 见 `commands::schedule_app_restart` 的说明）。
-pub fn start_watchdog(app: AppHandle) {
-    let _ = std::thread::Builder::new()
-        .name("gateway-watchdog".to_string())
-        .spawn(move || {
-            let mut failures = 0u32;
-            let mut reported = false;
-            loop {
-                std::thread::sleep(WATCHDOG_INTERVAL);
-                let state = app.state::<AppState>();
-                // 关闭流程一开始（官方 lifecycle 封门）就退出：进程即将结束，
-                // 继续探活只会把「正在退出」误报成「无响应」。
-                let Some(port) = lifecycle::running_port(&state.backend) else { return; };
-                if health_probe(port) {
-                    failures = 0;
-                    if reported {
-                        reported = false;
-                        if let Ok(mut guard) = state.backend.lock() {
-                            guard.unresponsive = false;
-                        }
-                        server::logging::console_line("[Watchdog]", "网关已恢复响应");
-                    }
-                    continue;
-                }
-                failures += 1;
-                if failures >= WATCHDOG_FAILURES && !reported {
-                    reported = true;
-                    if let Ok(mut guard) = state.backend.lock() {
-                        guard.unresponsive = true;
-                    }
-                    server::logging::console_line(
-                        "[Watchdog]",
-                        &format!(
-                            "网关连续 {failures} 次健康检查失败（端口 {port}），判定无响应；可在侧栏重启程序"
-                        ),
-                    );
-                }
-            }
-        });
-}
-
-/// 一次最小健康探针：只读 HTTP 状态行，不依赖任何第三方客户端。
-fn health_probe(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, WATCHDOG_TIMEOUT) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(WATCHDOG_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(WATCHDOG_TIMEOUT));
-    if stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    // 只读到状态行（+ 头部第一段）就够了；对端不吐数据时读超时会把我们放出去
-    let mut response = Vec::with_capacity(256);
-    let mut chunk = [0u8; 128];
-    while response.len() < 1024 {
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => {
-                response.extend_from_slice(&chunk[..read]);
-                if response.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    let head = String::from_utf8_lossy(&response);
-    let Some(status) = head.lines().next() else {
-        return false;
-    };
-    let mut parts = status.split_whitespace();
-    let _protocol = parts.next();
-    parts.next().is_some_and(|code| code.starts_with('2'))
 }
 
 /// 确保后端可用：构造服务状态 → 绑定端口 → 异步 accept 循环 → 本地自检。
@@ -220,23 +122,7 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
     // 「局域网访问」后绑 0.0.0.0，此时免鉴权语义由下面的闸门接管
     // （headless 形态由 agent2api-server 二进制按 AGENT2API_HOST 自行决定）。
     // 数据库迁移和历史回填会阻塞，不能占住处理 IPC 与启动等待的异步线程。
-    // 外层保留 120 秒硬超时：官方 `bootstrap` 等的是独立阻塞任务的结果，
-    // 等待者被取消不丢任务（见 backend/lifecycle 模块头），所以这里超时只是
-    // 「不再等」并让阻塞初始化在下一个阶段边界收手，不会重复初始化。
-    let mut state = match tokio::time::timeout(BOOTSTRAP_TIMEOUT, start.bootstrap(port, host)).await {
-        Ok(result) => result?,
-        Err(_) => {
-            // 不能中断已卡住的那一步，只能让 bootstrap 在下一个阶段边界收手，
-            // 避免它继续做后续初始化（超时文案里带上当前阶段，排障直接定位）
-            server::boot_stage::cancel();
-            let stage = server::boot_stage::current();
-            return Err(StartupFailure::other(format!(
-                "网关启动超时（{} 秒），卡在「{}」阶段。请查看运行日志；重启程序可重试",
-                BOOTSTRAP_TIMEOUT.as_secs(),
-                stage
-            )));
-        }
-    };
+    let mut state = start.bootstrap(port, host).await?;
     start.check_open()?;
 
     // 访问控制与桌面壳使用同一份进程内会话状态。
@@ -271,16 +157,28 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
                 "⚠️  网络访问已开启但尚未配置 API Key：/v1/* 暂时拒绝服务，请在「网关 Key」页创建第一把",
             );
         }
-        // 网页管理面板（可选）：设了 ui_dir 网关就在本端口托管 ui/ 静态目录
-        //（含网页端 bridge），远程浏览器打开 http://<本机IP>:<端口> 即面板；
-        // 不开则保持桌面形态 —— 网关只出 API，界面仍由 Tauri 壳自己出。
+        // 网页管理面板（可选）：开发态直接读源码目录 ui/ 便于热调试；发布版直接复用
+        // Tauri 编译期内嵌进可执行文件的界面资源，不再在安装目录重复放第二份 ui/。
         if lan.lan_panel {
-            match resolve_ui_dir(app) {
-                Some(dir) => state.set_ui_dir(dir),
-                None => server::logging::log(
-                    "[Server]",
-                    "⚠️  网页面板资源缺失：网页管理面板无法托管（重装本程序可恢复），API 转发不受影响",
-                ),
+            if cfg!(debug_assertions) {
+                match resolve_dev_ui_dir() {
+                    Some(dir) => state.set_ui_dir(dir),
+                    None => server::logging::log(
+                        "[Server]",
+                        "⚠️  网页面板资源缺失：开发目录 ui/ 不存在，API 转发不受影响",
+                    ),
+                }
+            } else {
+                use server::EmbeddedUiAssets;
+                let assets = TauriUiAssets::new(app.asset_resolver());
+                if assets.etag("/index.html").is_some() {
+                    state.set_ui_assets(Arc::new(assets));
+                } else {
+                    server::logging::log(
+                        "[Server]",
+                        "⚠️  网页面板内嵌资源缺失：网页管理面板无法托管（重装本程序可恢复），API 转发不受影响",
+                    );
+                }
             }
         }
     }
@@ -315,10 +213,6 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
             crate::panel_session::ensure_local_access().map_err(StartupFailure::other)?;
             start.check_open()?;
             let scope = if lan.lan_access { "，网络访问已开启" } else { "" };
-            server::logging::log(
-                "[Startup]",
-                &format!("启动完成，总用时 {} ms", server::boot_stage::total_ms()),
-            );
             server::logging::log("[Server]", &format!("服务已就绪（127.0.0.1:{port}{scope}）"));
             // 保留原升级清理行为；最终ready在独立启动任务的同一关闭门内发布。
             cleanup_legacy_resources();
@@ -331,25 +225,57 @@ async fn start_once(app: &AppHandle, start: &lifecycle::Startup) -> Result<(), S
     )))
 }
 
-/// 局域网面板托管用的 `ui/` 静态目录（与 headless 同一份界面文件）。
+/// 局域网面板开发态使用的 `ui/` 静态目录。
 ///
-/// release：tauri.conf.json 把 `../ui` 列进了 bundle resources —— 打包器会把
-/// 越出应用目录的 `..` 段映射成 `_up_`（见 tauri-utils `resources.rs` 的目标
-/// 路径规则），所以安装后落在资源目录的 `_up_/ui` 下（Windows NSIS 实测为
-/// `<install>/_up_/ui`）。只找 `ui/` 会永远找不到，面板托管随之静默降级成
-/// 「远程没界面」—— 两个候选都看一遍，把这种布局差异吃在这里。
-/// debug：资源不打包，直接指源码目录（`tauri dev` 时 ui-islands 的构建产物就
-/// 落在那里）。目录不存在返回 None —— 面板托管的缺失只是「远程没界面」，
-/// API 照常工作（headless 对 ui 缺失也是这个取舍）。
-fn resolve_ui_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    if cfg!(debug_assertions) {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui");
-        return dir.is_dir().then_some(dir);
+/// 发布版已改为直接读取随程序打包的嵌入资源（见 [`TauriUiAssets`]），
+/// 不再随安装包分发第二份磁盘 `ui/` 目录。
+fn resolve_dev_ui_dir() -> Option<std::path::PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui");
+    dir.is_dir().then_some(dir)
+}
+
+/// 桌面端内嵌静态资源适配器：把 Tauri 编译期内嵌的 `frontendDist` 暴露给局域网面板。
+struct TauriUiAssets {
+    resolver: tauri::AssetResolver<tauri::Wry>,
+    etags: HashMap<String, String>,
+}
+
+impl TauriUiAssets {
+    fn new(resolver: tauri::AssetResolver<tauri::Wry>) -> Self {
+        let etags = resolver
+            .iter()
+            .map(|(key, bytes)| {
+                let normalized = if key.starts_with('/') {
+                    key.into_owned()
+                } else {
+                    format!("/{key}")
+                };
+                let etag = embedded_etag(&bytes);
+                (normalized, etag)
+            })
+            .collect();
+        Self { resolver, etags }
     }
-    let base = app.path().resource_dir().ok()?;
-    [base.join("_up_").join("ui"), base.join("ui")]
-        .into_iter()
-        .find(|dir| dir.is_dir())
+}
+
+impl server::EmbeddedUiAssets for TauriUiAssets {
+    fn etag(&self, key: &str) -> Option<String> {
+        self.etags.get(key).cloned()
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let trimmed = key.strip_prefix('/').unwrap_or(key);
+        self.resolver.get(trimmed.to_string()).map(|asset| asset.bytes)
+    }
+}
+
+fn embedded_etag(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("W/\"{}-{:x}-{:x}\"", env!("CARGO_PKG_VERSION"), bytes.len(), hash)
 }
 
 /// 查端口上的监听进程（PID、镜像名、路径，以及两个身份标记）。
@@ -706,10 +632,10 @@ fn process_image_path(pid: u32) -> Option<String> {
 
 /// 端口上的服务是否是 WorkBuddy 网关（读 /health 的 product 特征字段）。
 async fn health_reports_workbuddy(port: u16) -> bool {
-    let Ok(client) = local_client(HEALTH_TIMEOUT) else {
+    let Ok(client) = local_client() else {
         return false;
     };
-    let Ok(response) = client.get(format!("http://127.0.0.1:{port}/health")).send().await
+    let Ok(response) = client.get(format!("http://127.0.0.1:{port}/health")).timeout(HEALTH_TIMEOUT).send().await
     else {
         return false;
     };
@@ -793,15 +719,28 @@ fn cleanup_legacy_resources() {
             }
         }
     }
+    // 旧版曾通过 bundle.resources 把 ../ui 拷贝到 _up_/ui；改走内嵌资源后覆盖安装顺手清理旧副本。
+    let legacy_up = install_dir.join("_up_");
+    let legacy_ui = legacy_up.join("ui");
+    if legacy_ui.is_dir() {
+        match std::fs::remove_dir_all(&legacy_ui) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir(&legacy_up);
+                server::logging::log("[Server]", "已清理旧版残留的磁盘界面副本（_up_/ui）");
+            }
+            Err(error) => {
+                server::logging::log(
+                    "[Server]",
+                    &format!("清理旧版磁盘界面副本失败（下次启动再试）: {error}"),
+                )
+            }
+        }
+    }
 }
 
 /// 兼容同步退出入口：只申请关闭，不代表初始化、HTTP或插件清理已完成。
 /// 真正退出/重启的调用方必须改为等待 shutdown_and_wait；本模块不执行最终退出。
 pub fn shutdown(state: &AppState) {
-    // 成长任务到期领取调度是 fork 独有的轮询任务，先停（stop 自身幂等）。
-    // 启动门、面板会话与签到调度的收尾已由官方关闭协调器统一负责
-    // （见 backend/lifecycle/stopping.rs），这里不再重复。
-    server::core::growth_claim_auto::stop_global();
     lifecycle::request_shutdown(&state.backend);
 }
 

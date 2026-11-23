@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle , Card, Collapsible, CollapsibleTrigger, CollapsibleContent } from '@ui'
 import { PageIntro, ErrorNote, Empty, SectionHead } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
+import { pluginOperationNotice } from '../../../ui-shared/plugins'
 import {
   checkPluginUpdates, getPlugins, pluginErrorMessage, refreshPluginCatalog, setPluginEnabled, setPluginProvider,
   startPluginInstall, uninstallPlugin, type PackSummary, type PluginMutation, type PluginsPayload, type StorePlugin,
@@ -25,8 +26,10 @@ import { applicablePluginItems, missingPluginItems, packSelectionKey, pluginBatc
 import { PluginBatchConfirm, PluginBatchProgress, PluginBatchToolbar } from '../../../ui-shared/plugins-batch-view'
 import { usePluginBatch } from '../../../ui-shared/plugins-batch-runner'
 import { PluginMissingBanner, PluginMissingDialog } from '../../../ui-shared/plugins-missing'
+import { PluginCatalogStatus } from '../../../ui-shared/plugins-catalog-status'
+import { summarizeNetworkError } from '../../../ui-shared/updates'
 import { usePluginRequest } from './plugins/usePluginRequest'
-import { clampMaxPackBytes, PluginFileInstallDialog, usePluginFileInstall } from '../../../ui-shared/plugins-file-install'
+import { clampMaxPackBytes, PluginFileInstallDialog, PluginFileInstallProgress, usePluginFileInstall } from '../../../ui-shared/plugins-file-install'
 
 export function PluginsPage() {
   const { server, route } = useStore()
@@ -78,9 +81,8 @@ export function PluginsPage() {
         if (seenOperations.current.has(key)) continue
         seenOperations.current.add(key)
         if (Date.now() - operation.updatedAt > 30_000) continue
-        if (operation.error || operation.hostError) store.toast(pluginErrorMessage(operation.error || operation.hostError), 'err')
-        else if (operation.result?.installNotice) store.toast(t(operation.result.installNotice))
-        else if (operation.done) store.toast(t('插件包已安装到 v{version}', { version: operation.version }))
+        const notice = pluginOperationNotice(data, operation, t)
+        if (notice) store.toast(notice.kind === 'err' ? pluginErrorMessage(notice.message) : notice.message, notice.kind)
       }
     } catch (cause) {
       if (serverIdentity() === identity) setError(pluginErrorMessage(cause))
@@ -120,11 +122,11 @@ export function PluginsPage() {
 
   const refresh = async () => {
     const result = await run('catalog', refreshPluginCatalog)
-    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('读取插件仓库失败'), 'err')
+    if (result?.error) store.toast(summarizeNetworkError(result.reason, t).summary || t('读取插件仓库失败'), 'err')
   }
   const check = async () => {
     const result = await run('check', checkPluginUpdates)
-    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('检查更新失败'), 'err')
+    if (result?.error) store.toast(summarizeNetworkError(result.reason, t).summary || t('检查更新失败'), 'err')
   }
   const install = async (id: string, update: boolean) => {
     if (!payload?.target) return
@@ -169,7 +171,12 @@ export function PluginsPage() {
   const packs = payload?.packs || []
   const settingsPack = packSettings?.server === identity ? packs.find(pack => pack.id === packSettings.id) : undefined
   const catalog = payload?.catalog?.plugins || []
-  const uninstalled = catalog.filter(item => !packs.some(pack => pack.id === item.id))
+  // 当前通道拿不到可安装版本的插件不进列表，避免正式版用户看到满屏「暂未发布」。
+  const uninstalledAll = catalog.filter(item => !packs.some(pack => pack.id === item.id))
+  const unpublished = uninstalledAll.filter(item => !item.version)
+  const unpublishedKeys = new Set(unpublished.map(item => packSelectionKey(item.id)))
+  const unpublishedCount = unpublished.length
+  const uninstalled = uninstalledAll.filter(item => Boolean(item.version))
   const detailsItem = storeDetails?.server === identity && !packs.some(pack => pack.id === storeDetails.item.id)
     ? catalog.find(item => item.id === storeDetails.item.id) || storeDetails.item : null
   const detailsInstallable = Boolean(detailsItem?.version && !detailsItem.error
@@ -193,18 +200,24 @@ export function PluginsPage() {
           </div>
         </Card>
       </div>
-      {selecting ? <div className='m-section'><PluginBatchToolbar items={batchItems} visibleKeys={batchItems.filter(item => !item.active).map(item => item.key)} selected={selected}
+      {selecting ? <div className='m-section'><PluginBatchToolbar items={batchItems} visibleKeys={batchItems.filter(item => !item.active && !unpublishedKeys.has(item.key)).map(item => item.key)} selected={selected}
         disabled={pageLocked} t={t} onSelection={changeSelection} onAction={confirmBatch} onExit={() => { setSelecting(false); setSelected(new Set()) }} /></div> : null}
       {missing.required.length || missing.unresolved.length ? <div className='m-section'><PluginMissingBanner count={missing.required.length + missing.unresolved.length}
         accounts={missing.required.reduce((sum, item) => sum + item.accounts, 0) + missing.unresolved.reduce((sum, item) => sum + item.count, 0)} onOpen={() => setMissingOpen(true)} t={t} /></div> : null}
       {batch.task ? <div className='m-section'><PluginBatchProgress task={batch.task} t={t} onClose={batch.clear} onRetry={items => confirmBatch(batch.task!.action, items)} /></div> : null}
+      {fileInstall.backgroundVisible ? <div className='m-section'><PluginFileInstallProgress model={fileInstall} t={t} /></div> : null}
       {error ? <ErrorNote text={error} /> : null}
       {payload?.host?.lastError ? <ErrorNote text={payload.host.lastError} /> : null}
-      {uninstalled.length ? <div className='m-section'><SectionHead title={t('可安装插件')} />
+      {payload?.catalog?.error ? <div className='m-section'>
+        <PluginCatalogStatus catalog={payload.catalog} refreshing={busy === 'catalog' || busy === 'check' || payload.catalog.checking === true}
+          disabled={pageLocked} onRetry={refresh} t={t} />
+      </div> : null}
+      {uninstalled.length || unpublishedCount > 0 ? <div className='m-section'><SectionHead title={t('可安装插件')} />
         {uninstalled.map(item => <StorePluginCard key={item.id} item={item} target={payload?.target || ''}
           operation={payload?.operations?.find(operation => operation.id === item.id)} busy={pageLocked} onInstall={() => void install(item.id, false)}
           selection={selecting ? selectionFor(packSelectionKey(item.id)) : undefined}
           onDetails={() => setStoreDetails({ item, server: identity })} />)}
+        {!uninstalled.length ? <Card className='m-card'><Empty text={t('插件发布后会显示在这里。')} /></Card> : null}
       </div> : null}
       <div className='m-section'>
         <SectionHead title={t('已安装插件')} />
@@ -224,7 +237,6 @@ export function PluginsPage() {
           selection={selecting ? selectionFor : undefined} onSelectGroup={() => { const keys = batchItems.filter(item => item.kind === 'script' && !item.active).map(item => item.key); changeSelection(keys, !keys.every(key => selected.has(key))) }}
           request={(path, body) => apiCall(path, { method: 'POST', body })} refresh={load} />
       </Card></div> : null}
-      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'>{pluginErrorMessage(payload.catalog.reason)}</p></div> : null}
       {payload ? <div className='m-section'><Collapsible className='m-card m-card-pad'>
         <CollapsibleTrigger className='m-ck-title'>{t('诊断信息')}</CollapsibleTrigger><CollapsibleContent keepMounted>
         <p className='m-ck-note'>{t('插件目录')}：<span className='m-mono'>{payload.pluginsDir}</span></p>
@@ -241,11 +253,10 @@ export function PluginsPage() {
           await load()
         }} /> : null}
       <PluginFileInstallDialog model={fileInstall} maxPackBytes={maxPackBytes} t={t} />
-      {!fileInstall.open && fileInstall.results.length ? <div className='m-section'><Button variant='outline' size='sm' onClick={() => fileInstall.setOpen(true)}>{fileInstall.running ? t('正在安装本地插件包…') : t('本地安装结果')}</Button></div> : null}
       {batchConfirm ? <PluginBatchConfirm key={`${identity}:${batchConfirm.action}:${batchConfirm.items.map(item => item.key).join('|')}`}
         action={batchConfirm.action} items={batchConfirm.items} disabled={pageLocked} t={t} onClose={() => setBatchConfirm(null)}
         onConfirm={() => { const { action, items } = batchConfirm; setBatchConfirm(null); void batch.execute(action, items) }} /> : null}
-      {missingOpen ? <PluginMissingDialog key={identity} required={missing.required} optional={missing.optional} unresolved={missing.unresolved} disabled={pageLocked} t={t}
+      {missingOpen ? <PluginMissingDialog key={identity} required={missing.required} unresolved={missing.unresolved} disabled={pageLocked} t={t}
         onClose={() => setMissingOpen(false)} onInstall={items => { setMissingOpen(false); void batch.execute('install', items) }} /> : null}
       {settings ? <PluginSettingsSheet onClose={() => setSettings(false)} onChanged={load} /> : null}
       {detailsItem ? <PluginDetailsDialog name={t(detailsItem.name || detailsItem.id)} description={t(detailsItem.description)}

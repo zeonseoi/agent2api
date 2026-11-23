@@ -248,7 +248,6 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
     path === '/api/session/login/start' || path === '/api/session/login/callback'
       || path === '/api/session/login/interaction' || path === '/api/zcode/captcha'
       || path.startsWith('/api/plugins/desktop-import/') || path.startsWith('/api/plugins/enrollment/')
-      || /^\/api\/accounts\/[^/]+\/credentials\/cline-free$/.test(path)
       || path === '/api/accounts/refresh' || path === '/api/accounts/refresh-expiring'
       || path === '/api/accounts/checkin' || path === '/api/checkin-activity'
       || path === '/api/plugins/tasks/run' || path === '/api/travel-schedule/run'
@@ -315,12 +314,17 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
   return (envelope && 'data' in envelope ? envelope.data : envelope) as T
 }
 
-export async function openPanelEvents(signal: AbortSignal, retry = true): Promise<Response> {
+export async function openPanelEvents(
+  signal: AbortSignal,
+  retry = true,
+  scope: 'accounts' | 'logs' | 'requests' = 'accounts',
+): Promise<Response> {
   const identity = serverIdentity()
   await ensureFreshSession()
   requireCurrentServer(identity)
   if (signal.aborted) throw new DOMException('请求已取消', 'AbortError')
-  const response = await fetch(url('/api/panel/events'), {
+  const path = scope === 'accounts' ? '/api/panel/events' : `/api/panel/events?scope=${scope}`
+  const response = await fetch(url(path), {
     headers: buildHeaders({ Accept: 'text/event-stream' }), signal, credentials: 'same-origin',
   })
   requireCurrentServer(identity)
@@ -330,7 +334,7 @@ export async function openPanelEvents(signal: AbortSignal, retry = true): Promis
   if (type === 'panel_login_required' && retry && await tryRefresh()) {
     requireCurrentServer(identity)
     await response.body?.cancel().catch(() => {})
-    return openPanelEvents(signal, false)
+    return openPanelEvents(signal, false, scope)
   }
   if (type === 'panel_login_required') { clearPanelAuth(); onAuthLost?.('login') }
   else if (type === 'invalid_api_key') onAuthLost?.('key')

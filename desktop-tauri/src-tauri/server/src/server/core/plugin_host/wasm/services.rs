@@ -48,8 +48,9 @@ impl Context {
                 return Err(proto::WireError::with_code("本机启动资格检查只能读取账号，不允许刷新或修改", "forbidden"));
             }
         }
-        self.calls += 1;
-        if self.calls > 100_000 { return Err(proto::WireError::with_code("插件调用次数超出上限", "plugin_resource_limit")); }
+        self.calls = self.calls.saturating_add(1);
+        self.spin_calls = self.spin_calls.saturating_add(1);
+        if self.spin_calls > 100_000 { return Err(proto::WireError::with_code("插件调用次数超出上限", "plugin_resource_limit")); }
         if method != "clock.now" && !params.is_object() { return Err(super::error("插件能力参数必须是 JSON 对象")); }
         // started 由 ABI 入口在解码前记录；权限、账号读取及正文准备不能另起计时。
         let opening = matches!(method, "http.open" | "http.open_account");
@@ -91,24 +92,6 @@ impl Context {
         if method == "claim.doubao.tasks" {
             return Err(proto::WireError::with_code("当前调用没有豆包原任务领奖来源", "forbidden"));
         }
-        if let Some(call) = &self.cline_free_refresh {
-            if method != "credential.cline-free.refresh" || params.as_object().is_none_or(|fields| !fields.is_empty()) {
-                return Err(proto::WireError::with_code("Cline Free续期只接受原调用的固定宿主入口", "forbidden"));
-            }
-            return super::cline_free_refresh::exchange(call.clone()).await;
-        }
-        if method == "credential.cline-free.refresh" {
-            return Err(proto::WireError::with_code("当前调用没有Cline Free原续期来源", "forbidden"));
-        }
-        if let Some(call) = &self.codearts_refresh {
-            if method != "credential.codearts.refresh" || params.as_object().is_none_or(|fields| !fields.is_empty()) {
-                return Err(proto::WireError::with_code("CodeArts换证只接受原调用的固定宿主入口", "forbidden"));
-            }
-            return super::codearts_refresh::exchange(call.clone()).await;
-        }
-        if method == "credential.codearts.refresh" {
-            return Err(proto::WireError::with_code("当前调用没有CodeArts原换证来源", "forbidden"));
-        }
         if let Some(result) = self.verification_guard(method, &params).await? { return Ok(result); }
         if let Some(call) = &self.managed { call.validate(&self.shared.options.provider).map_err(super::managed::wire)?; }
         let provider = self.shared.options.provider.clone();
@@ -130,6 +113,7 @@ impl Context {
             }
             "credentials.legacy.take" => super::legacy_credentials::take(self, &params),
             "credential.kiro.external.refresh" => super::external_refresh::invoke(self, &params).await,
+            "crypto.deepseek.pow.solve" => super::deepseek_pow::solve(self, &params).await,
             "crypto.monkeycode.cap.solve" => super::monkeycode_cap::solve(self, &params).await,
             "resource.cookie-file.take" => {
                 self.permission("resources.cookie-file.v1")?;
@@ -216,8 +200,8 @@ impl Context {
                     .ok_or_else(|| super::error("账号记录缺少标识"))?.to_string();
                 self.account()?;
                 self.identity = record["identity"].as_str().unwrap_or(&self.account).to_string();
-                if self.desktop_launch.is_none() && self.codearts_refresh.is_none()
-                    && self.cline_free_refresh.is_none() && self.doubao_rewards.is_none() {
+                if self.desktop_launch.is_none()
+                    && self.doubao_rewards.is_none() {
                     super::legacy_secret::expose(self, &mut record);
                 }
                 self.observe_origin_account(&record)?;
@@ -315,9 +299,21 @@ impl Context {
                     format!("{provider}:{account}:conversation:{session}")
                 } else if scope.is_empty() || scope == "account" { format!("{provider}:{account}") }
                 else { return Err(super::error("锁范围无效")); };
+                let lock_started = std::time::Instant::now();
                 let guard = tokio::time::timeout_at(self.call_deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
                     self.shared.account_lock(&key).lock_owned()).await
-                    .map_err(|_| proto::WireError::with_code("当前账号还有其他操作，等待账号锁超时，请稍后重试", "plugin_busy"))?;
+                    .map_err(|_| {
+                        crate::server::logging::log_with_level(
+                            "[Plugin]",
+                            &format!(
+                                "⚠️ 插件账号锁排队超时 (503 plugin_busy): 提供商={provider} 范围={} 等待={}ms",
+                                if scope.is_empty() { "account" } else { scope },
+                                lock_started.elapsed().as_millis(),
+                            ),
+                            "warn",
+                        );
+                        proto::WireError::with_code("当前账号还有其他操作，等待账号锁超时，请稍后重试", "plugin_busy")
+                    })?;
                 self.guards.insert("account".into(), guard);
                 Ok(json!("account"))
             }
@@ -431,8 +427,10 @@ impl Context {
                         let session = self.codearts_session.as_ref().ok_or_else(|| super::error("对话缺少本次 CodeArts 心跳会话"))?;
                         if params["headers"]["User-Session-Id"].as_str() != Some(session.id.as_str()) { return Err(super::error("CodeArts 对话的会话编号与心跳不符")); }
                         let client = session.client.client().map_err(|_| super::error("CodeArts 原出口已关闭"))?.clone();
+                        let body = super::http::body(self, &params, deadline)?;
+                        deadline.check()?;
                         self.guard_http_submission(&params)?;
-                        let (result,handle) = script::open_pinned(&params,client,deadline.cap_at(self.call_deadline)).await?;
+                        let (result,handle) = script::open_pinned_body(&params, body, client, deadline.cap_at(self.call_deadline)).await?;
                         return self.keep_http(result,handle,deadline);
                     }
                     let body = super::http::body(self, &params, deadline)?;
