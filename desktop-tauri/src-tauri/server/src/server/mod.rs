@@ -961,6 +961,7 @@ impl ServerState {
             let outcome = tokio::task::spawn_blocking(move || {
                 stats.remap_model_dimension_once();
                 stats.backfill_source_dimensions();
+                stats.backfill_credit_groups_once();
                 stats.backfill_pricing_once();
                 stats.prune();
             })

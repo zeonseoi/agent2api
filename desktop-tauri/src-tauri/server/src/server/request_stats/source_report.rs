@@ -49,6 +49,7 @@ fn merge_key(list: &mut Vec<ApiKeyAccum>, incoming: &ApiKeyAccum) {
                 &model.model,
                 model.tokens,
                 model.requests,
+                model.credits,
                 model.cost_usd,
                 model.unpriced_requests,
             );
@@ -72,6 +73,7 @@ pub(super) fn fold_sources(day: &mut DailyEntry, item: &RequestEntry) {
             model: model_stat_key(&item.model, &item.upstream_model).to_string(),
             requests: 1,
             tokens: item.total_tokens,
+            credits: 0.0,
             cost_usd: item_cost,
             unpriced_requests: item_unpriced,
         }],

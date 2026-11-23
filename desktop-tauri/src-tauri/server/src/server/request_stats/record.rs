@@ -830,6 +830,9 @@ pub struct ModelAccum {
     pub requests: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该模型当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
+    #[serde(default)]
+    pub credits: f64,
     #[serde(rename = "costUsd", default)]
     pub cost_usd: f64,
     #[serde(rename = "unpricedRequests", default)]
@@ -854,6 +857,9 @@ pub struct ProviderAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该 provider 当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
+    #[serde(default)]
+    pub credits: f64,
     #[serde(rename = "costUsd", default)]
     pub cost_usd: f64,
     #[serde(rename = "unpricedRequests", default)]
@@ -886,6 +892,9 @@ pub struct AccountAccum {
     pub successful: i64,
     #[serde(default)]
     pub tokens: i64,
+    /// 该账号当天的 Credits 合计（`default` 让旧聚合行按 0 读入）
+    #[serde(default)]
+    pub credits: f64,
     #[serde(rename = "costUsd", default)]
     pub cost_usd: f64,
     #[serde(rename = "unpricedRequests", default)]

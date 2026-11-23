@@ -198,6 +198,10 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     "fxRateCache",
     "modelsDevProviderPrices",
     "modelPricingBackfilled",
+    // 分组 Credits 的一次性补算标记（request_stats::aggregate 的
+    // `CREDITS_BACKFILL_MARKER`）。与上面两个回填标记同理：必须登记，
+    // 否则改配置时会被当成已删除的配置键清掉，下次启动又重算一遍。
+    "creditGroupsBackfilled",
     // 云同步的配置与同步状态（core::cloud_sync）：整份
     // `{provider, webdav:{…}, s3:{…}, syncPassword(信封), enabled, autoSync,
     //   remoteRoot, profile, status:{lastSyncAt, lastSnapshotId, …}}` 一个键。

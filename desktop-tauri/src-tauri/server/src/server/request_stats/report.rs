@@ -142,6 +142,8 @@ pub(super) struct RangeTotals {
     pub requests: i64,
     pub successful: i64,
     pub tokens: i64,
+    /// 区间内的上游扣费 Credits 合计（与 `tokens` 同一口径的累加）
+    pub credits: f64,
     pub cost_usd: f64,
     pub unpriced_requests: i64,
     pub active_days: i64,
@@ -161,6 +163,7 @@ pub(super) fn range_totals(
         requests: 0,
         successful: 0,
         tokens: 0,
+        credits: 0.0,
         cost_usd: 0.0,
         unpriced_requests: 0,
         active_days: 0,
@@ -175,6 +178,7 @@ pub(super) fn range_totals(
         totals.requests += day.requests;
         totals.successful += day.successful;
         totals.tokens += day.tokens;
+        totals.credits += day.credits;
         totals.cost_usd += day.cost_usd;
         totals.unpriced_requests += day.unpriced_requests;
         // activeDays 只数**区间内**有请求的天数（补零的日子不算「活跃」）
@@ -187,6 +191,7 @@ pub(super) fn range_totals(
                 &acc.model,
                 acc.tokens,
                 acc.requests,
+                acc.credits,
                 acc.cost_usd,
                 acc.unpriced_requests,
             );
@@ -198,6 +203,7 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.credits,
                 acc.cost_usd,
                 acc.unpriced_requests,
             );
@@ -210,6 +216,7 @@ pub(super) fn range_totals(
                 acc.requests,
                 acc.successful,
                 acc.tokens,
+                acc.credits,
                 acc.cost_usd,
                 acc.unpriced_requests,
             );
@@ -219,6 +226,7 @@ pub(super) fn range_totals(
     let covered_requests: i64 = totals.provider_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.provider_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.provider_totals.iter().map(|item| item.tokens).sum();
+    let covered_credits: f64 = totals.provider_totals.iter().map(|item| item.credits).sum();
     let covered_cost: f64 = totals.provider_totals.iter().map(|item| item.cost_usd).sum();
     let covered_unpriced: i64 = totals.provider_totals.iter().map(|item| item.unpriced_requests).sum();
     push_provider_accum(
@@ -227,6 +235,7 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        crate::server::core::credits::residue(totals.credits, covered_credits),
         (totals.cost_usd - covered_cost).max(0.0),
         (totals.unpriced_requests - covered_unpriced).max(0),
     );
@@ -234,6 +243,7 @@ pub(super) fn range_totals(
     let covered_requests: i64 = totals.account_totals.iter().map(|item| item.requests).sum();
     let covered_successful: i64 = totals.account_totals.iter().map(|item| item.successful).sum();
     let covered_tokens: i64 = totals.account_totals.iter().map(|item| item.tokens).sum();
+    let covered_credits: f64 = totals.account_totals.iter().map(|item| item.credits).sum();
     let covered_cost: f64 = totals.account_totals.iter().map(|item| item.cost_usd).sum();
     let covered_unpriced: i64 = totals.account_totals.iter().map(|item| item.unpriced_requests).sum();
     push_account_accum(
@@ -243,6 +253,7 @@ pub(super) fn range_totals(
         (totals.requests - covered_requests).max(0),
         (totals.successful - covered_successful).max(0),
         (totals.tokens - covered_tokens).max(0),
+        crate::server::core::credits::residue(totals.credits, covered_credits),
         (totals.cost_usd - covered_cost).max(0.0),
         (totals.unpriced_requests - covered_unpriced).max(0),
     );
@@ -256,6 +267,7 @@ pub(super) fn push_model_accum(
     model: &str,
     tokens: i64,
     requests: i64,
+    credits: f64,
     cost_usd: f64,
     unpriced_requests: i64,
 ) {
@@ -263,6 +275,7 @@ pub(super) fn push_model_accum(
         Some(item) => {
             item.tokens += tokens;
             item.requests += requests;
+            item.credits += credits;
             item.cost_usd += cost_usd;
             item.unpriced_requests += unpriced_requests;
         }
@@ -270,6 +283,7 @@ pub(super) fn push_model_accum(
             model: model.to_string(),
             requests,
             tokens,
+            credits,
             cost_usd,
             unpriced_requests,
         }),
@@ -354,6 +368,7 @@ pub(super) fn push_provider_accum(
     requests: i64,
     successful: i64,
     tokens: i64,
+    credits: f64,
     cost_usd: f64,
     unpriced_requests: i64,
 ) {
@@ -362,6 +377,7 @@ pub(super) fn push_provider_accum(
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
+            item.credits += credits;
             item.cost_usd += cost_usd;
             item.unpriced_requests += unpriced_requests;
         }
@@ -370,6 +386,7 @@ pub(super) fn push_provider_accum(
             requests,
             successful,
             tokens,
+            credits,
             cost_usd,
             unpriced_requests,
         }),
@@ -383,6 +400,7 @@ pub(super) fn push_account_accum(
     requests: i64,
     successful: i64,
     tokens: i64,
+    credits: f64,
     cost_usd: f64,
     unpriced_requests: i64,
 ) {
@@ -391,6 +409,7 @@ pub(super) fn push_account_accum(
             item.requests += requests;
             item.successful += successful;
             item.tokens += tokens;
+            item.credits += credits;
             item.cost_usd += cost_usd;
             item.unpriced_requests += unpriced_requests;
             if !account_name.is_empty() {
@@ -403,6 +422,7 @@ pub(super) fn push_account_accum(
             requests,
             successful,
             tokens,
+            credits,
             cost_usd,
             unpriced_requests,
         }),
@@ -465,6 +485,7 @@ pub(super) fn build_providers(totals: &[ProviderAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "credits": item.credits,
                 "costUsd": item.cost_usd,
                 "unpricedRequests": item.unpriced_requests,
             })
@@ -518,6 +539,7 @@ pub(super) fn build_models(totals: &[ModelAccum]) -> Vec<Value> {
                 },
                 "requests": item.requests,
                 "totalTokens": item.tokens,
+                "credits": item.credits,
                 "costUsd": item.cost_usd,
                 "unpricedRequests": item.unpriced_requests,
             })
@@ -566,6 +588,7 @@ pub(super) fn build_accounts(totals: &[AccountAccum]) -> Vec<Value> {
                 "success": item.successful,
                 "failures": (item.requests - item.successful).max(0),
                 "totalTokens": item.tokens,
+                "credits": item.credits,
                 "costUsd": item.cost_usd,
                 "unpricedRequests": item.unpriced_requests,
             })

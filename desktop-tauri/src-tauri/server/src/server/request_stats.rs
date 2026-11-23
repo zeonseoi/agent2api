@@ -120,8 +120,8 @@ pub use retention::Retention;
 // 拆到子模块的三样，这里引回：record / usage_summary 的折算入口、
 // remap 的库操作体、报表装配（均为 `pub(super)`，见 aggregate.rs 的模块头）
 use aggregate::{
-    compute_day_reprice, fold_into_daily, mark_pricing_backfilled, pricing_candidate_days,
-    read_day_for_reprice, remap_model_days, summarize, write_day_reprice,
+    backfill_credit_days, compute_day_reprice, fold_into_daily, mark_pricing_backfilled,
+    pricing_candidate_days, read_day_for_reprice, remap_model_days, summarize, write_day_reprice,
 };
 use report::{entry_json, list_entry_json, provider_label, CACHE_WINDOWS};
 
@@ -783,6 +783,28 @@ impl RequestStats {
             // Err（已由 with_conn_mut 打控制台日志）与库不可用都在这一支：
             // 标记没写，下次启动自然再试，订正不会因此丢
             None => {}
+        }
+    }
+
+    pub fn backfill_credit_groups_once(&self) {
+        let outcome = {
+            let guard = self.guard();
+            self.with_conn_mut(&guard, backfill_credit_days)
+        };
+        match outcome {
+            Some(changed) if !changed.is_empty() => {
+                self.filters_cache.invalidate();
+                crate::server::core::panel_events::notify_requests();
+                logging::log(
+                    "[Stats]",
+                    &format!(
+                        "🔁 已按明细补算 {} 天的分组 Credits：{}",
+                        changed.len(),
+                        changed.join("、")
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 

@@ -36,6 +36,8 @@ use super::legacy;
 /// `RequestStats::remap_model_dimension_once` 的说明。
 const MODEL_UPSTREAM_MARKER: &str = "modelUsageUpstreamRemapped";
 pub(super) const MODEL_PRICING_BACKFILL_MARKER: &str = "modelPricingBackfilled";
+/// 分组 Credits 的一次性补算标记（旧聚合行被官方结构覆盖后缺 `credits`）。
+pub(super) const CREDITS_BACKFILL_MARKER: &str = "creditGroupsBackfilled";
 
 /// 收集需要重算费用的本地自然日列表（若 `only_if_unmarked` 为真且已完成过一次性回填，则返回 `Ok(None)`）。
 pub(super) fn pricing_candidate_days(
@@ -217,6 +219,60 @@ pub(super) fn remap_model_days(conn: &mut rusqlite::Connection) -> rusqlite::Res
     Ok(changed)
 }
 
+/// 补算旧聚合行里缺失的分组 Credits。
+///
+/// 官方 beta.8.1 的聚合结构合并进 fork 时丢掉过 `credits` 字段：当天总量还在，
+/// 模型 / 提供商 / 账号三组没有。明细仍保留时按天用 [`rebuild_day`] 整行重算
+/// （同一条 `fold_into_daily` 口径）；明细不足以代表当天则原样保留。
+pub(super) fn backfill_credit_days(conn: &mut rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+    if legacy::marker_present(conn, CREDITS_BACKFILL_MARKER)? {
+        return Ok(Vec::new());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let daily_map = daily::select_daily_map(&tx)?;
+    let mut days: BTreeSet<NaiveDate> = BTreeSet::new();
+    {
+        let mut stmt = tx.prepare("SELECT DISTINCT ts FROM requests")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let ts: i64 = row.get(0)?;
+            days.insert(day_of(ts));
+        }
+    }
+    let mut changed = Vec::new();
+    for day in days {
+        let key = date_key(day);
+        let Some(entry) = daily_map.get(&key) else { continue; };
+        let total = entry.credits;
+        let model: f64 = entry.model_tokens.iter().map(|item| item.credits).sum();
+        let provider: f64 = entry.provider_stats.iter().map(|item| item.credits).sum();
+        let account: f64 = entry.account_stats.iter().map(|item| item.credits).sum();
+        // 任一维度与总量对不上就重算；三组都为 0 且总量为 0 的天不需要动。
+        if ![model, provider, account].iter().any(|covered| (covered - total).abs() > 1e-6) {
+            continue;
+        }
+        let start = local_midnight_ms(day);
+        let end = local_midnight_ms(day + ChronoDuration::days(1)).saturating_sub(1);
+        let detail_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM requests WHERE ts >= ?1 AND ts <= ?2",
+            rusqlite::params![start, end],
+            |row| row.get(0),
+        )?;
+        // 与 `remap_model_days` 同一条安全边界：明细覆盖不了当天就不动。
+        if detail_count >= entry.requests {
+            rebuild_day(&tx, day)?;
+            changed.push(key);
+        }
+    }
+    tx.execute(
+        "INSERT INTO kv (key, value) VALUES (?1, 'true')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![CREDITS_BACKFILL_MARKER],
+    )?;
+    tx.commit()?;
+    Ok(changed)
+}
+
 /// 重算某一天的聚合行：从**剩余明细**整行重算；一条不剩就删掉那一行。
 ///
 /// `day` 是本地自然日，区间按 `[当天零点, 次日零点)` 取 —— 与 `date_key(day_of(ts))`
@@ -300,6 +356,7 @@ pub(super) fn summarize(
     let mut overview = super::source_report::usage_json(&usage);
     overview["successful"] = json!(totals.successful);
     overview["tokens"] = json!(totals.tokens);
+    overview["credits"] = json!(totals.credits);
     overview["costUsd"] = json!(totals.cost_usd);
     overview["unpricedRequests"] = json!(totals.unpriced_requests);
     overview["activeDays"] = json!(totals.active_days);
@@ -370,6 +427,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         model_stat_key(&item.model, &item.upstream_model),
         item.total_tokens,
         1,
+        credit,
         item_cost,
         item_unpriced,
     );
@@ -380,6 +438,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
+        credit,
         item_cost,
         item_unpriced,
     );
@@ -390,6 +449,7 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
         1,
         i64::from(success),
         item.total_tokens,
+        credit,
         item_cost,
         item_unpriced,
     );

@@ -84,6 +84,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         &acc.model,
                         acc.tokens,
                         acc.requests,
+                        acc.credits,
                         acc.cost_usd,
                         acc.unpriced_requests,
                     );
@@ -97,6 +98,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         acc.requests,
                         acc.successful,
                         acc.tokens,
+                        acc.credits,
                         acc.cost_usd,
                         acc.unpriced_requests,
                     );
@@ -110,6 +112,7 @@ pub(crate) fn parse_daily_jsonl(text: &str) -> BTreeMap<String, DailyEntry> {
                         acc.requests,
                         acc.successful,
                         acc.tokens,
+                        acc.credits,
                         acc.cost_usd,
                         acc.unpriced_requests,
                     );
