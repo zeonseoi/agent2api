@@ -800,7 +800,7 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -908,8 +908,9 @@ async fn attempt_queue(
                             tried_ids.push(attempt_key.clone());
                         }
                     }
+                    let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1171,7 +1172,7 @@ async fn attempt_queue(
                         if account_unavailable || error.status_code == 501 {
                             let mut error = error;
                             if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
+                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
                                 last_error = Some(error); continue 'accounts;
                             }
                             return Err(error);
@@ -1572,7 +1573,7 @@ async fn attempt_queue(
                     );
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
+                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1677,7 +1678,7 @@ async fn attempt_queue(
                 super::error_policy::attach(&mut error, &decision);
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                 if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
+                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
                     last_error = Some(error); continue 'accounts;
                 }
                 return Err(error);

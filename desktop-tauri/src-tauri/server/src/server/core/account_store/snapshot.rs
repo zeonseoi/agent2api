@@ -204,6 +204,16 @@ impl AccountStore {
     }
 }
 
+/// 一条账号是否属于 `store.list` 这次要列的范围。
+///
+/// `routing_only` = 转发视角（滤掉禁用的）。插件侧的后台任务必须传 `false`，
+/// 否则用户把账号关掉之后旅行 / 成长 / 连登全都扫不到人（见调用处说明）。
+fn provider_account_match(account: &Value, provider: &str, routing_only: bool) -> bool {
+    account.get("provider").and_then(Value::as_str) == Some(provider)
+        && (!routing_only || account.get("enabled").and_then(Value::as_bool) != Some(false))
+        && account.get("hasCredentials").and_then(Value::as_bool) == Some(true)
+}
+
 fn fresh(cache: &SnapshotCache, revision: u64, metadata: u64, beijing_day: &str) -> Option<Arc<RoutingSnapshot>> {
     let state = cache.state.read().ok()?;
     let cached = state.as_ref()?;

@@ -538,6 +538,10 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/checkin-activity", post(api::billing::run_activity))
         .route("/api/checkin-activity/status", get(api::billing::activity_status))
         .route("/api/checkin-activity/reset", post(api::billing::reset_activity))
+        // fork 的路由：成长任务到期领取开关 + 合并台账（见 core::checkin_ledger
+        // 与 core::growth_claim_auto 的模块头）。收成一个入口是为了让本文件只留
+        // 一行 —— 路由表是官方重构最频繁的地方，越少改越不易冲突。
+        .merge(fork_routes())
         // ── 会话与登录 ──
         // 只读动态登录元数据也必须走管理面鉴权；不是任意 admin.action 通道。
         .route("/api/session/login/methods", get(api::session::login_methods))

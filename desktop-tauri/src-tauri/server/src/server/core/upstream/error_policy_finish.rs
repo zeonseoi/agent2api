@@ -7,11 +7,8 @@ use crate::server::logging;
 use super::{error_policy, rotate, RouteTarget, UpstreamService};
 use super::payload::ProviderContext;
 
-/// `allow_switch` 为假时只做失败记账（冷却/降级/熔断），不重放也不换号 ——
-/// 固定投递通道在真正发送前会冻结请求，调用方据此只补记账。
 pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_>, providers: &[&str], keys: &rotate::CooldownKeys<'_>,
-    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize,
-    allow_switch: bool) -> bool {
+    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize) -> bool {
     let model = error.routing_error.as_ref().map(|decision| decision.model.clone()).unwrap_or_else(|| {
         target.account.as_ref().map(|account| keys.for_account(account)).unwrap_or_else(|| keys.for_provider(&target.provider))
     });

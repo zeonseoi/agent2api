@@ -4,6 +4,8 @@ version = "3.5.0-beta.8.1"
 description = "Agent2API 桌面端 — AI 路由网关与 Agent 客户端接管"
 authors = ["Agent2API"]
 edition = "2021"
+# cargo run 默认启动桌面端；workspace 里还有 server crate，避免二义。
+default-run = "workbuddy-proxy-desktop"
 # MSRV 由 rusqlite 0.40 → libsqlite3-sys 0.38 决定（它的声明值是 1.88）。
 # 本机工具链是 1.95，能编；但声明值必须与实际要求一致 —— 声明 1.77 却
 # 要求 1.88，会让「照着 rust-version 装旧工具链」的构建直接失败。

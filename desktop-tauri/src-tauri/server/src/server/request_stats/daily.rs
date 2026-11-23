@@ -30,7 +30,7 @@ use super::source::{ApiKeyAccum, ClientAccum};
 /// 所以永远显式列名。
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
      cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
-     source_stats_version, cost_usd, unpriced_requests";
+     source_stats_version, cost_usd, unpriced_requests, credits";
 
 /// JSON 数组列 → `Vec<T>`。解析失败或内容不是数组时退化成空表。
 ///
@@ -67,6 +67,7 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         source_stats_version: row.get(11)?,
         cost_usd: row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
         unpriced_requests: row.get::<_, Option<i64>>(13)?.unwrap_or(0),
+        credits: row.get::<_, Option<f64>>(14)?.unwrap_or(0.0),
     })
 }
 
@@ -115,8 +116,8 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
     conn.execute(
         "INSERT INTO request_daily (date, requests, successful, tokens, cache_hit_tokens, \
          cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
-         source_stats_version, cost_usd, unpriced_requests) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+         source_stats_version, cost_usd, unpriced_requests, credits) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
          ON CONFLICT(date) DO UPDATE SET requests = excluded.requests, \
          successful = excluded.successful, tokens = excluded.tokens, \
          cache_hit_tokens = excluded.cache_hit_tokens, \
@@ -124,7 +125,8 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
          model_tokens = excluded.model_tokens, provider_stats = excluded.provider_stats, \
          account_stats = excluded.account_stats, client_stats = excluded.client_stats, \
          api_key_stats = excluded.api_key_stats, source_stats_version = excluded.source_stats_version, \
-         cost_usd = excluded.cost_usd, unpriced_requests = excluded.unpriced_requests",
+         cost_usd = excluded.cost_usd, unpriced_requests = excluded.unpriced_requests, \
+         credits = excluded.credits",
         params![
             day.date,
             day.requests,
@@ -135,12 +137,12 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
             encode_accum(&day.model_tokens),
             encode_accum(&day.provider_stats),
             encode_accum(&day.account_stats),
-            day.credits,
             encode_accum(&day.client_stats),
             encode_accum(&day.api_key_stats),
             day.source_stats_version,
             day.cost_usd,
             day.unpriced_requests,
+            day.credits,
         ],
     )?;
     Ok(())
