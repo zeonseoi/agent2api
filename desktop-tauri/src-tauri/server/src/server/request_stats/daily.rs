@@ -29,8 +29,8 @@ use super::source::{ApiKeyAccum, ClientAccum};
 /// `row.get(n)` 静默错位。物理列序不保证一致（存量库上 `credits` 落在表尾），
 /// 所以永远显式列名。
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
-     cache_input_tokens, model_tokens, provider_stats, account_stats, credits, \
-     client_stats, api_key_stats, source_stats_version";
+     cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
+     source_stats_version, cost_usd, unpriced_requests";
 
 /// JSON 数组列 → `Vec<T>`。解析失败或内容不是数组时退化成空表。
 ///
@@ -62,11 +62,11 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         model_tokens: decode_accum::<ModelAccum>(&model_tokens),
         provider_stats: decode_accum::<ProviderAccum>(&provider_stats),
         account_stats: decode_accum::<AccountAccum>(&account_stats),
-        // 当天 Credits 合计（本 fork 加的列，见 `db/schema_fork.rs`）；旧行 DEFAULT 0 原样读出
-        credits: row.get(9)?,
-        client_stats: decode_accum::<ClientAccum>(&row.get::<_, String>(10)?),
-        api_key_stats: decode_accum::<ApiKeyAccum>(&row.get::<_, String>(11)?),
-        source_stats_version: row.get(12)?,
+        client_stats: decode_accum::<ClientAccum>(&row.get::<_, String>(9)?),
+        api_key_stats: decode_accum::<ApiKeyAccum>(&row.get::<_, String>(10)?),
+        source_stats_version: row.get(11)?,
+        cost_usd: row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
+        unpriced_requests: row.get::<_, Option<i64>>(13)?.unwrap_or(0),
     })
 }
 
@@ -114,17 +114,17 @@ pub(super) fn request_count(conn: &Connection, date: &str) -> rusqlite::Result<i
 pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO request_daily (date, requests, successful, tokens, cache_hit_tokens, \
-         cache_input_tokens, model_tokens, provider_stats, account_stats, credits, \
-         client_stats, api_key_stats, source_stats_version) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+         cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
+         source_stats_version, cost_usd, unpriced_requests) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
          ON CONFLICT(date) DO UPDATE SET requests = excluded.requests, \
          successful = excluded.successful, tokens = excluded.tokens, \
          cache_hit_tokens = excluded.cache_hit_tokens, \
          cache_input_tokens = excluded.cache_input_tokens, \
          model_tokens = excluded.model_tokens, provider_stats = excluded.provider_stats, \
-         account_stats = excluded.account_stats, credits = excluded.credits, \
-         client_stats = excluded.client_stats, \
-         api_key_stats = excluded.api_key_stats, source_stats_version = excluded.source_stats_version",
+         account_stats = excluded.account_stats, client_stats = excluded.client_stats, \
+         api_key_stats = excluded.api_key_stats, source_stats_version = excluded.source_stats_version, \
+         cost_usd = excluded.cost_usd, unpriced_requests = excluded.unpriced_requests",
         params![
             day.date,
             day.requests,
@@ -139,6 +139,8 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
             encode_accum(&day.client_stats),
             encode_accum(&day.api_key_stats),
             day.source_stats_version,
+            day.cost_usd,
+            day.unpriced_requests,
         ],
     )?;
     Ok(())
