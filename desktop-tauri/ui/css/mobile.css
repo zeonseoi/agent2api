@@ -264,6 +264,10 @@
   .req-row > .req-retry,
   .req-row > .req-target,
   .req-row > .req-dur,
+  .req-row > .req-api-key,
+  .req-row > .req-speed,
+  .req-row > .req-credit,
+  .req-row > .req-cost,
   .req-row > .req-usage,
   .req-row > .req-client,
   .req-row > .req-error-cell,
@@ -945,11 +949,11 @@
 @media (max-width: 767.98px) {
   .models-table tr:not(.tr-group) > td.cell-caps {
     grid-row: 5;
-    grid-column: 1 / 2;
+    grid-column: 1 / 3;
   }
   .models-table tr:not(.tr-group) > td.cell-act {
     grid-row: 5;
-    grid-column: 2 / -1;
+    grid-column: 3 / -1;
   }
   .models-table tr:not(.tr-group) > td.cell-caps {
     flex-wrap: wrap;
@@ -957,14 +961,7 @@
   }
   .models-table tr:not(.tr-group) > td.cell-act .row-actions { width: 100%; }
   .models-table tr:not(.tr-group) > td.cell-act button { width: 100%; }
-  /* 映射从第 6 行（简介占第 2 行，能力与操作在第 5 行） */
   .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; }
-
-  /* 头部：模型名是这张卡的身份信息，必须拿满宽度。
-     之前「上游模型」这个标签占掉一半，「raccoon-chat-ml-5-5」只剩 50px
-     显示成「raccoo...」。标签在这里没有信息量（卡片里唯一的长 ID 就是模型名），
-     窄屏收掉标签，模型名占满整行。
-     副名（供应商显示名）也一并收掉 —— 模型 ID 本身已经带了家名前缀。 */
   .models-table tr:not(.tr-group) > td.cell-model::before { content: none; }
   .models-table tr:not(.tr-group) > td.cell-model .mname { display: none; }
   .models-table tr:not(.tr-group) > td.cell-model .mid { flex: 1 1 100%; }
@@ -975,21 +972,30 @@
 }
 
 @media (max-width: 767.98px) {
-  /* ─── 模型卡片：三行读数并成两行 ───
-     现状五行读数：倍率|可见性 / 来源|上下文 / 能力|操作 / 映射。
-     「来源」只有一个色点 + 两三个字（内置 / 远程），单独占半行很浪费。
-     把它挪到「倍率」那一行（倍率也是短值），于是：
-       第 2 行：倍率 | 来源
-       第 3 行：可见性 | 上下文
-     省一整行 39px。 */
-  .models-table tr:not(.tr-group) > td.cell-rate { grid-row: 3; grid-column: 1; }
-  .models-table tr:not(.tr-group) > td.cell-source { grid-row: 3; grid-column: 2 / -1; }
-  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 4; grid-column: 1; }
-  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 4; grid-column: 2 / -1; }
-  /* 能力与操作保持第 5 行，映射第 6 行（简介占第 2 行，读数整体下移一行） */
-  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 5; }
-  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 5; }
-  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; }
+  .models-table tr:not(.tr-group) > td.cell-rate { grid-row: 2; grid-column: 1; }
+  .models-table tr:not(.tr-group) > td.cell-source { grid-row: 2; grid-column: 2 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-visibility { grid-row: 3; grid-column: 1; }
+  .models-table tr:not(.tr-group) > td.cell-budget { grid-row: 3; grid-column: 2 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-pricing { grid-row: 4; grid-column: 1 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-caps { grid-row: 5; grid-column: 1 / 3; }
+  .models-table tr:not(.tr-group) > td.cell-act { grid-row: 5; grid-column: 3 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-alias { grid-row: 6; grid-column: 1 / -1; }
+  .models-table tr:not(.tr-group) > td.cell-budget .caps-open {
+    margin: 0;
+    padding: 2px 4px;
+    max-width: 100%;
+  }
+  .models-table tr:not(.tr-group) > td.cell-pricing .pricing-open {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 6px;
+    margin: 0;
+    padding: 2px 4px;
+    max-width: 100%;
+    text-align: right;
+  }
 }
 
 @media (max-width: 767.98px) {
