@@ -406,6 +406,9 @@ fn build_center(state: &ServerState, summary_only: bool) -> Value {
         // 猫猫旅行定时排程（国内版）：开关 / 时刻 / 今日已跑时刻 / 上一轮结果。
         // 与 `auto`（签到排程）并列 —— 两者是独立排程，各自开关与时刻。
         "travel": travel,
+        // 成长任务的「到期前自动领取」：官方没有这一档，判据与开关都在 fork 的
+        // `core::growth_claim_auto` 里（独立开关与独立调度）。
+        "claimAuto": crate::server::core::growth_claim_auto::center_entry(has_cn_account),
         "pluginTasks": plugin_tasks,
         "history": checkin_history::list(),
         "recordsTotal": crate::server::core::checkin_records::count_all(),
