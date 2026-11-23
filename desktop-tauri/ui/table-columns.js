@@ -107,6 +107,7 @@
         { key: 'check', minWidth: 40 },
         { key: 'model', minWidth: 165 },
         { key: 'rate', minWidth: 64 },
+        { key: 'description', minWidth: 150 },
         { key: 'pricing', minWidth: 112 },
         { key: 'visibility', minWidth: 66 },
         { key: 'source', minWidth: 62 },

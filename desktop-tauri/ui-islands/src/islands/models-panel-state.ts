@@ -247,6 +247,7 @@ const COLUMNS: ColumnDecl[] = [
   { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
+  { key: 'description', label: t('简介') },
   { key: 'pricing', label: t('计价') },
   // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
   // 认不认它），并排放读起来才连贯。没判据的家显示 `—`（见 models-page 的

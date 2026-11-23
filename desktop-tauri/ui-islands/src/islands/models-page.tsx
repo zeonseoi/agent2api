@@ -645,6 +645,7 @@ function ModelsPage() {
                   <col className='c-check' data-col='check' />
                   <col className='c-model' data-col='model' />
                   <col className='c-rate' data-col='rate' />
+                  <col className='c-description' data-col='description' />
                   <col className='c-pricing' data-col='pricing' />
                   <col className='c-visibility' data-col='visibility' />
                   <col className='c-source' data-col='source' />
@@ -668,6 +669,7 @@ function ModelsPage() {
                       setSort(`rate-${direction}`)
                       paging.goto(1)
                     }}>{t('倍率')}</TableHead>
+                  <TableHead data-col='description'>{t('简介')}</TableHead>
                   <TableHead data-col='pricing' title={t('点击任意单元格可覆盖单价或设置参考模型')}>{t('计价')}</TableHead>
                   <TableHead data-col='visibility' title={t('这个模型在官方客户端里是否会被展列；不展示的那些默认已关闭（含默认绑定）')}>{t('可见性')}</TableHead>
                   <TableHead data-col='source'>{t('来源')}</TableHead>

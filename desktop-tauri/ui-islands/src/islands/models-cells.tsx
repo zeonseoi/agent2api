@@ -499,6 +499,19 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
             <span className='rate'>{model.credits ? formatCredits(model.credits) : '—'}</span>
           </TableCell>
         )
+      case 'description': {
+        // 上游清单里的中文简介（`descriptionZh`）。只有部分家给这个字段，
+        // 没有时给「—」而不是空串 —— 空串会让人以为这一行渲染坏了，
+        // 破折号才是「这个模型没有简介」的既有占位（与倍率 / 来源列同口径）。
+        const text = String(model.description ?? '').trim()
+        return (
+          <TableCell className={cellClass('cell-description', column.align)}>
+            {text
+              ? <span className='mdesc' title={text}>{text}</span>
+              : <span className='rate'>—</span>}
+          </TableCell>
+        )
+      }
       case 'pricing': {
         const info = model.pricing
         const eff = info?.effective
