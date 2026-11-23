@@ -35,16 +35,11 @@ impl Default for AppIndex {
 }
 
 impl AppIndex {
-    pub fn required(&self, current: &str) -> Option<Value> {
-        let rule = if super::is_prerelease_version(current) { &self.force_update.beta } else { &self.force_update.stable };
-        let minimum = rule.minimum_version.as_deref()?.trim();
-        if compare_versions(current, minimum) != Some(-1) { return None; }
-        let target = rule.target_version.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(minimum).trim();
-        if compare_versions(target, minimum).is_none_or(|order| order < 0) { return None; }
-        Some(json!({ "required": true, "minimumVersion": minimum, "targetVersion": target,
-            "message": if rule.message.trim().is_empty() { "当前版本已停止提供模型服务，请先完成更新。" } else { rule.message.trim() },
-            "source": super::website::CDN_APP_INDEX_URL,
-        }))
+    /// fork：本分支**不启用**最低版本强制门 —— 官网 app.json 里的
+    /// forceUpdate 仍照常解析与缓存（结构、repo 迁移都还用它），但不再据此
+    /// 拒绝调用模型、也不弹「需要强制更新」。普通更新检查不受影响。
+    pub fn required(&self, _current: &str) -> Option<Value> {
+        None
     }
 }
 
