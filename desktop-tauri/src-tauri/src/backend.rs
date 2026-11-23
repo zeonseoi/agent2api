@@ -23,6 +23,9 @@
 //! 两个都只在升级后的第一次启动有实际动作，正常启动零开销。
 
 pub(crate) mod lifecycle;
+mod watchdog;
+
+pub(crate) use watchdog::start_watchdog;
 
 use std::collections::HashMap;
 #[cfg(windows)]
