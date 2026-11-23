@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::server::{
-    core::plugin_host::wasm::managed_policy::TRAE_AUTHORIZATION_ORIGIN, errors::GatewayError,
+    core::plugin_host::wasm::managed_policy::TRAE_AUTHORIZATION_PAGE, errors::GatewayError,
 };
 
 pub(super) const IDE_VERSION: &str = "0.1.69";
@@ -121,6 +121,11 @@ impl ProtocolContext {
             ("x_app_type", "trae".into(), true),
             ("code_challenge", challenge, true),
             ("code_challenge_method", "S256".into(), false),
+            // 官方 3.4.22 起授权页新增的三个参数（对照片段见本机 Trae CN 的
+            // 登录 URL：doubao_passport=1、loginScope=toc、channel_name=common）。
+            ("doubao_passport", "1".into(), false),
+            ("loginScope", "toc".into(), false),
+            ("channel_name", "common".into(), false),
         ];
         if variant == Variant::Solo {
             params.push(("hide_saas_login", "true".into(), false));
@@ -132,7 +137,7 @@ impl ProtocolContext {
             })
             .collect::<Vec<_>>()
             .join("&");
-        let authorization = format!("{TRAE_AUTHORIZATION_ORIGIN}/authorization?{query}");
+        let authorization = format!("{TRAE_AUTHORIZATION_PAGE}/authorization?{query}");
         Ok(Self {
             variant,
             verifier,
