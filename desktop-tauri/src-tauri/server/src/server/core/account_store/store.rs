@@ -199,6 +199,14 @@ impl AccountStore {
         self.inner.db.as_ref()
     }
 
+    /// 把库句柄克隆给同进程的持久化模块（会话粘滞等）。
+    ///
+    /// 克隆 `Db` 共享**同一个**连接，不会打开第二条 —— 这正是写穿透要的形态；
+    /// 拿到句柄的模块只做点查点写，不另建连接、不绕开这把锁。
+    pub(crate) fn database_handle(&self) -> Option<Db> {
+        self.inner.db.clone()
+    }
+
     /// 取锁；锁中毒（某次持锁 panic）不致命：直接接管内部数据继续用，
     /// 总好过让所有管理 API 永久 500。
     ///

@@ -49,6 +49,23 @@ CREATE INDEX IF NOT EXISTS idx_travel_records_outcome ON travel_records(outcome)
 CREATE INDEX IF NOT EXISTS idx_travel_records_provider ON travel_records(provider);
 ";
 
+/// 会话粘滞绑定（重启后恢复未过期的绑定）。
+///
+/// 内存表是运行期权威（选路只读它）；这里只承接「每次成功转发 UPSERT 一行、
+/// 解除时删行、启动时读回未过期的行」这层持久化，`hits` 允许落后。
+pub(crate) const ROUTE_STICKY: &str = "
+CREATE TABLE IF NOT EXISTS route_sticky (
+  id         TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL DEFAULT '',
+  model      TEXT NOT NULL DEFAULT '',
+  source     TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  last_seen  INTEGER NOT NULL DEFAULT 0,
+  ttl_ms     INTEGER NOT NULL DEFAULT 0,
+  hits       INTEGER NOT NULL DEFAULT 0
+);
+";
+
 /// 官方迁移 + fork 增量的统一入口（`Db::open` 与备份恢复都走这里）。
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     repair_legacy(conn)?;
@@ -118,7 +135,8 @@ fn install(conn: &Connection) -> rusqlite::Result<()> {
     ensure_column(conn, "requests", "credit", "REAL")?;
     // 当天合计（报表只走聚合表、寿命与明细无关，所以聚合行上也要有落点）。
     ensure_column(conn, "request_daily", "credits", "REAL NOT NULL DEFAULT 0")?;
-    conn.execute_batch(TRAVEL_RECORDS)
+    conn.execute_batch(TRAVEL_RECORDS)?;
+    conn.execute_batch(ROUTE_STICKY)
 }
 
 /// 列是否存在。
@@ -241,6 +259,7 @@ mod tests {
         );
         assert!(table_exists(&conn, "checkin_records"));
         assert!(table_exists(&conn, "travel_records"));
+        assert!(table_exists(&conn, "route_sticky"));
         assert_eq!(version(&conn), schema::SCHEMA_VERSION);
         drop(conn);
         remove_temp(&path);

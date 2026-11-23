@@ -54,7 +54,7 @@ export function RoutingStickyDialog({ model, onClose }: { model: string; onClose
     <DialogHeader><RouteIcon name='route' /><DialogTitle>{t('会话粘滞')} · {model || t('全部模型')}</DialogTitle><Button variant='ghost' size='sm' disabled={busy} onClick={() => void load()}>{t('刷新')}</Button></DialogHeader>
     <DialogBody>
       <div className='flex flex-wrap items-center gap-2'><Badge variant='brand' shape='tag'>{t('粘性：{mode}', { mode: stickyLabel(mode) })}</Badge><span className='text-xs text-muted-foreground'>{t('{n} 条活跃绑定', { n: active.length })}</span></div>
-      <p className='text-xs text-muted-foreground'>{t('解除只清除网关的账号绑定，不删除聊天历史、不关闭粘性设置。后续成功请求仍可建立新的绑定；重启网关会清空这些进程本地记录。')}</p>
+      <p className='text-xs text-muted-foreground'>{t('解除只清除网关的账号绑定，不删除聊天历史、不关闭粘性设置。后续成功请求仍可建立新的绑定；重启网关后未过期的绑定会自动恢复，已过期的按过期处理。')}</p>
       {mode === 'off' || mode === 'turn' ? <p className='rounded-md bg-warning-soft p-3 text-xs text-warning'>{t('当前档位不保留跨请求粘滞，因此没有活跃绑定。')}</p> : null}
       <Input placeholder={t('搜索模型、账号或会话来源')} value={search} onChange={event => setSearch(event.currentTarget.value)} />
       <div className='routing-sticky-list'>{visible.map(entry => <div className='routing-sticky-row' key={entry.id}>

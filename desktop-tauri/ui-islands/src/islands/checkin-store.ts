@@ -730,7 +730,7 @@ export async function runGrowth(id: string, mode: 'light' | 'claim'): Promise<vo
   if (mode === 'claim') {
     toast(failed > 0 ? `领取完成，${failed} 项失败` : '✅ 领取完成', failed > 0 ? 'err' : 'ok')
   } else {
-    toast(failed > 0 ? `点亮完成，${failed} 项失败` : '✅ 已点亮，到「可领取」后手点「领取」', failed > 0 ? 'err' : 'ok')
+    toast(failed > 0 ? `执行完成，${failed} 项失败` : '✅ 执行完成', failed > 0 ? 'err' : 'ok')
   }
   await queryGrowth(id)
 }

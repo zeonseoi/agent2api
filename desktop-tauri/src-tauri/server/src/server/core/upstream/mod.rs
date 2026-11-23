@@ -326,12 +326,15 @@ impl RouteTarget {
 
 impl UpstreamService {
     pub fn new(store: AccountStore, auth: AuthService) -> Self {
+        // 粘滞绑定要跨重启保留：构造时把库里未过期的行读回内存（库不可用时
+        // 退化为纯内存，与落盘前的行为一致）。
+        let route = std::sync::Arc::new(route_state::RouteState::load(store.database_handle()));
         Self {
             store,
             auth,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             connections: Connections::new(),
-            route: std::sync::Arc::new(route_state::RouteState::new()),
+            route,
         }
     }
 

@@ -388,6 +388,8 @@
   "执行失败：{error}": "Falha na execução: {error}",
   "执行完成": "",
   "执行完成：{n} 项，{failed} 项失败": "",
+  "执行所选任务（只处理已实测沉淀的任务）": "Executar as tarefas selecionadas (apenas tarefas com receita verificada)",
+  "执行这一条（只处理已实测沉淀的任务）": "Executar esta tarefa (apenas tarefas com receita verificada)",
   "执行并抽奖": "Executar e sortear",
   "执行开学季任务并抽空抽奖机会（分享 / 对话 / 专家事件）": "Executar as tarefas de volta às aulas e gastar todas as chances de sorteio (compartilhar / conversar / eventos de especialista)",
   "执行规则": "Regras de execução",

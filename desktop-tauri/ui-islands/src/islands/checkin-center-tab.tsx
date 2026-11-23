@@ -328,7 +328,7 @@ function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
           size="sm"
           variant="outline"
           disabled={cache.status !== 'loaded' || running}
-          title="接单 + 点亮（不领奖）；领奖用「领取」（只处理已实测沉淀的任务）"
+          title={t('执行这一条（只处理已实测沉淀的任务）')}
           onClick={() => void runGrowth(row.id, 'light')}
         >
           {cache.running ? '执行中…' : '一键完成'}
@@ -700,7 +700,7 @@ export function CenterTab({ center }: { center: CheckinCenter }): React.ReactEle
                 </> : null}
                 {section === 'growth' ? <>
                   <Button size="sm" variant="outline" disabled={growthBusy || growthRows.length === 0}
-                    title={t('接单 + 点亮（不领奖）；领奖用「领取」（只处理已实测沉淀的任务）')}
+                    title={t('执行所选任务（只处理已实测沉淀的任务）')}
                     onClick={() => void runGrowthBatch(growthRows.map(row => row.id), 'light')}>
                     {store.growthBatch?.mode === 'light' ? t('执行中…') : t('一键完成')}
                   </Button>

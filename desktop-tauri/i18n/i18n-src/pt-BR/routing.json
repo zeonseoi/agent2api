@@ -799,7 +799,7 @@
   "解除": "Liberar",
   "解除全局路由的参与范围限制，继续使用与账号页共用的手动顺序和自动消耗规则；模型独立配置保持不变。": "Remova as restrições de participação do roteamento global, mantendo a ordem manual e as regras automáticas de consumo compartilhadas com Contas. As configurações independentes dos modelos permanecem inalteradas.",
   "解除全部粘滞": "Liberar todos os vínculos",
-  "解除只清除网关的账号绑定，不删除聊天历史、不关闭粘性设置。后续成功请求仍可建立新的绑定；重启网关会清空这些进程本地记录。": "A liberação remove apenas o vínculo de conta do gateway, sem excluir o histórico de conversas nem desativar a aderência. Solicitações posteriores bem-sucedidas podem criar novos vínculos. Reiniciar o gateway limpa esses registros locais do processo.",
+  "解除只清除网关的账号绑定，不删除聊天历史、不关闭粘性设置。后续成功请求仍可建立新的绑定；重启网关后未过期的绑定会自动恢复，已过期的按过期处理。": "A liberação remove apenas o vínculo de conta do gateway, sem excluir o histórico de conversas nem desativar a aderência. Solicitações posteriores bem-sucedidas podem criar novos vínculos. Após reiniciar o gateway, vínculos não expirados são restaurados automaticamente; os expirados permanecem expirados.",
   "解除当前模型全部粘滞": "Liberar vínculos deste modelo",
   "解除所有模型的全部会话粘滞。不会终止在途请求，之后的请求会重新选路。": "Libere todos os vínculos de sessão de todos os modelos. Solicitações em andamento não são encerradas; as posteriores escolhem uma nova rota.",
   "解除这个模型的全部会话粘滞。不会终止在途请求，之后的请求会重新选路。": "Libere todos os vínculos de sessão deste modelo. Solicitações em andamento não são encerradas; as posteriores escolhem uma nova rota.",

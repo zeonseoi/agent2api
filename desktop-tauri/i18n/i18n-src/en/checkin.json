@@ -388,6 +388,8 @@
   "执行失败：{error}": "Run failed: {error}",
   "执行完成": "",
   "执行完成：{n} 项，{failed} 项失败": "",
+  "执行所选任务（只处理已实测沉淀的任务）": "Run the selected tasks (only tasks with verified recipes)",
+  "执行这一条（只处理已实测沉淀的任务）": "Run this task (only tasks with verified recipes)",
   "执行并抽奖": "Run & draw",
   "执行开学季任务并抽空抽奖机会（分享 / 对话 / 专家事件）": "Run school-season tasks and spend all draw chances (share / chat / expert events)",
   "执行规则": "Execution rules",
