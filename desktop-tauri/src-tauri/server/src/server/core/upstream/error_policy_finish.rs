@@ -7,8 +7,11 @@ use crate::server::logging;
 use super::{error_policy, rotate, RouteTarget, UpstreamService};
 use super::payload::ProviderContext;
 
+/// `allow_switch` 为假时只做失败记账（冷却/降级/熔断），不重放也不换号 ——
+/// 固定投递通道在真正发送前会冻结请求，调用方据此只补记账。
 pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_>, providers: &[&str], keys: &rotate::CooldownKeys<'_>,
-    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize) -> bool {
+    target: &RouteTarget, error: &mut GatewayError, tried: &mut Vec<String>, switches_left: &mut usize, switch_total: usize,
+    allow_switch: bool) -> bool {
     let model = error.routing_error.as_ref().map(|decision| decision.model.clone()).unwrap_or_else(|| {
         target.account.as_ref().map(|account| keys.for_account(account)).unwrap_or_else(|| keys.for_provider(&target.provider))
     });
@@ -16,7 +19,8 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     let decision = error.routing_error.clone().unwrap_or_else(|| error_policy::for_error_with(&ctx.error_policy, &target.provider, &model, error, false));
     error_policy::attach(error, &decision);
     error_policy::note(ctx.telemetry, &decision, None);
-    if decision.hard_stop || ctx.telemetry.replay_guard().blocked() || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started() { return false; }
+    if decision.hard_stop || ctx.telemetry.is_cancelled() || ctx.telemetry.response_started()
+        || allow_switch && ctx.telemetry.replay_guard().blocked() { return false; }
     if let Some(account) = target.account_id.as_deref() {
         if let Some(entry) = error_policy::remember_cooldown(service, settings, account, &model, error, &decision) {
             let reset = entry["resetAt"].as_i64().unwrap_or(0);
@@ -36,6 +40,8 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             ctx.telemetry.note_error_policy(json!({ "reason": "该账号需要重新登录" }));
         }
     }
+    // 记账已完成；请求已被固定投递通道冻结时到此为止，不因本次失败再发一次。
+    if !allow_switch { return false; }
     if !decision.switches() { return false; }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {

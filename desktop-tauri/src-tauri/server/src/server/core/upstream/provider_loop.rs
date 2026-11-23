@@ -798,7 +798,7 @@ async fn attempt_queue(
                     }
                     let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -871,7 +871,14 @@ async fn attempt_queue(
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
                 Err(error) => {
-                    if ctx.telemetry.replay_guard().blocked() { return Err(error); }
+                    let mut error = error;
+                    if ctx.telemetry.replay_guard().blocked() {
+                        // 固定投递通道在发送前已冻结本次请求：失败记账照做（模型冷却、降级），
+                        // 但不重放、不换号 —— 下一轮选路会自己避开被限流的账号与模型。
+                        super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
+                            &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, false);
+                        return Err(error);
+                    }
                     if super::vision_compat::handles_error(ctx, &error) { return Err(error); }
                     if matches!(error.code.as_deref(), Some("plugin_busy" | "gateway_busy" | "account_busy" | "plugin_resource_limit"
                         | "plugin_protocol_error" | "plugin_trap" | "plugin_response_started" | "web_tools_invalid_request")) { return Err(error); }
@@ -893,9 +900,8 @@ async fn attempt_queue(
                             tried_ids.push(attempt_key.clone());
                         }
                     }
-                    let mut error = error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &failed_target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1157,7 +1163,7 @@ async fn attempt_queue(
                         if account_unavailable || error.status_code == 501 {
                             let mut error = error;
                             if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                                &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
                                 last_error = Some(error); continue 'accounts;
                             }
                             return Err(error);
@@ -1559,7 +1565,7 @@ async fn attempt_queue(
                     if ctx.telemetry.replay_guard().blocked() { return Err(failure.error); }
                     let mut error = failure.error;
                     if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                        &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
                         last_error = Some(error); continue 'accounts;
                     }
                     return Err(error);
@@ -1664,7 +1670,7 @@ async fn attempt_queue(
                 super::error_policy::attach(&mut error, &decision);
                 ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
                 if super::error_policy_finish::finish_failure(service, ctx, provider_ids, &cooldown_keys,
-                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total) {
+                    &target, &mut error, &mut tried_ids, &mut switches_left, switch_total, true) {
                     last_error = Some(error); continue 'accounts;
                 }
                 return Err(error);
