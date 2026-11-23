@@ -25,6 +25,7 @@ export function ReportOverview({ summary, loading }: { summary: StatsSummary | n
       : t('按模型官方/自定义单价估算')
   const cells = [
     { key: 'tokens', label: t('总 Token'), value: <CompactValue value={overview?.tokens} />, sub: t('输入 + 输出') },
+    { key: 'credits', label: t('总 Credits'), value: formatCredits(overview?.credits), sub: t('上游扣费') },
     { key: 'cost', label: t('预估费用'), value: formatCost(costUsd, pricing.currency, pricing.exchangeRate), sub: costSub },
     { key: 'requests', label: t('总请求数'), value: <CompactValue value={requests} />, sub: t('{n} 次请求', { n: formatInt(requests) }) },
     { key: 'success', label: t('成功请求数'), value: <CompactValue value={success} />, sub: t('成功率 {rate} · 失败 {n} 次', { rate: requests ? formatPercent(success / requests) : '—', n: formatInt(Math.max(0, requests - success)) }) },
