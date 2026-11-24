@@ -42,6 +42,16 @@ export function scopeLabels(t: ErrorTranslate): Record<CooldownScope, string> {
 export function ruleLabel(rule: ErrorRule, t: ErrorTranslate): string {
   return rule.id === rule.kind ? kindLabels(t)[rule.kind] : rule.name
 }
+/** 投影成后端认识的纯 ErrorRule，去掉插件规则独有的 pluginRuleId / reason。 */
+export function plainRule(rule: ErrorRule): ErrorRule {
+  return {
+    id: rule.id, name: rule.name, kind: rule.kind, statuses: [...rule.statuses], code: rule.code,
+    provider: rule.provider, model: rule.model, enabled: rule.enabled, action: rule.action,
+    cooldown: rule.cooldown, fallbackSeconds: rule.fallbackSeconds, exponential: rule.exponential,
+    fallbackCapSeconds: rule.fallbackCapSeconds, scope: rule.scope,
+  }
+}
+
 /** 合并用户自定义覆盖规则与插件默认规则，避免同一插件规则在界面上重复计数。 */
 export function mergeProviderRules(settings: ErrorSettings, providerRules: PluginErrorRule[] = []): ProviderRuleEntry[] {
   const consumed = new Set<number>()
@@ -54,7 +64,7 @@ export function mergeProviderRules(settings: ErrorSettings, providerRules: Plugi
     const overrideRule = overrideIndex >= 0 ? settings.overrides[overrideIndex] : undefined
     pluginEntries.push({
       id: pluginRule.id,
-      rule: overrideRule ? { ...overrideRule } : { ...pluginRule },
+      rule: plainRule(overrideRule ?? pluginRule),
       custom: false,
       pluginDefault: pluginRule,
       overridden: Boolean(overrideRule),

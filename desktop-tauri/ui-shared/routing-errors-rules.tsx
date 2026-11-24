@@ -3,7 +3,7 @@ import { Badge, Button, Card, CardFooter, Dialog, DialogBody, DialogContent, Dia
 import { newId } from './ids'
 import { ErrorChoice, ErrorIcon, ErrorNumber, ErrorText, ErrorToggle } from './routing-errors-controls'
 import { ErrorProviderExceptions } from './routing-errors-exceptions'
-import { actionLabels, cooldownSummary, kindLabels, ruleLabel, scopeLabels, type CooldownMode, type CooldownScope, type ErrorAction, type ErrorKind, type ErrorRule, type ErrorSettings, type ErrorTranslate, type PluginErrorRule } from './routing-errors-types'
+import { actionLabels, cooldownSummary, kindLabels, plainRule, ruleLabel, scopeLabels, type CooldownMode, type CooldownScope, type ErrorAction, type ErrorKind, type ErrorRule, type ErrorSettings, type ErrorTranslate, type PluginErrorRule } from './routing-errors-types'
 
 export function ErrorRuleEditor({ rule, providers, t, exception, pluginDefault, onClose, onSave }: {
   rule: ErrorRule; providers: { id: string; label: string }[]; t: ErrorTranslate; exception: boolean; pluginDefault?: PluginErrorRule; onClose(): void; onSave(rule: ErrorRule): void
@@ -34,7 +34,7 @@ export function ErrorRuleEditor({ rule, providers, t, exception, pluginDefault, 
     if (![draft.fallbackSeconds, draft.fallbackCapSeconds].every(value => Number.isInteger(value) && value >= 1 && value <= 86400) || draft.fallbackCapSeconds < draft.fallbackSeconds) {
       setError(t('冷却时间必须在 1–86400 秒范围，上限不能短于首次时间。')); return
     }
-    onSave({ ...draft, name: draft.name.trim(), provider: draft.provider.trim(), code: draft.code.trim(), model: draft.model.trim(), statuses: [...new Set(values.map(Number))] }); onClose()
+    onSave(plainRule({ ...draft, name: draft.name.trim(), provider: draft.provider.trim(), code: draft.code.trim(), model: draft.model.trim(), statuses: [...new Set(values.map(Number))] })); onClose()
   }
   const deprioritizeMode = draft.cooldown === 'deprioritize'
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className='re-rule-dialog'>
