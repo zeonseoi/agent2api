@@ -68,9 +68,11 @@ use crate::state::AppState;
 
 /// 启动等待上限。
 ///
-/// 旧实现给 node 冷启动留了 12 秒；进程内服务器没有进程启动与模块加载开销，
-/// bind + 首次响应是毫秒级的，5 秒足够覆盖「系统繁忙/杀软扫描」这类抖动。
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// bind + 首次响应本身是毫秒级的，但**插件首次加载与杀软扫描**会把这段时间
+/// 拉长：实测新 exe 首次启动时插件要 6–10 秒才就绪，5 秒会把正常启动判成
+/// 「服务启动超时」，随后壳侧收掉刚起的网关，表现为「要重启几次才成功」。
+/// 30 秒覆盖冷启动 + 扫描，真正卡死时仍能在壳侧总等待（60 秒）内给出失败。
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 const HEALTH_INTERVAL: Duration = Duration::from_millis(100);
 
