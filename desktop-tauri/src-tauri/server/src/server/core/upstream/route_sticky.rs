@@ -180,6 +180,17 @@ impl StickySessions {
         values
     }
 
+    /// 某个候选失败后解除该会话的绑定（仅当绑定的正是这个候选且世代未变）。
+    pub(super) fn forget(&self, key: &str, model: &str, candidate: &str, generation: u64) {
+        if key.is_empty() || candidate.is_empty() { return; }
+        let Ok(mut table) = self.table.lock() else { return };
+        if table.generation != generation { return; }
+        let id = entry_id(key, model);
+        if table.entries.get(&id).is_some_and(|entry| entry.account_id == candidate) {
+            table.entries.remove(&id);
+        }
+    }
+
     pub(super) fn clear(&self, id: Option<&str>, model: Option<&str>) -> usize {
         let cleared = {
             let Ok(mut table) = self.table.lock() else { return 0 };
@@ -332,5 +343,26 @@ mod tests {
         write_row(&conn, &entry("id-d", "other", "trae:a4", 1)).unwrap();
         assert_eq!(remove_matching(&conn, Some("id-d"), Some("missing")).unwrap(), 0);
         assert_eq!(read_rows(&conn).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_removes_only_matching_candidate_in_current_generation() {
+        let sticky = StickySessions::default();
+        let gen = sticky.generation();
+        sticky.bind("k1", "m1", "a1", "test", 1000, 60_000, gen);
+        // 候选不匹配时不解绑（避免覆盖新成功绑定的候选）
+        sticky.forget("k1", "m1", "a2", gen);
+        assert_eq!(sticky.lookup("k1", "m1", 1001, 60_000).as_deref(), Some("a1"));
+        // 世代过期时不解绑
+        sticky.forget("k1", "m1", "a1", gen.wrapping_add(1));
+        assert_eq!(sticky.lookup("k1", "m1", 1002, 60_000).as_deref(), Some("a1"));
+        // 匹配候选且同世代时立即解绑
+        sticky.forget("k1", "m1", "a1", gen);
+        assert!(sticky.lookup("k1", "m1", 1003, 60_000).is_none());
     }
 }
