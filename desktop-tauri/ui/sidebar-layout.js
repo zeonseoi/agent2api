@@ -72,6 +72,8 @@
     { key: 'assistant', label: wbI18n.t('对话'), icon: 'spark' },
     { key: 'overview', label: wbI18n.t('报表'), icon: 'overview' },
     { key: 'accounts', label: wbI18n.t('账号'), icon: 'accounts' },
+    // 统一排序组：跨家交错，影响全局默认路由的顺序；管理页从账号页工具栏独立出来
+    { key: 'sorting', label: wbI18n.t('统一排序'), icon: 'sort' },
     // 签到中心：**固定项**，与「账号」「模型管理」同级，不随插件装没装而消失。
     //
     // 早先它由插件申报（`pack.json` 的 `ui`），没装插件时菜单里就没有这一项 ——
@@ -229,7 +231,7 @@
     return {
       groups: [
         { id: 'g-overview', label: '概览', custom: false, hidden: false,
-          items: ['assistant', 'overview', 'accounts', 'checkin'] },
+          items: ['assistant', 'overview', 'accounts', 'sorting', 'checkin'] },
         { id: 'g-forward', label: '转发链路', custom: false, hidden: false,
           items: ['routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,

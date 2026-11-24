@@ -1,0 +1,262 @@
+/**
+ * 统一排序组（一级菜单「统一排序」）的页面样式。
+ *
+ * 账号页同款骨架：占满高度的 .panel + .toolbar + 一张按组折叠的表格；
+ * 规则编辑在右侧 Sheet 抽屉里。颜色与间距全部走全局令牌。
+ */
+
+.page.active[data-page="sorting"] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: var(--pad);
+}
+
+.page[data-page="sorting"] .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+
+.sorting-panel {
+  overflow: hidden;
+}
+
+/* 工具栏里的账号搜索：宽度与账号页的 .acct-search 同一档 */
+.sorting-search {
+  width: clamp(170px, 22vw, 240px);
+}
+
+.sorting-summary {
+  cursor: default;
+}
+
+.sorting-summary-count {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sorting-summary-muted {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.sorting-dirty-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warn-bd);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sorting-error {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--warn-bd);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ─── 分组表 ─────────────────────────────────── */
+
+.sorting-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--table-bg);
+}
+
+.sorting-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sorting-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.sorting-table thead th.sorting-provider-cell {
+  width: 150px;
+}
+
+.sorting-table thead th.sorting-row-actions {
+  width: 180px;
+  text-align: right;
+}
+
+/* 组头 / 未分组表头：整行一块浅底，靠上下 1px 线与成员行分开 */
+.sorting-group-row td {
+  padding: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-inset);
+}
+
+.sorting-group-row:first-child td {
+  border-top: 0;
+}
+
+.sorting-ungrouped-row td {
+  border-top: 1px solid var(--border);
+}
+
+.sorting-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.sorting-group-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sorting-group-meta {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sorting-group-providers {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.sorting-group-rules {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.sorting-edit-rule {
+  margin-left: auto;
+}
+
+/* ─── 成员行 ─────────────────────────────────── */
+
+.sorting-account-row td {
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.sorting-account-row:hover td {
+  background: var(--nav-hover);
+}
+
+.sorting-account-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sorting-provider-cell {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.sorting-row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sorting-assign {
+  width: 120px;
+  height: 26px;
+  font-size: 11.5px;
+}
+
+.sorting-empty-cell {
+  padding: 14px 16px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.sorting-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sorting-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* ─── 规则抽屉 ───────────────────────────────── */
+
+.sorting-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sorting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sorting-field-label {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sorting-drawer-foot {
+  display: flex;
+  gap: 8px;
+}
+
+.sorting-drawer-foot > :first-child {
+  margin-right: auto;
+}
+
+@media (max-width: 767px) {
+  .sorting-search {
+    width: 100%;
+  }
+
+  .sorting-table {
+    min-width: 560px;
+  }
+}
