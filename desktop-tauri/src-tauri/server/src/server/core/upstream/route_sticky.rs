@@ -344,11 +344,6 @@ mod tests {
         assert_eq!(remove_matching(&conn, Some("id-d"), Some("missing")).unwrap(), 0);
         assert_eq!(read_rows(&conn).unwrap().len(), 1);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn forget_removes_only_matching_candidate_in_current_generation() {

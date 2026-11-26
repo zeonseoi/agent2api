@@ -129,6 +129,7 @@ export function DonutTooltip(props: ChartTooltipProps) {
     {/* 用量行读 `valueText`（Token 缩写 / Credits 两位小数），不在这里按量纲分支 */}
     <DataRow label={row.unit || t('Token')}><strong>{row.valueText}</strong></DataRow>
     <DataRow label={t('总请求数')}><strong>{formatInt(row.requests)}</strong></DataRow>
+    {row.mergedSources ? <p className='report-tooltip-note'>{t('已合并：{sources}', { sources: row.mergedSources.join('、') })}</p> : null}
     {row.members ? <p className='report-tooltip-note'>{t('仅在饼图合并，右侧列表完整保留每个项目')}</p> : null}
   </ChartTooltip>
 }

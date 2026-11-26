@@ -32,6 +32,7 @@ export type StatsGroup = {
   tokenDetailsComplete?: boolean
   costUsd?: number; unpricedRequests?: number
   source?: string; filterValue?: string; state?: 'enabled' | 'disabled' | 'deleted'
+  mergedSources?: string[]
 }
 export type StatsOverview = StatsUsage & {
   successful?: number; tokens?: number; activeDays?: number; streak?: number
@@ -42,6 +43,7 @@ export type StatsOverview = StatsUsage & {
 export type CacheRateWindow = { inputTokens?: number; hitTokens?: number; rate?: number }
 export type StatsSummary = {
   range?: string; startDate?: string; endDate?: string
+  origin?: string; hasLocalDirect?: boolean
   currency?: 'usd' | 'cny'; exchangeRate?: number
   fx?: { rate: number; updatedAt: number; stale: boolean; fallback: boolean }
   overview?: StatsOverview
@@ -51,6 +53,7 @@ export type StatsSummary = {
   clients?: StatsGroup[]
   apiKeys?: StatsGroup[]
   apiKeyDetail?: { filterValue?: string; label?: string; requests?: number; totalTokens?: number; costUsd?: number; unpricedRequests?: number; detailsComplete?: boolean; clients?: StatsGroup[]; models?: StatsGroup[] } | null
+  clientDetail?: { id?: string; label?: string; requests?: number; totalTokens?: number; costUsd?: number; unpricedRequests?: number; apiKeysComplete?: boolean; modelsComplete?: boolean; apiKeys?: StatsGroup[]; models?: StatsGroup[] } | null
   heatmap?: StatsDay[]
   cacheRates?: Record<string, CacheRateWindow>
   cacheTrend24h?: StatsHour[]
@@ -223,6 +226,7 @@ export type RankRowView = {
   full: string; tip: string
   tokensText: string; percentText: string; barWidth: string
   costUsd: number; unpricedRequests: number
+  mergedSources?: string[]
 }
 
 /** null 表示契约没有这一维；空数组表示这个区间没有用量。 */
@@ -236,6 +240,7 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
       tokens: Number(item?.totalTokens ?? item?.tokens) || 0,
       costUsd: Number(item?.costUsd) || 0,
       unpricedRequests: Number(item?.unpricedRequests) || 0,
+      mergedSources: Array.isArray(item?.mergedSources) && item.mergedSources.length > 1 ? item.mergedSources : undefined,
     }))
     .filter(item => item.tokens > 0)
 
@@ -250,17 +255,22 @@ export function rankRows(list: StatsGroup[] | undefined): RankRowView[] | null {
     const text = formatTokens(item.tokens)
     const name = item.label || item.id || t('未知')
     const full = item.id ? t('{name}（{id}）', { name, id: item.id }) : name
+    const baseTip = t('{name}：{tokens} tokens · 占 {pct}%', { name: full, tokens: text, pct: percent.toFixed(1) })
+    const tip = item.mergedSources
+      ? t('{base} · 已合并：{sources}', { base: baseTip, sources: item.mergedSources.join('、') })
+      : baseTip
     return {
       key: `${index}-${item.id || name}`,
       id: item.id,
       name,
       full,
-      tip: t('{name}：{tokens} tokens · 占 {pct}%', { name: full, tokens: text, pct: percent.toFixed(1) }),
+      tip,
       tokensText: text,
       percentText: `${percent.toFixed(1)}%`,
       barWidth: `${percent.toFixed(1)}%`,
       costUsd: item.costUsd,
       unpricedRequests: item.unpricedRequests,
+      mergedSources: item.mergedSources,
     }
   })
 }
@@ -289,6 +299,7 @@ export type DonutDatum = {
   unit: string
   requests: number; percentage: number
   members?: DonutDatum[]
+  mergedSources?: string[]
 }
 export type DonutView = {
   size: number; data: DonutDatum[]; rows: DonutDatum[]; total: number
@@ -347,6 +358,7 @@ function usageGroups(list: StatsGroup[] | undefined) {
       name: String(item?.label ?? item?.model ?? item?.id ?? '').trim(),
       tokens: Number(item?.totalTokens ?? item?.tokens) || 0,
       requests: Number(item?.requests) || 0,
+      mergedSources: Array.isArray(item?.mergedSources) && item.mergedSources.length > 1 ? item.mergedSources : undefined,
     }))
     .filter(item => Number.isFinite(item.tokens) && item.tokens > 0)
     .sort((left, right) => right.tokens - left.tokens)
@@ -370,6 +382,7 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string,
       name: String(item?.label ?? item?.model ?? item?.id ?? '').trim(),
       value: spec.pick(item),
       requests: Number(item?.requests) || 0,
+      mergedSources: Array.isArray(item?.mergedSources) && item.mergedSources.length > 1 ? item.mergedSources : undefined,
     }))
     .filter(item => Number.isFinite(item.value) && item.value > 0)
     .sort((left, right) => right.value - left.value)
@@ -377,6 +390,11 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string,
   const total = rows.reduce((sum, item) => sum + item.value, 0)
   if (!total) return null
   const colors = modelColorMap(list)
+  // 合并来源只影响气泡文案（多出来的名字），占比与图例口径不变。
+  const tip = (name: string, value: number, requests: number, mergedSources?: string[]) => {
+    const base = spec.tip(name, value, requests, value / total)
+    return mergedSources ? t('{base} · 已合并：{sources}', { base, sources: mergedSources.join('、') }) : base
+  }
   const data = rows.map((item, index): DonutDatum => {
     const name = item.name || unknownLabel
     return {
@@ -384,7 +402,8 @@ export function donutView(list: StatsGroup[] | undefined, unknownLabel: string,
       fill: colors.get(name) ?? SLICE_COLORS[index % SLICE_COLORS.length],
       value: item.value, valueText: spec.format(item.value), unit: spec.unitLabel(),
       requests: item.requests, percentage: item.value / total,
-      tip: spec.tip(name, item.value, item.requests, item.value / total),
+      tip: tip(name, item.value, item.requests, item.mergedSources),
+      mergedSources: item.mergedSources,
     }
   })
   const threshold = settings.enabled ? settings.threshold / 100 : 0
@@ -439,74 +458,40 @@ export function heatThresholdsOf(days: StatsDay[] | undefined): number[] {
   return heatLevelsFor(list.reduce((max, day) => Math.max(max, Number(day?.tokens) || 0), 0))
 }
 
-export type HeatmapView = {
-  width: number
-  height: number
-  months: { key: string; x: number; text: string }[]
-  weekdays: { key: string; x: number; y: number; text: string }[]
-  cells: { key: string; level: number; x: number; y: number; size: number; tip: string }[]
+export type HeatmapGridView = {
+  cols: number
+  months: { key: string; col: number; text: string }[]
+  thresholds: number[]
+  cells: ({ key: string; day: StatsDay; level: number } | null)[]
 }
 
-/** 固定一年，格子在 7–26px 内适配宽度；极窄时交给容器横向滚动。 */
-export function heatmapView(days: StatsDay[] | undefined, boxWidth: number): HeatmapView | null {
+/** 固定一年，铺满容器宽度；月份标签按周列对齐并避免拥挤重叠。 */
+export function heatmapGrid(days: StatsDay[] | undefined): HeatmapGridView | null {
   const list = Array.isArray(days) ? days : []
   if (!list.length) return null
 
   const pad = (parseDay(list[0].date).getDay() + 6) % 7
-  const cells: (StatsDay | null)[] = new Array(pad).fill(null).concat(list)
-  const cols = Math.ceil(cells.length / 7)
-
-  const gap = 3
-  const labelW = 20
-  const available = boxWidth - labelW
-  const fit = Math.floor((available - gap * (cols - 1)) / cols)
-  const size = Math.max(7, Math.min(26, fit))
-  const topH = size + 3
-  const step = size + gap
-  const gridW = labelW + cols * step - gap
-  const offsetX = Math.max(0, Math.round((boxWidth - gridW) / 2))
-  const height = topH + 7 * step - gap + 2
-  const width = Math.max(gridW, Math.round(boxWidth))
+  const raw: (StatsDay | null)[] = new Array(pad).fill(null).concat(list)
+  const cols = Math.ceil(raw.length / 7)
+  while (raw.length < cols * 7) raw.push(null)
 
   const thresholds = heatThresholdsOf(list)
   const levelOf = (tokens: unknown) => thresholds.findIndex(limit => Number(tokens) <= limit)
 
-  const cellsOut: HeatmapView['cells'] = []
-  for (let col = 0; col < cols; col += 1) {
-    for (let row = 0; row < 7; row += 1) {
-      const day = cells[col * 7 + row]
-      if (!day) continue
-      const requests = Number(day.requests) || 0
-      const tokens = Number(day.tokens) || 0
-      // 失败请求也算活跃；Token 只决定颜色，不能据此说成「无请求」。
-      const tip = requests
-        ? t('{date} · {tokens} tokens · {n} 次请求', {
-          date: dayLabel(day.date), tokens: formatTokens(tokens), n: formatInt(requests),
-        })
-        : t('{date} · 无请求', { date: dayLabel(day.date) })
-      cellsOut.push({
-        key: String(day.date),
-        level: levelOf(tokens),
-        x: round1(offsetX + labelW + col * step),
-        y: round1(topH + row * step),
-        size,
-        tip,
-      })
+  const cells = raw.map(day => {
+    if (!day) return null
+    return {
+      key: String(day.date),
+      day,
+      level: levelOf(Number(day.tokens) || 0),
     }
-  }
+  })
 
-  const weekdays = WEEKDAY_ROWS.map(([row, text]) => ({
-    key: text,
-    x: offsetX + labelW - 6,
-    y: round1(topH + row * step + size / 2),
-    text,
-  }))
-
-  const months: HeatmapView['months'] = []
+  const months: HeatmapGridView['months'] = []
   let lastMonth = -1
   let lastLabelCol = -9
   for (let col = 0; col < cols; col += 1) {
-    const head = cells.slice(col * 7, col * 7 + 7).find(Boolean)
+    const head = raw.slice(col * 7, col * 7 + 7).find(Boolean)
     if (!head) continue
     const month = parseDay(head.date).getMonth()
     if (month === lastMonth) continue
@@ -514,12 +499,13 @@ export function heatmapView(days: StatsDay[] | undefined, boxWidth: number): Hea
     if (col - lastLabelCol < 3) continue
     lastLabelCol = col
     months.push({
-      key: `${month}-${col}`, x: round1(offsetX + labelW + col * step),
+      key: `${month}-${col}`,
+      col,
       text: t('{m}月', { m: month + 1 }),
     })
   }
 
-  return { width, height, months, weekdays, cells: cellsOut }
+  return { cols, months, thresholds, cells }
 }
 
 export function heatLegendItems(thresholds: number[]): { level: number; text: string }[] {
@@ -528,7 +514,7 @@ export function heatLegendItems(thresholds: number[]): { level: number; text: st
 
 /* ─── 板块五：缓存命中率四窗口 ────────────── */
 
-export type CacheRateCell = { key: string; label: string; value: string; sub: string }
+export type CacheRateCell = { key: string; label: string; value: string; sub: string; rate: number | null; hasInput: boolean }
 
 export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefined): CacheRateCell[] {
   const data = rates || {}
@@ -541,6 +527,7 @@ export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefine
   return windows.map(([key, label]) => {
     const item = data[key] || {}
     const input = Number(item.inputTokens) || 0
+    const rate = input > 0 && typeof item.rate === 'number' && Number.isFinite(item.rate) ? item.rate : null
     return {
       key,
       label,
@@ -548,6 +535,8 @@ export function cacheRateCells(rates: Record<string, CacheRateWindow> | undefine
       sub: t('命中 {hit} / 输入 {input}', {
         hit: formatTokens(item.hitTokens), input: formatTokens(input),
       }),
+      rate,
+      hasInput: input > 0,
     }
   })
 }
