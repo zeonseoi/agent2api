@@ -30,7 +30,7 @@ export function ErrorPreviewPanel({ settings, providers, providerRules = [], t, 
           </div>
           <ErrorToggle label={t('明确指定账号')} checked={input.pinned} onChange={pinned => patch({ pinned })} />
           <div className='re-form-grid'><ErrorNumber label={t('已经换过的账号数')} unit={t('个')} value={input.switchesUsed} max={100} onChange={switchesUsed => patch({ switchesUsed })} />
-            <ErrorNumber label={t('已经重发的次数')} unit={t('次')} value={input.resendsUsed} max={10} onChange={resendsUsed => patch({ resendsUsed })} />
+            <ErrorNumber label={t('已经重发的次数')} unit={t('次')} value={input.resendsUsed} max={100} onChange={resendsUsed => patch({ resendsUsed })} />
             <ErrorNumber label={t('连续失败次数')} unit={t('次')} value={input.strikes} min={1} max={10} onChange={strikes => patch({ strikes })} /></div>
         </div></CollapsibleContent>
       </Collapsible>

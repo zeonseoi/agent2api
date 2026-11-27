@@ -2813,7 +2813,7 @@ mod auto_continue_tests {
 #[cfg(test)]
 mod retry_and_error_policy_tests {
     use super::*;
-    use super::error_policy_types::{ErrorAction, ErrorKind, ErrorSettings, MAX_SWITCHES};
+    use super::error_policy_types::{ErrorAction, ErrorKind, ErrorSettings, MAX_RESENDS, MAX_SWITCHES};
     use serde_json::json;
 
     #[test]
@@ -2862,5 +2862,25 @@ mod retry_and_error_policy_tests {
         let fallback_cfg = build(over_100);
         assert_eq!(fallback_cfg.retry.account_switch_count, 32);
         assert_eq!(fallback_cfg.error_policy.settings.switches, 32);
+    }
+
+    /// 原账号重发次数的上界已从 10 放开到 100（与换号上限同量级）。
+    /// 防死循环靠的是累计等待预算，不是这个数，见 `RetryBudget::take_retry`。
+    #[test]
+    fn resend_limit_is_raised_to_100() {
+        assert_eq!(MAX_RESENDS, 100);
+
+        let mut at_max = ErrorSettings::default();
+        at_max.resends = MAX_RESENDS;
+        assert!(at_max.validate().is_ok());
+
+        let mut over_max = at_max;
+        over_max.resends = MAX_RESENDS + 1;
+        assert!(over_max.validate().is_err());
+
+        // 旧上限 10 不再是边界：11 必须被接受
+        let mut above_old = ErrorSettings::default();
+        above_old.resends = 11;
+        assert!(above_old.validate().is_ok());
     }
 }

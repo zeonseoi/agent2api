@@ -79,6 +79,14 @@ pub struct DeclaredErrorPolicy {
 /// 换账号上限的上界：与转发层 `MAX_ROUTE_ATTEMPTS` 对齐。
 pub const MAX_SWITCHES: u64 = 100;
 
+/// 原账号重发次数的上界。
+///
+/// 真正防死循环的不是这个数，而是 `wait_budget_seconds`（累计等待预算）：
+/// 每次重发都要先扣掉 `retry_delay`，预算耗完就停（见 `RetryBudget::take_retry`）。
+/// 所以这里只防「填了个荒唐的大数」和整数溢出，不承担限流职责 —— 与
+/// `MAX_SWITCHES` 取同一量级即可。
+pub const MAX_RESENDS: u64 = 100;
+
 fn all_providers() -> String { "*".into() }
 fn enabled() -> bool { true }
 
@@ -166,7 +174,7 @@ pub enum RuleSource { Override, Plugin, Global }
 impl ErrorSettings {
     pub fn validate(&self) -> Result<(), String> {
         let bounds = [
-            (self.resends, 0, 10, "原账号重发次数"), (self.switches, 0, MAX_SWITCHES, "换账号上限"),
+            (self.resends, 0, MAX_RESENDS, "原账号重发次数"), (self.switches, 0, MAX_SWITCHES, "换账号上限"),
             (self.interval_seconds, 0, 300, "重发间隔"), (self.wait_budget_seconds, 0, 300, "累计等待上限"),
             (self.cooldown_floor_seconds, 1, 60, "最短冷却"), (self.backoff_seconds, 1, 3600, "首次失败休息"),
             (self.backoff_cap_seconds, self.backoff_seconds, 3600, "最长失败休息"), (self.sink_seconds, 30, 3600, "降低优先级时长"),
