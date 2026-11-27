@@ -25,7 +25,7 @@ function MakeupGroup({ group, entry, options, paused }: {
       <Badge variant='outline' shape='tag'>{paused ? t('已暂停') : t('补签检查')}</Badge>
     </div>
     <div className='ck-schedule-group-meta'><span>{t('{n} 个平台', { n: group.rows.length })}</span>
-      <span>{t('每天补查一次')}</span>
+      <span>{t('补到签上为止')}</span>
     </div>
     <div className='ck-makeup-group-providers'>{group.rows.slice(0, 3).map(row => t(row.label)).join('、')}
       {group.rows.length > 3 ? ` · +${group.rows.length - 3}` : ''}
@@ -92,20 +92,23 @@ function ActivityRetryPlan({ entry, masterOn, onEdit }: {
   // 次数用完的账号已经不在 `retryCount` 里了（后端摘掉了），所以数字归零不等于
   // 「没事了」—— 这两种状态必须分开说，否则用户以为签到已经完成。
   const exhausted = enabled ? (entry.retryExhausted?.length ?? 0) : 0
+  // 还在等补签的平台数：补签是「反复补到签上」，这期间 `retryCount` 可能归零
+  // （失败行不进那张表），只有这个数字能说明「还有活没干完」
+  const makeupPending = enabled ? (entry.makeupPendingProviders?.length ?? 0) : 0
   return <Card render={<section />} className='ck-activity-retry'>
     <CardHeader className='ck-schedule-plan-head'>
       <div className='ck-schedule-plan-name'><h3>{scheduleName(entry)}</h3>
         <Badge variant={active ? 'brand' : 'outline'} shape='tag'>{!enabled ? t('重试关闭') : active ? t('重试开启') : t('重试已暂停')}</Badge>
-        <p>{enabled ? t('间隔 {gap} 分钟 · 每账号每天最多重试 {limit} 次', { gap: entry.retryGapMinutes, limit: entry.retryLimit })
+        <p>{enabled ? t('间隔 {gap} 分钟起（逐次翻倍）· 每账号每天最多重试 {limit} 次', { gap: entry.retryGapMinutes, limit: entry.retryLimit })
           : t('不自动重试等待中的活动')}</p>
       </div>
       <Button size='sm' variant='ghost' disabled={store.saving} onClick={onEdit}>{t('调整重试')}</Button>
     </CardHeader>
     <CardContent className='grid gap-3'>
-      {!enabled ? <p className='ck-schedule-hint'>{t('活动窗口重试已关闭，等待窗口或活动下发的账号不会自动再试。')}</p> : <>
+      {!enabled ? <p className='ck-schedule-hint'>{t('活动窗口重试已关闭，等待窗口、活动下发或暂时失败（限流/繁忙）的账号都不会自动再试。')}</p> : <>
         {count > 0 ? <div className='ck-activity-retry-notice' role='status'>
-          <Badge variant='warning' shape='tag'>{t('{n} 个账号等待窗口或活动', { n: count })}</Badge>
-          <span>{t('只重试这些账号，不会重签整个计划。具体原因见签到记录。')}</span>
+          <Badge variant='warning' shape='tag'>{t('{n} 个账号等待重试', { n: count })}</Badge>
+          <span>{t('包括等窗口、活动下发与暂时失败（限流/繁忙）的账号，按退避逐次重试；只重试这些账号，不重签整个计划。')}</span>
           <Button size='xs' variant='link' onClick={() => goCheckinTab('records')}>{t('查看签到记录')}</Button>
         </div> : null}
         {exhausted > 0 ? <div className='ck-activity-retry-notice' role='status'>
@@ -113,8 +116,13 @@ function ActivityRetryPlan({ entry, masterOn, onEdit }: {
           <span>{t('今天不再自动重试，明天自动重置。要现在再试一次，用签到计划里的「立即执行」。')}</span>
           <Button size='xs' variant='link' onClick={() => goCheckinTab('records')}>{t('查看签到记录')}</Button>
         </div> : null}
-        {count === 0 && exhausted === 0
-          ? <p className='ck-schedule-hint'>{t('当前没有等待窗口或活动下发的账号。')}</p> : null}
+        {makeupPending > 0 ? <div className='ck-activity-retry-notice' role='status'>
+          <Badge variant='brand' shape='tag'>{t('{n} 个平台还在补签', { n: makeupPending })}</Badge>
+          <span>{t('这些平台今天还没签上，会按退避间隔一直补到签上为止；跨零点作废。')}</span>
+          <Button size='xs' variant='link' onClick={() => goCheckinTab('records')}>{t('查看签到记录')}</Button>
+        </div> : null}
+        {count === 0 && exhausted === 0 && makeupPending === 0
+          ? <p className='ck-schedule-hint'>{t('当前没有等待重试的账号。')}</p> : null}
       </>}
     </CardContent>
   </Card>

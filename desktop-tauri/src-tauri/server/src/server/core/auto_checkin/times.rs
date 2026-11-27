@@ -152,25 +152,90 @@ pub fn provider_retry_time(schedule: &Schedule, provider: &str) -> Option<String
     (target < 1440).then(|| format_minutes(target))
 }
 
-/// 今天的补签轮该补哪些家：该家的补签时刻已到、今天还没补过。
+/// 补签退避的上限（60 分钟）：再长就接近「一天只补一次」，失去「一直补到签上」的意义。
+const MAKEUP_BACKOFF_CAP_MS: i64 = 60 * 60 * 1000;
+
+/// 第 `attempts` 次补签失败后，下一次补签要等多久。
 ///
-/// 时刻由 [`provider_retry_time`] 算（已含「窗口没开不补」这层：补签点一定晚于
-/// 主轮时刻）。这里不再单独判窗口 —— 那会让两处口径分叉。
+/// 指数退避：以条目的重试间隔为基数翻倍（10 → 20 → 40 → 60 分钟封顶）。
+/// 撞限流（如 Trae 的 9074）时密集重试只会让风控更严，退避是必需的；
+/// 60 分钟上限保证「一直补」不会退化成「一天只补一次」。
+pub fn makeup_backoff_ms(attempts: i64, gap_ms: i64) -> i64 {
+    let base = if gap_ms > 0 { gap_ms } else { 10 * 60 * 1000 };
+    // attempts 从 1 开始（「刚失败第 1 次」），退避也应该是**基数本身**：
+    // 1 → 10 分钟、2 → 20、3 → 40、4 起 60 封顶。
+    let shift = attempts.saturating_sub(1).clamp(0, 8) as u32;
+    base.saturating_mul(1i64 << shift)
+        .min(MAKEUP_BACKOFF_CAP_MS.max(base))
+}
+
+/// 今天这家是否已补签完成（签上 / 确认无需再补）。
+fn makeup_done(schedule: &Schedule, provider: &str, today: &str) -> bool {
+    fired_on(&schedule.last_retried_providers, provider, today)
+}
+
+/// 今天这家下一次补签的时刻（毫秒）；跨天或还没排过给 None。
+fn makeup_next_at(schedule: &Schedule, provider: &str, today: &str) -> Option<i64> {
+    (schedule.makeup_date == today)
+        .then(|| schedule.makeup_next_at.get(provider).copied())
+        .flatten()
+}
+
+/// 今天的补签轮该补哪些家。
+///
+/// ── 与改造前的区别（改之前先读）──────────────────────────────
+/// 以前是「每家每天补一次」：跑过就落 `lastRetriedProviders`，当天不再补。于是
+/// 一次上游限流（Trae 9074 这类）就把这家当天的机会用光了，用户看到的是「补签
+/// 几次后就停了」。现在改成**按指数退避反复补**，直到这家今天所有账号都签上：
+///   · 签上 → 记「今天完成」(`lastRetriedProviders`)，清掉退避；
+///   · 没签上 → `makeupNextAt` 顺延一个退避间隔，到点再来。
+/// 只有当天边界会终止（退避状态按 `makeupDate` 跨天作废）。
+///
+/// ── 起始时刻：**已经失败过的**不再等到区间结束 ──────────────
+/// 改造前补签点固定在「区间结束 + 间隔」，配成 07:01–17:30 就要等到 17:40 才补，
+/// 一天里失败了也只能干等 —— 这是「看起来停了」的另一半原因。现在：
+///   · 这家**有账号已经试过且没签上** → 立刻可补（受退避时刻约束）；
+///   · 否则（还有账号没到随机时刻）→ 沿用 `provider_retry_time` 的晚点，
+///     避免补签抢在区间随机化之前。
 pub fn retry_due_providers(
     schedule: &Schedule,
     now: DateTime<FixedOffset>,
     today: &str,
+    failed_providers: &[String],
 ) -> Vec<String> {
+    let now_ms = now.timestamp_millis();
     schedule
         .providers
         .iter()
         .filter(|provider| crate::server::core::plugin_host::serves_provider(provider))
-        .filter(|provider| !fired_on(&schedule.last_retried_providers, provider, today))
         .filter(|provider| main_fired(schedule, provider, today))
+        .filter(|provider| !makeup_done(schedule, provider, today))
         .filter(|provider| {
-            provider_retry_time(schedule, provider)
-                .is_some_and(|time| time_passed(&time, now))
+            // 有已失败账号的家立刻可补；其余仍等各自的补签点
+            failed_providers.iter().any(|item| item == *provider)
+                || provider_retry_time(schedule, provider)
+                    .is_some_and(|time| time_passed(&time, now))
         })
+        .filter(|provider| {
+            // 排了下次时刻就等它到点；没排过（今天第一次）立刻补
+            makeup_next_at(schedule, provider, today).is_none_or(|at| now_ms >= at)
+        })
+        .cloned()
+        .collect()
+}
+
+/// 今天**还在等补签**的家：主轮已跑、补签还没完成（含已排下次时刻的）。
+///
+/// 与 [`retry_due_providers`] 的差别只在「不看时刻」：那个是调度判据（到点才补），
+/// 这个是状态判据（还要不要补）。界面据此说「N 个平台等待补签」，否则补签轮
+/// 反复重试期间页面会显示「没有等待重试的账号」，与实际不符。
+pub fn makeup_pending_providers(schedule: &Schedule, today: &str) -> Vec<String> {
+    schedule
+        .providers
+        .iter()
+        .filter(|provider| crate::server::core::plugin_host::serves_provider(provider))
+        .filter(|provider| main_fired(schedule, provider, today))
+        .filter(|provider| !makeup_done(schedule, provider, today))
         .cloned()
         .collect()
 }
@@ -230,7 +295,8 @@ pub fn next_run_at(
 
 /// 补签轮的下一次时刻（毫秒）；补签关掉（`retryTime` 为空）给 None。
 ///
-/// 「还有得补」（某家今天没补过且窗口已过）→ 今天；否则顺延到明天。
+/// 「还有得补」的家按退避排下次时刻（已到点没跑 → 就是现在）；今天都已补完的
+/// 顺延到明天。与 [`retry_due_providers`] 同一份判据，界面「下次执行」才对得上。
 pub fn retry_next_at(
     schedule: &Schedule,
     now: DateTime<FixedOffset>,
@@ -239,7 +305,8 @@ pub fn retry_next_at(
     if schedule.retry_time.is_empty() {
         return None;
     }
-    // 逐家算补签点，取最近的那个「今天还没补过」的；都已补过就顺延到明天
+    let now_ms = now.timestamp_millis();
+    // 逐家算补签点，取最近的那个「今天还没补完」的；都已补完就顺延到明天
     let mut earliest: Option<i64> = None;
     for provider in &schedule.providers {
         if !crate::server::core::plugin_host::serves_provider(provider) { continue; }
@@ -249,13 +316,17 @@ pub fn retry_next_at(
         let Some(target) = today_at(&time, now) else {
             continue;
         };
-        let pending = !fired_on(&schedule.last_retried_providers, provider, today);
-        if pending && !main_fired(schedule, provider, today) && target <= now { continue; }
-        let next = if pending {
-            // 已到点还没补（等下一个 tick）→ 就是现在
-            if target > now { target.timestamp_millis() } else { now.timestamp_millis() }
-        } else {
+        if !main_fired(schedule, provider, today) {
+            // 主轮还没跑：补签不会抢在主轮前面，明天再算
+            continue;
+        }
+        let next = if makeup_done(schedule, provider, today) {
             (target + chrono::Duration::days(1)).timestamp_millis()
+        } else if target > now {
+            target.timestamp_millis()
+        } else {
+            // 已到补签点：按退避排的时刻与「现在」取较晚者
+            makeup_next_at(schedule, provider, today).map_or(now_ms, |at| at.max(now_ms))
         };
         earliest = Some(earliest.map_or(next, |current: i64| current.min(next)));
     }

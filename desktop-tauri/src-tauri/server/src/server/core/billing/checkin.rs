@@ -597,6 +597,30 @@ pub async fn run_checkin(
     run_checkin_selected(store, billing, providers, id, reason, source, None).await
 }
 
+/// 补签轮里**强制穿透插件日级锁**的提供商。
+///
+/// ── 为什么需要这张表（改之前先读）────────────────────────────
+/// Trae 插件（官方 0.1.1）失败后会把「本日不再自动重试」写进自己的状态，非
+/// `manual` 的调用直接返回缓存、**一次上游请求都不发**。于是网关再怎么补签，
+/// Trae 每天也只会真正尝试一次 —— 这正是「补签几次后就停了」的直接原因。
+///
+/// 传 `manual = true` 能绕过那道锁，但它在别的插件里语义更重：
+///   · CodeArts：绕过两道本地限流（`attempts >= 6` 与 10 分钟间隔），而它的
+///     签到是**写请求**（真正提交领取），无人值守下反复触发有风险；
+///   · WorkBuddy：绕过「本时段已完成巡检」的去重，会重复跑成长任务；
+///   · OfficeAce：绕过 30 分钟探测节流。
+/// 所以这张表**只放确实需要、且能承受反复重试的家**，不要顺手加别的。
+const FORCE_RETRY_PROVIDERS: [&str; 1] = ["trae"];
+
+/// 这一家在本轮要不要强制穿透插件侧的日级锁。
+///
+/// `force_retry` 由调用方给（补签轮为真）；只有名单内的家才会被提升成
+/// `manual = true`。手动签到的 `manual` 不受影响 —— 那是用户点击，本来就该穿透。
+fn manual_for(provider: &str, source: &str, force_retry: bool) -> bool {
+    matches!(source, "single" | "manual")
+        || (force_retry && FORCE_RETRY_PROVIDERS.contains(&provider))
+}
+
 pub(crate) async fn run_checkin_selected(
     store: &AccountStore,
     billing: &BillingService,
@@ -606,15 +630,30 @@ pub(crate) async fn run_checkin_selected(
     source: &str,
     selected: Option<&[String]>,
 ) -> Result<Value, CheckinError> {
+    run_checkin_scoped(store, billing, providers, id, reason, source, selected, false).await
+}
+
+/// [`run_checkin_selected`] 的完整形态：`force_retry` 让补签轮穿透名单内插件的日级锁。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_checkin_scoped(
+    store: &AccountStore,
+    billing: &BillingService,
+    providers: &[String],
+    id: Option<&str>,
+    reason: &str,
+    source: &str,
+    selected: Option<&[String]>,
+    force_retry: bool,
+) -> Result<Value, CheckinError> {
     let (mut targets, mut skipped) = resolve_checkin_targets(store, providers, id)?;
     if let Some(selected) = selected {
         targets.retain(|account| account.get("id").and_then(Value::as_str)
             .is_some_and(|id| selected.iter().any(|selected| selected == id)));
         skipped = selected.len().saturating_sub(targets.len());
     }
-    // 「这次是用户在面板上点的吗」——只有 CodeArts 用得上（它的福利是写请求，
-    // 有两道本地限流闸）。单账号 single 与批量 manual 都是点击触发；
-    // schedule / startup 是无人值守，必须受闸。见 `checkin_for` 的说明。
+    // 「这次是用户在面板上点的吗」——单账号 single 与批量 manual 都是点击触发；
+    // schedule / startup 是无人值守，必须受闸。补签轮另外给名单内的家穿透
+    // （见 [`FORCE_RETRY_PROVIDERS`]）。
     let manual = matches!(source, "single" | "manual");
     let mut results = Vec::with_capacity(targets.len());
     for account in &targets {
@@ -625,7 +664,8 @@ pub(crate) async fn run_checkin_selected(
             }, "error": Value::Null, "deferred": true }));
             continue;
         }
-        let row = checkin_for(store, billing, account, manual).await;
+        let account_manual = manual_for(provider_of(account), source, force_retry);
+        let row = checkin_for(store, billing, account, account_manual).await;
         // 落签到时间：手动单签与定时签到走的是**这一段**（两条链都调本函数），
         // 所以账号页的「已签到」在两种路径下都会亮起来，不需要各自记一次。
         // 写盘失败只记日志、不改签到结果 —— 上游那边积分已经领到了，

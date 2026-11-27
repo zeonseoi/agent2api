@@ -167,7 +167,8 @@ impl AutoCheckin {
                 self.fire_for(&reason, Some(&schedule.id), "schedule").await;
                 continue;
             }
-            let due = times::retry_due_providers(&schedule, now, &today);
+            let failed = retry::failed_providers(&self.store, &schedule);
+            let due = times::retry_due_providers(&schedule, now, &today, &failed);
             if !due.is_empty() {
                 let reason = format!("补签（{}）", checkin_schedules::display_label(&schedule));
                 // 来源用 makeup 而不是 schedule：记录页的「定时补签」筛选靠它

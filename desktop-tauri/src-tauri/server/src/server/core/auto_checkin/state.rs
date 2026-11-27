@@ -108,6 +108,11 @@ impl AutoCheckin {
                         schedule.last_result.as_ref(),
                         schedule.retry_limit,
                     ),
+                    // 今天还在等补签的家（主轮已跑、还没签上）——补签是反复重试，
+                    // 不报这个的话重试期间页面会显示「没有等待重试的账号」
+                    "makeupPendingProviders": times::makeup_pending_providers(schedule, &today),
+                    // 逐家的下次补签时刻（毫秒；没排过为 null），界面显示「约 N 分钟后再补」
+                    "makeupNextAt": schedule.makeup_next_at,
                     "lastResult": schedule.last_result,
                 })
             })
@@ -136,6 +141,9 @@ impl AutoCheckin {
             last_fired_date: None,
             last_fired_providers: std::collections::BTreeMap::new(),
             last_retried_providers: std::collections::BTreeMap::new(),
+            makeup_date: String::new(),
+            makeup_next_at: std::collections::BTreeMap::new(),
+            makeup_attempts: std::collections::BTreeMap::new(),
             account_plan: Default::default(),
             last_result: None,
         };

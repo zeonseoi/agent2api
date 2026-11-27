@@ -4,13 +4,19 @@
 //!   1. **等窗口重试**（本模块的 `due_accounts` / `merge`）：上一轮拿到「中性
 //!      未领取」的账号，等插件给出的 `retryAt`（或条目配置的间隔）到了再签一次。
 //!      它解决的是「窗口没开 / 上游一时没下发」，与「今天还没签过」无关。
-//!   2. **补签轮**（[`unsigned_accounts`]）：今天到点该签的账号里，`checkinAt`
-//!      不在今天的那些 —— 主轮因风控 / 网络抖动整批失败时，这一轮把它们捞回来。
+//!   2. **补签轮**（[`failed_accounts`] / [`failed_providers`]）：今天**已经试过
+//!      但没签上**的账号 —— 主轮因风控 / 网络抖动 / 限流失败时，这一轮反复补，
+//!      直到签上为止（退避在 `times::makeup_backoff_ms`）。
 //!
 //! ── 为什么补签轮不靠 retryAccounts ─────────────────────────
 //! `retryAccounts` 只记「上游说没活动」的账号；整批 429 / 网络失败的行是
 //! **failed**，不进那张表（见 `retry_at` 的前两条 return）。而补签轮要覆盖的
 //! 恰恰是这批 —— 判据只能是「今天签上了没有」这个账号级事实。
+//!
+//! ── 为什么只收「试过的」而不是「今天没签上的」────────────────
+//! 后者包含随机时刻还没到的账号；拿它当补签目标，补签会抢在随机时刻之前把账号
+//! 签掉，区间随机化就失效了。所以判据是 `accountPlan` 里 `attempted_at` 非空
+//! 且今天仍未签上。
 //!
 //! ── 间隔与次数可配 ──────────────────────────────────────────
 //! `RETRY_GAP_MS` 现在是缺省值；条目上的 `retryGapMinutes` / `retryLimit` 会覆盖
@@ -339,26 +345,60 @@ pub(super) fn exhausted_accounts(previous: Option<&Value>, limit: i64) -> Vec<St
         .collect()
 }
 
-/// **今天还没签上的账号 id**（补签轮的目标集合）。
+/// 今天**尝试过但没签上**的账号（补签轮的目标集合）。
 ///
-/// 判据是账号的 `checkinAt` 是否落在今天（北京时间）—— 与账号页「今日已签到」、
-/// 签到中心的 `checkedInToday` 同一份事实，所以三处永远不会给出矛盾结论。
-///
-/// 不看 `available` / `enabled`：那两个管的是转发，与签到无关（见
-/// `billing::checkin` 模块头「签到不看 enabled」）。真正该不该签由
-/// `resolve_checkin_targets` 的 `supports_checkin` 与范围过滤决定。
-pub(super) fn unsigned_accounts(store: &AccountStore) -> Vec<String> {
-    store
-        .list_accounts()
-        .get("accounts")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter(|account| !crate::server::core::account_store::checkin_state::checked_in_today(account))
-                .filter_map(|account| account.get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
+/// ── 为什么只收「试过的」（改之前先读）────────────────────────
+/// 「今天还没签上的所有账号」里包含**随机时刻还没到、一次都没跑过**的那些。
+/// 拿它当补签目标，补签会抢在账号的随机时刻之前把它签掉，区间随机化就失效了。
+/// 改造前补签点定在「区间结束」，所以碰不到这个问题；现在补签要提前到
+/// 「首次失败 + 间隔」，就必须只收 `attempted_at` 非空且今天仍未签上的账号。
+pub(super) fn failed_accounts(store: &AccountStore, schedule: &Schedule) -> Vec<String> {
+    let today = beijing::today_key();
+    if schedule.account_plan.date != today {
+        return Vec::new();
+    }
+    let snapshot = store.list_accounts();
+    let Some(items) = snapshot.get("accounts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let signed: std::collections::BTreeMap<&str, bool> = items
+        .iter()
+        .filter_map(|account| {
+            let id = account.get("id").and_then(Value::as_str)?;
+            Some((
+                id,
+                crate::server::core::account_store::checkin_state::checked_in_today(account),
+            ))
         })
-        .unwrap_or_default()
+        .collect();
+    schedule
+        .account_plan
+        .accounts
+        .iter()
+        .filter(|(_, planned)| planned.attempted_at.is_some())
+        .filter(|(_, planned)| schedule.providers.iter().any(|item| item == &planned.provider))
+        .filter(|(id, _)| signed.get(id.as_str()) == Some(&false))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// 今天还有「试过但没签上」账号的那几家（补签退避的判据）。
+///
+/// 与 [`failed_accounts`] 同一份口径，只是按家归并：补签轮结束后要知道哪几家
+/// 还要按退避再来一次。
+pub(super) fn failed_providers(store: &AccountStore, schedule: &Schedule) -> Vec<String> {
+    let today = beijing::today_key();
+    if schedule.account_plan.date != today {
+        return Vec::new();
+    }
+    let failed = failed_accounts(store, schedule);
+    schedule
+        .account_plan
+        .accounts
+        .iter()
+        .filter(|(id, _)| failed.iter().any(|item| item == *id))
+        .map(|(_, planned)| planned.provider.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }

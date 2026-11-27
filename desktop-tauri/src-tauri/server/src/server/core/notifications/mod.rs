@@ -654,13 +654,40 @@ pub fn notify_login_failure(method: &str, identity: &str, ip: &str, reason: &str
     spawn_dispatch(settings, "login_failure", title, body, data);
 }
 
+/// 今天已经推过的签到失败明细（`{日期}:{明细}`）—— 补签会反复重试同一批账号，
+/// 不去重的话每轮都推一条完全相同的通知。
+fn checkin_failure_seen(key: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let today = beijing::today_key();
+    let mut guard = match seen.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // 跨天作废：只保留今天的键，避免集合无限增长
+    guard.retain(|item| item.starts_with(&today));
+    guard.insert(key.to_string())
+}
+
 /// 自动签到失败通知（仅在 `source` 为 `schedule` / `makeup` / `startup` 时触发；手动签到绝不触发）。
+///
+/// ── 为什么要去重（改之前先读）────────────────────────────────
+/// 补签现在是「反复补到签上为止」，同一批账号可能连续多轮失败（Trae 9074 那类
+/// 限流）。每轮推一条完全相同的通知会把用户淹掉，也违背「通知 = 有事需要你看」
+/// 的初衷。所以按「当天 + 明细原文」去重：同一个错误当天只提醒一次，之后只在
+/// 日志里留痕。
 pub fn notify_checkin_failure(source: &str, reason: &str, failures: &[String]) {
     if !matches!(source, "schedule" | "makeup" | "startup") || failures.is_empty() {
         return;
     }
     let settings = NotificationSettings::current();
     if !settings.enabled || !settings.events.checkin_failure {
+        return;
+    }
+    let dedupe_key = format!("{}:{}", beijing::today_key(), failures.join("\u{1}"));
+    if checkin_failure_seen(&dedupe_key) {
+        logging::verbose("[Checkin]", "签到失败通知已推送过，本次跳过");
         return;
     }
     let source = source.to_string();

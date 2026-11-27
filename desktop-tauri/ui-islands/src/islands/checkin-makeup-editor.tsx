@@ -50,7 +50,8 @@ export function CheckinMakeupEditor({ entry, kind, options, defaultRetryTime, on
         <p className='ck-schedule-hint'>{t('对应签到计划：{name}', { name: scheduleName(entry) })}</p>
         <div className='ck-makeup-setting'>
           <div><h3>{isMakeup ? t('开启定时补签') : t('开启活动窗口重试')}</h3>
-            <p>{isMakeup ? t('每天补查一轮，只处理今天未签到的账号。') : t('仅处理窗口未开或活动暂未下发的账号，不对所有错误反复执行。')}</p>
+            <p>{isMakeup ? t('反复补签，直到今天所有账号都签上为止；退避间隔逐次翻倍，跨零点作废。')
+              : t('处理窗口未开、活动暂未下发，以及限流/繁忙这类暂时失败；鉴权失效与「账号不参与」不重试。')}</p>
           </div>
           <Switch checked={enabled} disabled={store.saving} onCheckedChange={next => {
             setEnabled(next === true)
@@ -87,7 +88,7 @@ export function CheckinMakeupEditor({ entry, kind, options, defaultRetryTime, on
         {isMakeup ? <p className='ck-schedule-hint'>{t('间隔填 0 会关闭活动窗口重试；定时补签仍至少等待 1 分钟，不会一起关闭。')}</p>
           : <>
             <p className='ck-schedule-hint'>{t('次数按账号每天单独计算：重试到上限的账号今天不再重试，明天自动重置。')}</p>
-            <p className='ck-schedule-hint'>{t('关闭活动窗口重试不会关闭定时补签。插件提供下次重试时刻时，以插件返回的时间为准。')}</p>
+            <p className='ck-schedule-hint'>{t('间隔是退避的起点，之后逐次翻倍（最多 60 分钟一次）。关闭活动窗口重试不会关闭定时补签。')}</p>
           </>}
       </DialogBody>
       <DialogFooter><Button size='sm' variant='outline' disabled={store.saving} onClick={onClose}>{t('取消')}</Button>

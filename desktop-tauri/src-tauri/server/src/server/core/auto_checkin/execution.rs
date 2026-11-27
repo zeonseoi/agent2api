@@ -83,7 +83,8 @@ impl AutoCheckin {
             if !master_enabled() || !current.enabled {
                 return None;
             }
-            let due = times::retry_due_providers(current, beijing::now(), &today);
+            let failed = retry::failed_providers(&self.store, current);
+            let due = times::retry_due_providers(current, beijing::now(), &today, &failed);
             providers.retain(|provider| due.contains(provider));
         }
         if providers.is_empty() {
@@ -100,10 +101,13 @@ impl AutoCheckin {
             return None;
         }
         let (mut selected, round) = if retry_round.is_some() {
-            (
-                Some(retry::unsigned_accounts(&self.store)),
-                retry::Round::Other,
-            )
+            // 只补「今天试过但没签上」的账号：还没到随机时刻的不能抢跑，
+            // 否则区间随机化失效（见 `retry::failed_accounts`）
+            let targets = schedule
+                .as_ref()
+                .map(|current| retry::failed_accounts(&self.store, current))
+                .unwrap_or_default();
+            (Some(targets), retry::Round::Other)
         } else if window_retry {
             (
                 retry::due_accounts_scoped(
@@ -131,13 +135,11 @@ impl AutoCheckin {
         if window_retry && selected.is_none() {
             return None;
         }
-        if let (Some(id), Some(_)) = (schedule_id, retry_round) {
-            checkin_schedules::mark_retried_providers(id, &fired_scope, &today);
-        }
         if selected.as_ref().is_some_and(Vec::is_empty) {
-            // 补签轮没有可补的账号：标记照落（今天这一轮算跑过了），免得每 30 秒
-            // 进来查一遍
-            if let (Some(_), Some(_)) = (schedule_id, retry_round) {
+            // 补签轮没有可补的账号 = 今天都签上了：逐家记「补签完成」，当天不再进
+            // 这条链（否则每 30 秒进来查一遍）
+            if let (Some(id), Some(_)) = (schedule_id, retry_round) {
+                checkin_schedules::mark_retried_providers(id, &providers, &today);
                 logging::log(
                     "[Checkin]",
                     &format!("补签轮无需执行（今天都已签到）：{reason}"),
@@ -171,7 +173,7 @@ impl AutoCheckin {
         }
         logging::log("[Checkin]", &format!("⏰ 定时签到开始（{reason}）"));
 
-        let outcome = match checkin::run_checkin_selected(
+        let outcome = match checkin::run_checkin_scoped(
             &self.store,
             &self.billing,
             providers.as_slice(),
@@ -179,6 +181,9 @@ impl AutoCheckin {
             reason,
             source,
             selected.as_deref(),
+            // 补签轮：名单内的家（Trae）要穿透插件侧的「本日不再重试」锁，
+            // 否则网关再怎么补，插件也一次上游请求都不发
+            retry_round.is_some(),
         )
         .await
         {
@@ -230,6 +235,28 @@ impl AutoCheckin {
         // 链按间隔补，不靠「主轮再来一遍」；否则一次上游抖动会把整条条目重签 N 次）
         if let Some(id) = schedule_id {
             checkin_schedules::account_plan::finish_providers(id, &fired_scope, &today);
+            // 补签轮按结果推进退避：签上的家当天收工，没签上的家顺延一个退避间隔。
+            // 判据是账号级事实（今天签上没有），不看本轮成功数 —— 本轮「失败 0 个」
+            // 也可能是中性未领取，那种情况本来就该继续补。
+            if retry_round.is_some() {
+                let pending = schedule
+                    .as_ref()
+                    .map(|current| retry::failed_providers(&self.store, current))
+                    .unwrap_or_default();
+                let done: Vec<String> = fired_scope
+                    .iter()
+                    .filter(|provider| !pending.iter().any(|item| item == *provider))
+                    .cloned()
+                    .collect();
+                checkin_schedules::mark_makeup_result(
+                    id,
+                    &fired_scope,
+                    &done,
+                    &today,
+                    logging::now_ms(),
+                    retry::gap_ms_of(schedule.as_ref()),
+                );
+            }
         }
         drop(guard);
         outcome

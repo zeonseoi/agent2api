@@ -72,8 +72,14 @@ pub struct Schedule {
     pub last_fired_date: Option<String>,
     /// 逐家的主轮完成日期（`{providerId: "YYYY-MM-DD"}`）
     pub last_fired_providers: BTreeMap<String, String>,
-    /// 逐家的补签轮完成日期
+    /// 逐家的补签轮**首次**执行日期（`{providerId: "YYYY-MM-DD"}`）
     pub last_retried_providers: BTreeMap<String, String>,
+    /// 补签退避状态属于哪一天（跨天作废，见 [`times::makeup_attempts`]）
+    pub makeup_date: String,
+    /// 逐家的下次补签时刻（毫秒）——签上即清，未签上按退避顺延
+    pub makeup_next_at: BTreeMap<String, i64>,
+    /// 逐家今天的补签轮次数（退避的指数）
+    pub makeup_attempts: BTreeMap<String, i64>,
     pub account_plan: account_plan::AccountPlan,
     pub last_result: Option<Value>,
 }
@@ -158,6 +164,13 @@ fn normalize_schedule_with(raw: &Value, known: &[String]) -> Schedule {
             .map(str::to_string),
         last_fired_providers: date_map(raw.get("lastFiredProviders")),
         last_retried_providers: date_map(raw.get("lastRetriedProviders")),
+        makeup_date: raw
+            .get("makeupDate")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        makeup_next_at: number_map(raw.get("makeupNextAt")),
+        makeup_attempts: number_map(raw.get("makeupAttempts")),
         account_plan: account_plan::AccountPlan::from_value(raw.get("accountPlan")),
         last_result: raw.get("lastResult").filter(|value| value.is_object()).cloned(),
     }
@@ -169,6 +182,20 @@ fn retry_number(raw: &Value, key: &str, default: i64, max: i64) -> i64 {
         .and_then(Value::as_i64)
         .unwrap_or(default)
         .clamp(0, max)
+}
+
+/// `{providerId: 数值}` 的归一化（只收非负数；负数/非法当 0）
+fn number_map(value: Option<&Value>) -> BTreeMap<String, i64> {
+    let mut map = BTreeMap::new();
+    let Some(object) = value.and_then(Value::as_object) else {
+        return map;
+    };
+    for (key, raw) in object {
+        if let Some(number) = raw.as_i64() {
+            map.insert(key.clone(), number.max(0));
+        }
+    }
+    map
 }
 
 /// `{providerId: "YYYY-MM-DD"}` 的归一化（只收非空字符串值）
@@ -262,6 +289,9 @@ fn to_value(schedule: &Schedule) -> Value {
         "lastFiredDate": schedule.last_fired_date,
         "lastFiredProviders": schedule.last_fired_providers,
         "lastRetriedProviders": schedule.last_retried_providers,
+        "makeupDate": schedule.makeup_date,
+        "makeupNextAt": schedule.makeup_next_at,
+        "makeupAttempts": schedule.makeup_attempts,
         "lastResult": schedule.last_result,
     })
 }
@@ -340,6 +370,12 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         .as_ref()
         .map(|old| (old.last_fired_providers.clone(), old.last_retried_providers.clone()))
         .unwrap_or_default();
+    // 补签退避状态同理：改时刻/改间隔不该把「今天已补到第几轮」清零，否则
+    // 用户每改一次配置就会重新从 10 分钟开始打一遍上游
+    let (makeup_date, makeup_next_at, makeup_attempts) = existing_entry
+        .as_ref()
+        .map(|old| (old.makeup_date.clone(), old.makeup_next_at.clone(), old.makeup_attempts.clone()))
+        .unwrap_or_default();
     // ── 逐家时刻 / 补签的写入口径 ──────────────────────────────
     // 三个字段都**只认 payload 里真的给了的键**：老界面（与 `configure` 那条兼容
     // 入口）只传 time/providers，不该把它们顺手重置成缺省值。
@@ -392,6 +428,9 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         last_fired_date,
         last_fired_providers,
         last_retried_providers,
+        makeup_date,
+        makeup_next_at,
+        makeup_attempts,
         account_plan: existing_entry.as_ref().map(|old| old.account_plan.clone()).unwrap_or_default(),
         last_result,
     };
@@ -415,6 +454,9 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
             schedule.last_fired_date = current.last_fired_date;
             schedule.last_fired_providers = current.last_fired_providers;
             schedule.last_retried_providers = current.last_retried_providers;
+            schedule.makeup_date = current.makeup_date;
+            schedule.makeup_next_at = current.makeup_next_at;
+            schedule.makeup_attempts = current.makeup_attempts;
             schedule.account_plan = current.account_plan;
             schedule.last_result = current.last_result;
         }
@@ -488,6 +530,54 @@ pub fn mark_retried_providers(id: &str, providers: &[String], date: &str) {
     });
 }
 
+/// 补签轮的结果：`done` 的家记「今天补完了」，其余家按退避排下一次。
+///
+/// ── 为什么补签要按家分别记账（改之前先读）──────────────────────
+/// 改造前补签是「每家每天一次」，跑完就落 `lastRetriedProviders`，一次限流就
+/// 用光了当天的机会。现在改成反复补，于是必须区分两种「跑过」：
+///   · **签上了**（`done`）：落 `lastRetriedProviders`，当天不再补；
+///   · **没签上**：只在 `makeupNextAt` 记下次时刻，`lastRetriedProviders` 不落 ——
+///     这样 [`times::retry_due_providers`] 到点还会再放它进来。
+///
+/// `gap_ms` 是条目的重试间隔（退避基数），`attempts` 由本函数自己递增，
+/// 调用方不必先查一次旧值。
+pub fn mark_makeup_result(
+    id: &str,
+    providers: &[String],
+    done: &[String],
+    date: &str,
+    now: i64,
+    gap_ms: i64,
+) {
+    if providers.is_empty() {
+        return;
+    }
+    patch_entry(id, |schedule| {
+        if schedule.makeup_date != date {
+            // 跨天：昨天的退避状态一律作废，今天从头开始
+            schedule.makeup_date = date.to_string();
+            schedule.makeup_next_at.clear();
+            schedule.makeup_attempts.clear();
+        }
+        for provider in providers {
+            if done.iter().any(|item| item == provider) {
+                schedule
+                    .last_retried_providers
+                    .insert(provider.clone(), date.to_string());
+                schedule.makeup_next_at.remove(provider);
+                schedule.makeup_attempts.remove(provider);
+                continue;
+            }
+            let attempts = schedule.makeup_attempts.get(provider).copied().unwrap_or(0) + 1;
+            schedule.makeup_attempts.insert(provider.clone(), attempts);
+            let wait = times::makeup_backoff_ms(attempts, gap_ms);
+            schedule
+                .makeup_next_at
+                .insert(provider.clone(), now.saturating_add(wait));
+        }
+    });
+}
+
 /// 条目级的上一轮结果：成功 / 失败分支各落一次（与 auto_checkin 的 lastResult
 /// 同构）；`None` = 清掉。
 pub fn mark_result(id: &str, result: Option<Value>) {
@@ -505,7 +595,10 @@ fn patch_entry<F: FnOnce(&mut Schedule)>(id: &str, apply: F) {
             let mut schedule = legacy_schedule_of(state);
             apply(&mut schedule);
             let value = to_value(&schedule);
-            for key in ["accountPlan", "lastFiredDate", "lastFiredProviders", "lastRetriedProviders", "lastResult"] {
+            for key in [
+                "accountPlan", "lastFiredDate", "lastFiredProviders", "lastRetriedProviders",
+                "makeupDate", "makeupNextAt", "makeupAttempts", "lastResult",
+            ] {
                 state.insert(key.to_string(), value[key].clone());
             }
             return;

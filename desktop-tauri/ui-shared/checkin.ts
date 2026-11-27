@@ -158,6 +158,10 @@ export type ScheduleEntry = {
    * 「今天不再重试」，否则数字归零看起来像「没事了」。
    */
   retryExhausted?: string[]
+  /** 今天还在等补签的家（主轮已跑、还没签上）——补签反复重试期间据此显示进度 */
+  makeupPendingProviders?: string[]
+  /** 逐家的下次补签时刻（毫秒；没排过为 null） */
+  makeupNextAt?: Record<string, number>
   nextRunAt: number | null
   lastResult: CheckinResult | null
 }
